@@ -220,18 +220,15 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 				status = "error"
 				return nil, fmt.Errorf("tool execution turn %d: %w", turn, err)
 			}
-		} else if llmResp.IsFinal {
-			// Final response
-			return &RunResult{
-				Output:  llmResp.Content,
-				History: history,
-				Cost:    l.calculateCost(llmResp.Usage, totalInputTokens, totalOutputTokens, totalCachedTokens),
-				Usage:   Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
-				Turns:   turn + 1,
-				Status:  status,
-			}, nil
 		} else {
-			// LLM returned content without final flag — treat as final
+			// Final response (with or without IsFinal flag)
+			// Trigger AfterCall hooks before returning
+			l.hooks.Trigger(ctx, HookAfterCall, &CallParams{
+				History:      history,
+				Turn:         turn,
+				MaxTurns:     l.maxTurns,
+				SystemPrompt: sysPrompt,
+			})
 			return &RunResult{
 				Output:  llmResp.Content,
 				History: history,
@@ -242,7 +239,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 			}, nil
 		}
 
-		// Trigger AfterCall hooks
+		// Trigger AfterCall hooks (for tool-call turns)
 		if err := l.hooks.Trigger(ctx, HookAfterCall, &CallParams{
 			History:      history,
 			Turn:         turn,
