@@ -1,0 +1,31 @@
+{{template "base.html" .}}
+{{define "content"}}
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+            <div style="color:#8b949e;font-size:11px;">Run</div>
+            <div style="font-size:14px;">{{printf "%.8s" .Run.ID}}...</div>
+        </div>
+        <span class="badge badge-{{.Run.Status}}">{{.Run.Status}}</span>
+    </div>
+    <div style="margin-top:8px;">
+        <div style="color:#8b949e;font-size:11px;">Input</div>
+        <div style="font-size:13px;">{{.Run.Input}}</div>
+    </div>
+</div>
+<div class="live-log" id="live-log"
+    hx-ext="sse"
+    sse-connect="/api/stream/{{.Run.ID}}"
+    sse-swap="step"
+    hx-swap="beforeend"
+    sse-close="done">
+</div>
+<div class="live-log" id="live-log-done"
+    hx-ext="sse"
+    sse-connect="/api/stream/{{.Run.ID}}"
+    sse-swap="done"
+    hx-target="#live-status">
+</div>
+<div id="live-status" style="margin-top:12px;"></div>
+<a href="/live" style="color:#58a6ff;font-size:13px;">&larr; Back to live</a>
+{{end}}

@@ -1,0 +1,14 @@
+{{template "base.html" .}}
+{{define "content"}}
+<div class="card">
+    <h2 style="font-size:16px;margin-bottom:12px;color:#8b949e;">Live Run</h2>
+    <form hx-post="/api/run" hx-target="#live-result" hx-swap="innerHTML" style="display:flex;gap:8px;">
+        <input type="text" name="input" placeholder="Enter prompt to run live..." required style="flex:1;">
+        <button type="submit">Run Live</button>
+    </form>
+    <div id="live-result" style="margin-top:12px;"></div>
+</div>
+<div class="live-log" id="live-log">
+    <div style="color:#8b949e;text-align:center;padding:24px 0;">Start a run to see live output</div>
+</div>
+{{end}}

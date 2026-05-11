@@ -1,0 +1,15 @@
+<div>
+{{if .Runs}}
+    {{range .Runs}}
+    <div class="run-row">
+        <div><a href="/runs/{{.ID}}" style="color:#58a6ff;text-decoration:none;">{{printf "%.60s" .Input}}</a></div>
+        <div><span class="badge badge-{{.Status}}">{{.Status}}</span></div>
+        <div>{{.Turns}}t</div>
+        <div class="cost">${{printf "%.5f" .TotalUSD}}</div>
+        <div style="color:#8b949e;">{{.Tokens}}tk</div>
+    </div>
+    {{end}}
+{{else}}
+    <div style="color:#8b949e;padding:24px 0;text-align:center;">No runs yet. Start one above.</div>
+{{end}}
+</div>
