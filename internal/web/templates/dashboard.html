@@ -1,23 +1,35 @@
 {{template "base.html" .}}
 {{define "content"}}
-<div class="stats">
-    <div class="stat"><div class="value">{{.Stats.TotalRuns}}</div><div class="label">Total Runs</div></div>
-    <div class="stat"><div class="value cost">${{printf "%.4f" .Stats.TotalCost}}</div><div class="label">Total Cost</div></div>
-    <div class="stat"><div class="value">{{.Stats.TotalTokens}}</div><div class="label">Tokens</div></div>
-    <div class="stat"><div class="value">{{printf "%.1f" .Stats.AvgTurns}}</div><div class="label">Avg Turns</div></div>
+<div class="stats-grid fade-in">
+    <div class="stat-card">
+        <div class="val accent">{{.Stats.TotalRuns}}</div>
+        <div class="lbl">Total Runs</div>
+    </div>
+    <div class="stat-card">
+        <div class="val green">${{printf "%.4f" .Stats.TotalCost}}</div>
+        <div class="lbl">Total Cost</div>
+    </div>
+    <div class="stat-card">
+        <div class="val">{{.Stats.TotalTokens}}</div>
+        <div class="lbl">Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="val">{{printf "%.1f" .Stats.AvgTurns}}</div>
+        <div class="lbl">Avg Turns</div>
+    </div>
 </div>
 
-<div class="card">
-    <h2 style="font-size:16px;margin-bottom:12px;color:#8b949e;">Quick Run</h2>
-    <form hx-post="/api/run" hx-target="#run-result" hx-swap="innerHTML" style="display:flex;gap:8px;">
-        <input type="text" name="input" placeholder="Enter prompt..." required style="flex:1;">
-        <button type="submit">Run</button>
+<div class="card fade-in">
+    <div class="section-title">New Run</div>
+    <form hx-post="/api/run" hx-target="#run-result" hx-swap="innerHTML" class="inline-form">
+        <input type="text" name="input" placeholder="What would you like the agent to do?" required>
+        <button type="submit">Run &rarr;</button>
     </form>
-    <div id="run-result" style="margin-top:12px;"></div>
+    <div id="run-result" style="margin-top:16px;"></div>
 </div>
 
-<div class="card">
-    <h2 style="font-size:16px;margin-bottom:12px;color:#8b949e;">Recent Runs</h2>
+<div class="card fade-in">
+    <div class="section-title">Recent Runs</div>
     <div hx-get="/runs" hx-trigger="every 5s" hx-headers='{"HX-Request": "true"}'>
         {{template "runs_list.html" .}}
     </div>
