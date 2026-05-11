@@ -80,7 +80,21 @@ func validateObject(schema map[string]any, input any, path string) error {
 		return fmt.Errorf("%sexpected object, got %T", path, input)
 	}
 
-	required, _ := schema["required"].([]string)
+	// Extract required fields (JSON unmarshals arrays as []interface{})
+	var required []string
+	if reqRaw, ok := schema["required"]; ok {
+		switch req := reqRaw.(type) {
+		case []interface{}:
+			for _, r := range req {
+				if s, ok := r.(string); ok {
+					required = append(required, s)
+				}
+			}
+		case []string:
+			required = req
+		}
+	}
+
 	props, _ := schema["properties"].(map[string]any)
 
 	// Check required fields
@@ -121,20 +135,28 @@ func validateString(schema map[string]any, input any, path string) error {
 		return fmt.Errorf("%sexpected string, got %T", path, input)
 	}
 
-	// Enum validation
+	// Enum validation (JSON unmarshals arrays as []interface{})
 	if enum, exists := schema["enum"]; exists {
-		if enumList, ok := enum.([]any); ok {
-			s := input.(string)
-			found := false
+		s := input.(string)
+		found := false
+		switch enumList := enum.(type) {
+		case []interface{}:
 			for _, ev := range enumList {
 				if es, ok := ev.(string); ok && es == s {
 					found = true
 					break
 				}
 			}
-			if !found {
-				return fmt.Errorf("%svalue %q not in allowed values", path, s)
+		case []string:
+			for _, es := range enumList {
+				if es == s {
+					found = true
+					break
+				}
 			}
+		}
+		if !found {
+			return fmt.Errorf("%svalue %q not in allowed values", path, s)
 		}
 	}
 
