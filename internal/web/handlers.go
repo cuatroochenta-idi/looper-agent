@@ -12,23 +12,24 @@ import (
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	runs := s.store.All()
 	data := map[string]any{
-		"Title": "Looper Agent - Dashboard",
 		"Runs":  runs,
 		"Stats": computeStats(runs),
 	}
-	s.templates.ExecuteTemplate(w, "dashboard.html", data)
+	if isHX(r) {
+		s.renderHX(w, "dashboard_content", data)
+	} else {
+		s.renderFull(w, "Looper Agent - Dashboard", "dashboard_content", data)
+	}
 }
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	runs := s.store.All()
-	if r.Header.Get("HX-Request") == "true" {
-		s.templates.ExecuteTemplate(w, "runs_list.html", map[string]any{"Runs": runs})
-		return
+	data := map[string]any{"Runs": runs}
+	if isHX(r) {
+		s.renderHX(w, "runs_content", data)
+	} else {
+		s.renderFull(w, "Looper Agent - Runs", "runs_content", data)
 	}
-	s.templates.ExecuteTemplate(w, "runs.html", map[string]any{
-		"Title": "Looper Agent - Runs",
-		"Runs":  runs,
-	})
 }
 
 func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
@@ -38,16 +39,21 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	s.templates.ExecuteTemplate(w, "run_detail.html", map[string]any{
-		"Title": fmt.Sprintf("Run %s", id),
-		"Run":   run,
-	})
+	data := map[string]any{"Run": run}
+	if isHX(r) {
+		s.renderHX(w, "run_detail_content", data)
+	} else {
+		s.renderFull(w, fmt.Sprintf("Run %s", id[:8]), "run_detail_content", data)
+	}
 }
 
 func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
-	s.templates.ExecuteTemplate(w, "live.html", map[string]any{
-		"Title": "Looper Agent - Live",
-	})
+	data := map[string]any{}
+	if isHX(r) {
+		s.renderHX(w, "live_content", data)
+	} else {
+		s.renderFull(w, "Looper Agent - Live", "live_content", data)
+	}
 }
 
 func (s *Server) handleLiveRun(w http.ResponseWriter, r *http.Request) {
@@ -57,10 +63,12 @@ func (s *Server) handleLiveRun(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	s.templates.ExecuteTemplate(w, "live_run.html", map[string]any{
-		"Title": fmt.Sprintf("Live Run %s", id[:8]),
-		"Run":   run,
-	})
+	data := map[string]any{"Run": run}
+	if isHX(r) {
+		s.renderHX(w, "live_run_content", data)
+	} else {
+		s.renderFull(w, fmt.Sprintf("Live Run %s", id[:8]), "live_run_content", data)
+	}
 }
 
 func (s *Server) handleAPIRun(w http.ResponseWriter, r *http.Request) {
@@ -79,16 +87,13 @@ func (s *Server) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 	}
 	s.store.Add(run)
 
-	// Kick off SSE streaming
 	s.sse.Send(id, SSEEvent{
 		Event: "status",
 		Data:  fmt.Sprintf(`{"id":"%s","status":"started","input":"%s"}`, id, input),
 	})
 
-	// Redirect to live view
 	w.Header().Set("HX-Redirect", "/live/"+id)
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `<div class="text-green-400">Run %s started</div>`, id[:8])
+	fmt.Fprintf(w, `<div style="padding:12px;background:var(--accent-light);border-radius:var(--radius-sm);color:var(--accent);font-weight:500;font-size:13px;">Run %s started &rarr;</div>`, id[:8])
 }
 
 func (s *Server) handleAPIRuns(w http.ResponseWriter, r *http.Request) {
@@ -104,17 +109,16 @@ func (s *Server) handleAPICosts(w http.ResponseWriter, r *http.Request) {
 		totalUSD += r.TotalUSD
 		totalTokens += r.Tokens
 	}
+	avg := 0.0
+	if len(runs) > 0 {
+		avg = totalUSD / float64(len(runs))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"total_runs":      len(runs),
 		"total_cost_usd":  totalUSD,
 		"total_tokens":    totalTokens,
-		"avg_cost_per_run": func() float64 {
-			if len(runs) == 0 {
-				return 0
-			}
-			return totalUSD / float64(len(runs))
-		}(),
+		"avg_cost_per_run": avg,
 	})
 }
 
@@ -128,22 +132,22 @@ func (s *Server) findRun(id string) *RunRecord {
 }
 
 type dashboardStats struct {
-	TotalRuns  int
-	TotalCost  float64
+	TotalRuns   int
+	TotalCost   float64
 	TotalTokens int
-	AvgTurns   float64
+	AvgTurns    float64
 }
 
 func computeStats(runs []*RunRecord) dashboardStats {
-	s := dashboardStats{TotalRuns: len(runs)}
+	st := dashboardStats{TotalRuns: len(runs)}
 	var totalTurns int
 	for _, r := range runs {
-		s.TotalCost += r.TotalUSD
-		s.TotalTokens += r.Tokens
+		st.TotalCost += r.TotalUSD
+		st.TotalTokens += r.Tokens
 		totalTurns += r.Turns
 	}
 	if len(runs) > 0 {
-		s.AvgTurns = float64(totalTurns) / float64(len(runs))
+		st.AvgTurns = float64(totalTurns) / float64(len(runs))
 	}
-	return s
+	return st
 }

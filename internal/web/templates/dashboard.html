@@ -1,24 +1,10 @@
-{{template "base.html" .}}
-{{define "content"}}
+{{define "dashboard_content"}}
 <div class="stats-grid fade-in">
-    <div class="stat-card">
-        <div class="val accent">{{.Stats.TotalRuns}}</div>
-        <div class="lbl">Total Runs</div>
-    </div>
-    <div class="stat-card">
-        <div class="val green">${{printf "%.4f" .Stats.TotalCost}}</div>
-        <div class="lbl">Total Cost</div>
-    </div>
-    <div class="stat-card">
-        <div class="val">{{.Stats.TotalTokens}}</div>
-        <div class="lbl">Tokens</div>
-    </div>
-    <div class="stat-card">
-        <div class="val">{{printf "%.1f" .Stats.AvgTurns}}</div>
-        <div class="lbl">Avg Turns</div>
-    </div>
+    <div class="stat-card"><div class="val accent">{{.Stats.TotalRuns}}</div><div class="lbl">Total Runs</div></div>
+    <div class="stat-card"><div class="val green">${{printf "%.4f" .Stats.TotalCost}}</div><div class="lbl">Total Cost</div></div>
+    <div class="stat-card"><div class="val">{{.Stats.TotalTokens}}</div><div class="lbl">Tokens</div></div>
+    <div class="stat-card"><div class="val">{{printf "%.1f" .Stats.AvgTurns}}</div><div class="lbl">Avg Turns</div></div>
 </div>
-
 <div class="card fade-in">
     <div class="section-title">New Run</div>
     <form hx-post="/api/run" hx-target="#run-result" hx-swap="innerHTML" class="inline-form">
@@ -27,11 +13,10 @@
     </form>
     <div id="run-result" style="margin-top:16px;"></div>
 </div>
-
 <div class="card fade-in">
     <div class="section-title">Recent Runs</div>
     <div hx-get="/runs" hx-trigger="every 5s" hx-headers='{"HX-Request": "true"}'>
-        {{template "runs_list.html" .}}
+        {{template "runs_list" .}}
     </div>
 </div>
 {{end}}
