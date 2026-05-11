@@ -1,0 +1,27 @@
+{{template "base.html" .}}
+{{define "content"}}
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <div>
+            <div style="color:#8b949e;font-size:11px;">Run ID</div>
+            <div style="font-size:13px;">{{.Run.ID}}</div>
+        </div>
+        <span class="badge badge-{{.Run.Status}}">{{.Run.Status}}</span>
+    </div>
+    <div style="margin-bottom:8px;">
+        <div style="color:#8b949e;font-size:11px;">Input</div>
+        <div style="font-size:13px;">{{.Run.Input}}</div>
+    </div>
+    <div style="margin-bottom:8px;">
+        <div style="color:#8b949e;font-size:11px;">Output</div>
+        <div style="font-size:13px;">{{.Run.Output}}</div>
+    </div>
+    <div class="stats" style="margin-top:16px;">
+        <div class="stat"><div class="value">{{.Run.Turns}}</div><div class="label">Turns</div></div>
+        <div class="stat"><div class="value cost">${{printf "%.5f" .Run.TotalUSD}}</div><div class="label">Cost</div></div>
+        <div class="stat"><div class="value">{{.Run.Tokens}}</div><div class="label">Tokens</div></div>
+        <div class="stat"><div class="value">—</div><div class="label">Latency</div></div>
+    </div>
+</div>
+<a href="/runs" style="color:#58a6ff;font-size:13px;">&larr; Back to runs</a>
+{{end}}
