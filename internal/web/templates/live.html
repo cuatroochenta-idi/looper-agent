@@ -1,14 +1,17 @@
 {{template "base.html" .}}
 {{define "content"}}
-<div class="card">
-    <h2 style="font-size:16px;margin-bottom:12px;color:#8b949e;">Live Run</h2>
-    <form hx-post="/api/run" hx-target="#live-result" hx-swap="innerHTML" style="display:flex;gap:8px;">
-        <input type="text" name="input" placeholder="Enter prompt to run live..." required style="flex:1;">
-        <button type="submit">Run Live</button>
+<div class="card fade-in">
+    <div class="section-title">Live Execution</div>
+    <form hx-post="/api/run" hx-target="#live-result" hx-swap="innerHTML" class="inline-form">
+        <input type="text" name="input" placeholder="Enter a prompt to watch the agent work in real-time..." required>
+        <button type="submit">Run Live &rarr;</button>
     </form>
-    <div id="live-result" style="margin-top:12px;"></div>
+    <div id="live-result" style="margin-top:16px;"></div>
 </div>
-<div class="live-log" id="live-log">
-    <div style="color:#8b949e;text-align:center;padding:24px 0;">Start a run to see live output</div>
+<div class="live-log fade-in" id="live-log">
+    <div class="empty-state">
+        <div class="icon">◉</div>
+        <p>Start a run to see the agent's thinking<br>in real-time with SSE streaming.</p>
+    </div>
 </div>
 {{end}}
