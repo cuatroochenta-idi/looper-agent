@@ -1,23 +1,16 @@
-{{template "base.html" .}}
-{{define "content"}}
+{{define "live_run_content"}}
 <div class="card fade-in">
     <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div>
-            <div class="section-title">Live Run</div>
-            <div style="font-size:12px;color:var(--text-muted);font-family:monospace;">{{printf "%.8s" .Run.ID}}...</div>
-        </div>
+        <div><div class="section-title">Live Run</div><div style="font-size:12px;color:var(--text-muted);font-family:monospace;">{{printf "%.8s" .Run.ID}}...</div></div>
         <span class="badge badge-{{.Run.Status}}"><span class="badge-dot"></span>{{.Run.Status}}</span>
     </div>
-    <div style="margin-top:12px;padding:14px 16px;background:var(--bg-input);border-radius:var(--radius-sm);font-size:13px;font-weight:500;">
-        {{.Run.Input}}
-    </div>
+    <div style="margin-top:12px;padding:14px 16px;background:var(--bg-input);border-radius:var(--radius-sm);font-size:13px;font-weight:500;">{{.Run.Input}}</div>
 </div>
 <div class="live-log" id="live-log"
     hx-ext="sse"
     sse-connect="/api/stream/{{.Run.ID}}"
     sse-swap="step"
-    hx-swap="beforeend">
-</div>
+    hx-swap="beforeend"></div>
 <div id="live-status" style="margin-top:12px;"></div>
-<a href="/live" style="display:inline-block;margin-top:12px;color:var(--text-muted);text-decoration:none;font-size:13px;font-weight:500;" class="btn-outline">&larr; Back to live</a>
+<a href="/live" hx-get="/live" hx-target="#main-content" hx-push-url="true" hx-swap="outerHTML" class="btn-outline" style="margin-top:12px;">&larr; Back to live</a>
 {{end}}

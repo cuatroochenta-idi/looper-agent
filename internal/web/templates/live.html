@@ -1,5 +1,4 @@
-{{template "base.html" .}}
-{{define "content"}}
+{{define "live_content"}}
 <div class="card fade-in">
     <div class="section-title">Live Execution</div>
     <form hx-post="/api/run" hx-target="#live-result" hx-swap="innerHTML" class="inline-form">
@@ -9,9 +8,6 @@
     <div id="live-result" style="margin-top:16px;"></div>
 </div>
 <div class="live-log fade-in" id="live-log">
-    <div class="empty-state">
-        <div class="icon">◉</div>
-        <p>Start a run to see the agent's thinking<br>in real-time with SSE streaming.</p>
-    </div>
+    <div class="empty-state"><div class="icon">◉</div><p>Start a run to see the agent's thinking<br>in real-time with SSE streaming.</p></div>
 </div>
 {{end}}

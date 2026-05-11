@@ -1,11 +1,7 @@
-{{template "base.html" .}}
-{{define "content"}}
+{{define "run_detail_content"}}
 <div class="card fade-in">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;">
-        <div>
-            <div class="section-title">Run Detail</div>
-            <div style="font-size:13px;color:var(--text-muted);font-family:monospace;">{{.Run.ID}}</div>
-        </div>
+        <div><div class="section-title">Run Detail</div><div style="font-size:13px;color:var(--text-muted);font-family:monospace;">{{.Run.ID}}</div></div>
         <span class="badge badge-{{.Run.Status}}"><span class="badge-dot"></span>{{.Run.Status}}</span>
     </div>
     <div class="card" style="background:var(--bg-input);box-shadow:none;margin-bottom:0;">
@@ -19,23 +15,11 @@
     </div>
     {{end}}
     <div class="detail-grid">
-        <div class="detail-item">
-            <div class="lbl">Turns</div>
-            <div class="val">{{.Run.Turns}}</div>
-        </div>
-        <div class="detail-item">
-            <div class="lbl">Cost</div>
-            <div class="val" style="color:var(--green);">${{printf "%.5f" .Run.TotalUSD}}</div>
-        </div>
-        <div class="detail-item">
-            <div class="lbl">Tokens</div>
-            <div class="val">{{.Run.Tokens}}</div>
-        </div>
-        <div class="detail-item">
-            <div class="lbl">Started</div>
-            <div class="val" style="font-size:13px;">{{.Run.StartedAt.Format "15:04:05"}}</div>
-        </div>
+        <div class="detail-item"><div class="lbl">Turns</div><div class="val">{{.Run.Turns}}</div></div>
+        <div class="detail-item"><div class="lbl">Cost</div><div class="val" style="color:var(--green);">${{printf "%.5f" .Run.TotalUSD}}</div></div>
+        <div class="detail-item"><div class="lbl">Tokens</div><div class="val">{{.Run.Tokens}}</div></div>
+        <div class="detail-item"><div class="lbl">Started</div><div class="val" style="font-size:13px;">{{.Run.StartedAt.Format "15:04:05"}}</div></div>
     </div>
 </div>
-<a href="/runs" style="display:inline-block;margin-top:12px;color:var(--text-muted);text-decoration:none;font-size:13px;font-weight:500;" class="btn-outline" class="btn">&larr; Back to runs</a>
+<a href="/runs" hx-get="/runs" hx-target="#main-content" hx-push-url="true" hx-swap="outerHTML" class="btn-outline" style="margin-top:12px;">&larr; Back to runs</a>
 {{end}}

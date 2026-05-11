@@ -1,6 +1,4 @@
 // Package web implements the Looper Agent web UI using html/template + htmx + SSE.
-// It provides a dashboard, run history, live run streaming, and API endpoints
-// for developer observability and debugging.
 package web
 
 import (
@@ -18,12 +16,11 @@ var templateFS embed.FS
 //go:embed static/*
 var staticFS embed.FS
 
-// RunRecord stores metadata about a completed or in-progress run.
 type RunRecord struct {
 	ID        string    `json:"id"`
 	Input     string    `json:"input"`
 	Output    string    `json:"output"`
-	Status    string    `json:"status"` // running, completed, error, cancelled
+	Status    string    `json:"status"`
 	Turns     int       `json:"turns"`
 	TotalUSD  float64   `json:"total_usd"`
 	Tokens    int       `json:"tokens"`
@@ -31,15 +28,12 @@ type RunRecord struct {
 	EndedAt   time.Time `json:"ended_at,omitempty"`
 }
 
-// Store is an in-memory store for run records.
 type Store struct {
 	mu   sync.RWMutex
 	runs []*RunRecord
 }
 
-func NewStore() *Store {
-	return &Store{runs: make([]*RunRecord, 0)}
-}
+func NewStore() *Store { return &Store{runs: make([]*RunRecord, 0)} }
 
 func (s *Store) Add(r *RunRecord) {
 	s.mu.Lock()
@@ -55,55 +49,60 @@ func (s *Store) All() []*RunRecord {
 	return cp
 }
 
-// Server is the HTTP server for the Looper web UI.
 type Server struct {
 	store     *Store
 	templates *template.Template
 	sse       *SSEManager
 }
 
-// NewServer creates a new web UI server.
 func NewServer() (*Server, error) {
 	tmpl, err := template.ParseFS(templateFS, "templates/*.html")
 	if err != nil {
 		return nil, err
 	}
-
-	return &Server{
-		store:     NewStore(),
-		templates: tmpl,
-		sse:       NewSSEManager(),
-	}, nil
+	return &Server{store: NewStore(), templates: tmpl, sse: NewSSEManager()}, nil
 }
 
-// Handler returns the HTTP handler for the web UI.
+func isHX(r *http.Request) bool { return r.Header.Get("HX-Request") == "true" }
+
+// renderFull renders the full page (base.html + content block).
+func (s *Server) renderFull(w http.ResponseWriter, title, contentTmpl string, data map[string]any) {
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["Title"] = title
+	data["ContentTemplate"] = contentTmpl
+	s.templates.ExecuteTemplate(w, "base.html", data)
+}
+
+// renderHX renders just the content fragment for htmx swap.
+func (s *Server) renderHX(w http.ResponseWriter, contentTmpl string, data map[string]any) {
+	if data == nil {
+		data = map[string]any{}
+	}
+	s.templates.ExecuteTemplate(w, contentTmpl, data)
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Pages
 	mux.HandleFunc("GET /", s.handleDashboard)
 	mux.HandleFunc("GET /runs", s.handleRuns)
 	mux.HandleFunc("GET /runs/{id}", s.handleRunDetail)
 	mux.HandleFunc("GET /live", s.handleLive)
 	mux.HandleFunc("GET /live/{id}", s.handleLiveRun)
 
-	// API
 	mux.HandleFunc("POST /api/run", s.handleAPIRun)
 	mux.HandleFunc("GET /api/runs", s.handleAPIRuns)
 	mux.HandleFunc("GET /api/costs", s.handleAPICosts)
 
-	// SSE
 	mux.HandleFunc("GET /api/stream/{id}", s.sse.HandleStream)
 
-	// Static
 	staticSub, _ := fs.Sub(staticFS, "static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
 
 	return mux
 }
 
-// Store returns the run store.
-func (s *Server) Store() *Store { return s.store }
-
-// SSEManager returns the SSE manager.
+func (s *Server) Store() *Store       { return s.store }
 func (s *Server) SSEManager() *SSEManager { return s.sse }

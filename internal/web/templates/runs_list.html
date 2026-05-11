@@ -1,22 +1,15 @@
-<div>
+{{define "runs_list"}}
 {{if .Runs}}
     {{range .Runs}}
     <div class="run-row fade-in">
-        <div><a href="/runs/{{.ID}}">{{printf "%.70s" .Input}}</a></div>
-        <div>
-            <span class="badge badge-{{.Status}}">
-                <span class="badge-dot"></span>{{.Status}}
-            </span>
-        </div>
+        <div><a href="/runs/{{.ID}}" hx-get="/runs/{{.ID}}" hx-target="#main-content" hx-push-url="true" hx-swap="outerHTML">{{printf "%.70s" .Input}}</a></div>
+        <div><span class="badge badge-{{.Status}}"><span class="badge-dot"></span>{{.Status}}</span></div>
         <div style="color:var(--text-muted);font-size:13px;">{{.Turns}}&thinsp;t</div>
         <div style="color:var(--green);font-weight:600;font-size:13px;">${{printf "%.4f" .TotalUSD}}</div>
         <div style="color:var(--text-muted);font-size:12px;">{{.Tokens}}&thinsp;tk</div>
     </div>
     {{end}}
 {{else}}
-    <div class="empty-state">
-        <div class="icon">⟡</div>
-        <p>No runs yet. Start one above.</p>
-    </div>
+    <div class="empty-state"><div class="icon">⟡</div><p>No runs yet. Start one above.</p></div>
 {{end}}
-</div>
+{{end}}
