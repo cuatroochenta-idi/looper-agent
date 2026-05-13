@@ -35,7 +35,8 @@ fmt.Println(res.Output, res.Cost.TotalUSD)
 14. [Telemetry & cost tracking](#telemetry--cost-tracking)
 15. [Concurrent sessions](#concurrent-sessions)
 16. [Examples](#examples)
-17. [Testing](#testing)
+17. [Debug CLI (`looper` command)](#debug-cli-looper-command)
+18. [Testing](#testing)
 
 ---
 
@@ -676,6 +677,147 @@ The `examples/` folder is a graduated tour:
 
 Run any of them with `go run ./examples/12_multimodal` (after sourcing
 `.env.local` with the required API keys).
+
+---
+
+## Debug CLI (`looper` command)
+
+A small CLI lives in `cmd/looper`. Build it once:
+
+```bash
+go build -o ./bin/looper ./cmd/looper
+./bin/looper version              # → looper version 0.1.0
+./bin/looper                      # prints usage
+```
+
+Three subcommands. Each one targets a different debugging surface — a
+live web UI for running agents, a child-process wrapper that tees
+traces into that UI, and an MCP debug server that exposes
+framework-level tools to MCP-aware clients (Claude Code, Cursor, Zed,
+…).
+
+### `looper serve` — live web UI + trace ingest
+
+```bash
+./bin/looper serve [--port 9090] [--store .looper] [-- <child-cmd> [args...]]
+```
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--port` | `9090` | HTTP port the dashboard binds to. |
+| `--store` | `.looper` | Directory where streamed runs are persisted (created if missing — gitignored by default). |
+| `-- <cmd ...>` | _(none)_ | Anything after `--` is launched as a child process inheriting stdio. Child auto-receives `LOOPER_TRACE_ENDPOINT`, `LOOPER_SESSION_ID`, and `LOOPER_DEBUG=true` so every step it emits streams into the panel. |
+
+Pattern A — UI only, drive the demo agent from the browser / curl:
+
+```bash
+./bin/looper serve --port 9090
+# open http://localhost:9090
+curl -s -X POST localhost:9090/api/run --data-urlencode 'input=hello'
+```
+
+Pattern B — wrap any Go program so its runs flow through the panel:
+
+```bash
+./bin/looper serve -- go run ./examples/05_hooks_lifecycle
+```
+
+The child's first `agent.Run` posts to the panel within ~150 ms of
+startup, and the dashboard renders the live step stream. When the
+child exits the panel stays alive (Ctrl-C to stop).
+
+**Routes exposed by the server**:
+
+| Route | What you get |
+|-------|--------------|
+| `GET  /`                       | Dashboard (totals, run history). |
+| `GET  /runs` / `GET /runs/{id}` | Run list / per-run detail. |
+| `GET  /partials/...`           | htmx fragments (sidebar, detail pane, dashboard). |
+| `GET  /sse/sidebar`            | SSE stream of new runs. |
+| `GET  /sse/runs/{id}`          | SSE stream of one run's live steps. |
+| `GET  /sse/dashboard`          | SSE stream of aggregate stats. |
+| `POST /api/run`                | Kick off the built-in demo agent with form field `input=...`. |
+| `GET  /api/runs` / `/api/costs` | JSON snapshots for external dashboards. |
+| `POST /ingest`                 | Where the agent's `LOOPER_TRACE_ENDPOINT` posts. This is the contract: any external agent pointing at this URL shows up in the panel. |
+
+**Demo provider** (used by `POST /api/run`) is picked by env:
+
+```bash
+LOOPER_PROVIDER=openai   ./bin/looper serve   # default, needs OPENAI_API_KEY
+LOOPER_PROVIDER=anthropic ./bin/looper serve  # needs ANTHROPIC_API_KEY
+LOOPER_PROVIDER=google   ./bin/looper serve   # needs GOOGLE_API_KEY or GEMINI_API_KEY
+```
+
+### `looper mcp` — MCP debug server over stdio
+
+```bash
+./bin/looper mcp
+```
+
+JSON-RPC over stdio, ready to be wired into any MCP-aware client:
+
+```jsonc
+// tools/list response
+{ "tools": [
+  { "name": "looper_run",          "description": "Launch a Looper Agent execution" },
+  { "name": "looper_analyze_trace", "description": "Analyze a Looper Agent trace for issues" },
+  { "name": "looper_replay",       "description": "Re-run a Looper Agent execution with changes" },
+  { "name": "looper_list_history", "description": "List conversation history for a run" }
+]}
+// resources/list response
+{ "resources": [
+  { "uri": "looper://runs",  "name": "Recent runs",  "mimeType": "application/json" },
+  { "uri": "looper://costs", "name": "Cost summary", "mimeType": "application/json" }
+]}
+```
+
+Quick smoke test from the shell:
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  | ./bin/looper mcp
+```
+
+For Claude Code / Cursor / Zed: add `looper mcp` as an MCP server in
+your client config — its tools + resources become available alongside
+your other MCP integrations.
+
+### `looper run` — wrapped debug runner
+
+> ⚠ Placeholder. The command parses arguments but prints
+> `(Debug runner not yet implemented)`. Use `looper serve -- <cmd>`
+> instead for the wrap-and-trace flow.
+
+### Environment variables consumed by the CLI
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `LOOPER_PROVIDER` | `openai` | Picks the demo provider for `serve`. |
+| `LOOPER_OTEL_ENABLED` | `false` | Master switch for OpenTelemetry. |
+| `LOOPER_OTEL_ENDPOINT` | `localhost:4317` | OTLP/gRPC endpoint. |
+| `LOOPER_OTEL_INSECURE` | `true` | Disable TLS for local collectors. |
+| `LOOPER_OTEL_VERBOSE` | `false` | Include full prompt / completion text in spans (dev only). |
+| `LOOPER_DEBUG` | `false` | Free-form debug toggle the framework hooks read on startup. |
+| `LOOPER_TRACE_ENDPOINT` | _(unset)_ | When set on a child process by `serve`, the framework's tracer posts every Step here. |
+| `LOOPER_SESSION_ID` | _(uuid)_ | Groups multiple runs under one session in the panel sidebar. |
+
+### Wiring an external OTel collector
+
+The panel and OTel are independent — you can run both. The framework's
+`telemetry` package emits spans for every loop turn, every LLM call,
+every tool execution:
+
+```bash
+# Local Jaeger all-in-one with OTLP enabled
+docker run --rm -p 4317:4317 -p 16686:16686 \
+  -e COLLECTOR_OTLP_ENABLED=true \
+  jaegertracing/all-in-one:latest
+
+LOOPER_OTEL_ENABLED=true ./bin/looper serve -- go run ./examples/05_hooks_lifecycle
+# Jaeger UI → http://localhost:16686
+```
 
 ---
 
