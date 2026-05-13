@@ -32,6 +32,12 @@ const (
 
 // PauseRequest is sent to the external actor when a pause point is hit.
 type PauseRequest struct {
+	// RequestID uniquely identifies this pause across concurrent runs on
+	// the same PauseManager. The framework sets it to the originating tool
+	// call ID. Callers may leave it empty for single-session use; Resume
+	// without a RequestID then falls back to "any pending pause".
+	RequestID string
+
 	// Type identifies what kind of interaction is needed.
 	Type PausePointType
 
@@ -47,6 +53,11 @@ type PauseRequest struct {
 
 // PauseResponse is the external actor's answer to a pause request.
 type PauseResponse struct {
+	// RequestID identifies which pending Pause this response targets.
+	// Required when multiple runs may pause concurrently on the same
+	// manager; ignored when there is only one pending pause.
+	RequestID string
+
 	// Action is the actor's decision: "ok", "cancel", or "data".
 	Action string
 
@@ -54,11 +65,18 @@ type PauseResponse struct {
 	Data any
 }
 
-// PauseManager manages pause points and state serialization.
+// PauseManager manages pause points and routes Resume calls back to the
+// goroutine that issued each Pause. Safe for concurrent use: every Pause
+// allocates its own response channel keyed by RequestID, so two runs
+// pausing simultaneously can't steal each other's Resume.
+//
+// Callers without a RequestID get a legacy fallback channel — preserved
+// so existing single-session examples don't break.
 type PauseManager struct {
 	mu          sync.RWMutex
 	pausePoints map[string]PausePointConfig // keyed by tool name
-	respCh      chan *PauseResponse
+	pending     map[string]chan *PauseResponse
+	legacyCh    chan *PauseResponse
 	cancelCh    chan struct{}
 }
 
@@ -73,7 +91,7 @@ type PausePointConfig struct {
 func NewPauseManager() *PauseManager {
 	return &PauseManager{
 		pausePoints: make(map[string]PausePointConfig),
-		respCh:      make(chan *PauseResponse, 1),
+		pending:     make(map[string]chan *PauseResponse),
 		cancelCh:    make(chan struct{}),
 	}
 }
@@ -97,7 +115,11 @@ func (pm *PauseManager) HasPausePoint(toolName string) (PausePointConfig, bool) 
 	return cfg, ok
 }
 
-// Pause interrupts execution and waits for an external response.
+// Pause interrupts execution and waits for an external response. Each
+// Pause allocates a private channel keyed by req.RequestID so concurrent
+// pauses on the same manager can't cross-contaminate. If RequestID is
+// empty the call uses a single shared legacy channel for backward compat
+// with single-session callers.
 func (pm *PauseManager) Pause(ctx context.Context, req PauseRequest) (*PauseResponse, error) {
 	timeout := req.Timeout
 	if timeout == 0 {
@@ -107,8 +129,27 @@ func (pm *PauseManager) Pause(ctx context.Context, req PauseRequest) (*PauseResp
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	ch := make(chan *PauseResponse, 1)
+	pm.mu.Lock()
+	if req.RequestID != "" {
+		pm.pending[req.RequestID] = ch
+	} else {
+		pm.legacyCh = ch
+	}
+	pm.mu.Unlock()
+
+	defer func() {
+		pm.mu.Lock()
+		if req.RequestID != "" {
+			delete(pm.pending, req.RequestID)
+		} else if pm.legacyCh == ch {
+			pm.legacyCh = nil
+		}
+		pm.mu.Unlock()
+	}()
+
 	select {
-	case resp := <-pm.respCh:
+	case resp := <-ch:
 		return resp, nil
 	case <-ctx.Done():
 		return &PauseResponse{Action: "cancel"}, fmt.Errorf("pause timed out")
@@ -117,14 +158,42 @@ func (pm *PauseManager) Pause(ctx context.Context, req PauseRequest) (*PauseResp
 	}
 }
 
-// Resume sends a response to a waiting Pause call.
+// Resume sends a response to the waiting Pause call. When resp.RequestID
+// matches a pending pause the response is routed there; otherwise (legacy
+// callers) it goes to the single most recent pause that did not set a
+// RequestID. Returns an error when no matching pause is waiting.
 func (pm *PauseManager) Resume(resp *PauseResponse) error {
+	if resp == nil {
+		return fmt.Errorf("resume: nil response")
+	}
+	pm.mu.RLock()
+	ch, ok := pm.pending[resp.RequestID]
+	if !ok {
+		ch = pm.legacyCh
+	}
+	pm.mu.RUnlock()
+	if ch == nil {
+		return fmt.Errorf("no pending pause for request %q", resp.RequestID)
+	}
 	select {
-	case pm.respCh <- resp:
+	case ch <- resp:
 		return nil
 	default:
-		return fmt.Errorf("no pending pause to resume")
+		return fmt.Errorf("pause channel full for request %q", resp.RequestID)
 	}
+}
+
+// PendingCount returns the number of Pause calls currently waiting for a
+// Resume. Used by tests + dashboards to observe how many sessions are
+// blocked on user approval.
+func (pm *PauseManager) PendingCount() int {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	n := len(pm.pending)
+	if pm.legacyCh != nil {
+		n++
+	}
+	return n
 }
 
 // Serialize captures the current pause and run state for persistence.

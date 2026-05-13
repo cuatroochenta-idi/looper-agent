@@ -26,6 +26,14 @@ type Provider struct {
 	translator  *Translator
 	maxTokens   int
 	temperature float64
+
+	// Default thinking config. budget=0 means "disable thinking by
+	// default"; -1 means "model-default thinking budget" (Gemini accepts
+	// a missing field as auto on supported models, so we leave it out
+	// when budget is zero).
+	defaultThinkingBudget int32
+	defaultIncludeThoughts bool
+	includeReasoning      bool
 }
 
 // Option configures a Google Provider.
@@ -42,6 +50,12 @@ func WithCacheTTL(ttl string) Option {
 }
 
 // WithMaxTokens sets the default max output tokens.
+//
+// Caveat for thinking-capable Gemini models (2.5+ flash, pro): the token
+// budget covers both hidden reasoning AND visible text. A tight cap
+// (e.g. 50) often returns empty visible output because reasoning consumed
+// the budget first. For tight caps, also pass WithThinkingBudget(0) to
+// disable hidden reasoning, or raise this limit to 256+ to leave room.
 func WithMaxTokens(n int) Option {
 	return func(p *Provider) { p.maxTokens = n }
 }
@@ -49,6 +63,72 @@ func WithMaxTokens(n int) Option {
 // WithTemperature sets the default temperature.
 func WithTemperature(t float64) Option {
 	return func(p *Provider) { p.temperature = t }
+}
+
+// WithThinkingBudget enables Gemini thinking with the given token budget.
+// 0 disables. Negative values are clamped to 0.
+func WithThinkingBudget(budget int) Option {
+	return func(p *Provider) {
+		if budget < 0 {
+			budget = 0
+		}
+		p.defaultThinkingBudget = int32(budget)
+	}
+}
+
+// WithIncludeThoughts toggles the API-level includeThoughts flag. Even
+// when this is true, downstream consumers only see reasoning chunks if
+// WithIncludeReasoning is also true (or the request's
+// ReasoningConfig.IncludeInOutput is true).
+func WithIncludeThoughts(include bool) Option {
+	return func(p *Provider) { p.defaultIncludeThoughts = include }
+}
+
+// WithIncludeReasoning controls whether thought parts are forwarded as
+// StreamChunk.Reasoning / LLMResponse.Reasoning.
+func WithIncludeReasoning(b bool) Option {
+	return func(p *Provider) { p.includeReasoning = b }
+}
+
+// effortToBudget maps a tiered effort to a Gemini token budget. Numbers
+// chosen to roughly match Anthropic's tiers — exact values don't matter
+// for portability since each provider scales them differently anyway.
+func effortToBudget(e provider.ReasoningEffort) int32 {
+	switch e {
+	case provider.ReasoningEffortMinimal:
+		return 256
+	case provider.ReasoningEffortLow:
+		return 1024
+	case provider.ReasoningEffortMedium:
+		return 4096
+	case provider.ReasoningEffortHigh:
+		return 16384
+	}
+	return 0
+}
+
+func (p *Provider) resolveThinking(rc *provider.ReasoningConfig) (budget int32, include bool, on bool) {
+	if rc == nil {
+		if p.defaultThinkingBudget > 0 {
+			return p.defaultThinkingBudget, p.defaultIncludeThoughts, true
+		}
+		return 0, false, false
+	}
+	b := int32(rc.BudgetTokens)
+	if b <= 0 {
+		b = effortToBudget(rc.Effort)
+	}
+	if b <= 0 {
+		return 0, false, false
+	}
+	return b, rc.IncludeInOutput, true
+}
+
+func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
+	if rc != nil {
+		return rc.IncludeInOutput
+	}
+	return p.includeReasoning
 }
 
 // NewProvider creates a Google GenAI provider.
@@ -97,13 +177,49 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 		t := float32(req.Temperature)
 		config.Temperature = &t
 	}
+	if budget, include, on := p.resolveThinking(req.Reasoning); on {
+		b := budget
+		config.ThinkingConfig = &genai.ThinkingConfig{
+			IncludeThoughts: include,
+			ThinkingBudget:  &b,
+		}
+	}
+	if tc := buildToolConfig(req.ToolChoice); tc != nil && len(req.Tools) > 0 {
+		config.ToolConfig = tc
+	}
+	if err := applyResponseSchema(req.ResponseSchema, config); err != nil {
+		return nil, fmt.Errorf("google: %w", err)
+	}
 
 	resp, err := p.client.Models.GenerateContent(ctx, req.Model, contents, config)
 	if err != nil {
 		return nil, fmt.Errorf("google generate: %w", err)
 	}
 
-	return p.translator.FromNative(resp)
+	out, err := p.translator.FromNative(resp)
+	if err != nil {
+		return nil, err
+	}
+	if p.shouldIncludeReasoning(req.Reasoning) {
+		out.Reasoning = extractThoughts(resp)
+	}
+	return out, nil
+}
+
+// extractThoughts concatenates parts marked thought=true across the first
+// candidate. Returns "" when no thoughts were emitted (e.g. budget=0 or
+// model didn't think).
+func extractThoughts(resp *genai.GenerateContentResponse) string {
+	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
+		return ""
+	}
+	var b string
+	for _, part := range resp.Candidates[0].Content.Parts {
+		if part.Thought && part.Text != "" {
+			b += part.Text
+		}
+	}
+	return b
 }
 
 // ChatStream sends a streaming request.
@@ -122,13 +238,27 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		t := float32(req.Temperature)
 		config.Temperature = &t
 	}
+	if budget, include, on := p.resolveThinking(req.Reasoning); on {
+		b := budget
+		config.ThinkingConfig = &genai.ThinkingConfig{
+			IncludeThoughts: include,
+			ThinkingBudget:  &b,
+		}
+	}
+	if tc := buildToolConfig(req.ToolChoice); tc != nil && len(req.Tools) > 0 {
+		config.ToolConfig = tc
+	}
+	if err := applyResponseSchema(req.ResponseSchema, config); err != nil {
+		return nil, fmt.Errorf("google: %w", err)
+	}
 
+	includeReasoning := p.shouldIncludeReasoning(req.Reasoning)
 	seq := p.client.Models.GenerateContentStream(ctx, model, contents, config)
 	ch := make(chan provider.StreamChunk, 64)
 
 	go func() {
 		defer close(ch)
-		processStream(seq, ch)
+		processStream(seq, ch, includeReasoning)
 	}()
 
 	return ch, nil
@@ -138,61 +268,85 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 func (p *Provider) Translator() provider.Translator { return p.translator }
 
 // processStream consumes the GenAI stream iterator and emits StreamChunks.
-func processStream(seq iter.Seq2[*genai.GenerateContentResponse, error], ch chan<- provider.StreamChunk) {
-	var contentBuilder string
+// includeReasoning controls whether parts with Thought=true are surfaced
+// on StreamChunk.Reasoning. When false, they're silently dropped.
+// processStream consumes Gemini's streaming response iterator and turns it
+// into provider.StreamChunk events on ch. Invariants:
+//
+//   - Text parts are forwarded as Content deltas (or Reasoning deltas when
+//     part.Thought and includeReasoning are both true). Thought parts with
+//     reasoning disabled fall through to Content so thinking-capable models
+//     don't drop their visible answer on the floor.
+//   - Tool calls (Part.FunctionCall) are accumulated and emitted on the
+//     final chunk only — the agent loop only processes ToolCalls when the
+//     chunk is marked IsFinal=true.
+//   - UsageMetadata appears on every streamed response in practice, so the
+//     latest value wins instead of triggering an early return.
+//   - Exactly one IsFinal=true chunk is emitted, after the iterator closes
+//     or as soon as a candidate carries a non-empty FinishReason.
+//
+// The earlier implementation short-circuited on first UsageMetadata sight
+// and used a malformed boolean for IsFinal, dropping the FinishReason=STOP
+// signal and the model's full response with it.
+func processStream(seq iter.Seq2[*genai.GenerateContentResponse, error], ch chan<- provider.StreamChunk, includeReasoning bool) {
+	var (
+		contentBuilder string
+		toolCalls      []message.ToolCall
+		usage          *provider.Usage
+	)
 
 	for resp, err := range seq {
 		if err != nil {
 			ch <- provider.StreamChunk{Error: err}
 			return
 		}
-		if resp == nil || len(resp.Candidates) == 0 {
+		if resp == nil {
+			continue
+		}
+		if resp.UsageMetadata != nil {
+			usage = &provider.Usage{
+				InputTokens:  int(resp.UsageMetadata.PromptTokenCount),
+				OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount),
+				CachedTokens: int(resp.UsageMetadata.CachedContentTokenCount),
+			}
+		}
+		if len(resp.Candidates) == 0 {
 			continue
 		}
 		candidate := resp.Candidates[0]
-		if candidate.Content == nil {
-			continue
-		}
-
-		for _, part := range candidate.Content.Parts {
-			if part.Text != "" {
-				contentBuilder += part.Text
-				ch <- provider.StreamChunk{Content: part.Text}
-			}
-			if part.FunctionCall != nil {
-				// Accumulated tool call — emit at end with full content
-				argsJSON, _ := json.Marshal(part.FunctionCall.Args)
-				ch <- provider.StreamChunk{
-					Content: contentBuilder,
-					ToolCalls: []message.ToolCall{{
+		if candidate.Content != nil {
+			for _, part := range candidate.Content.Parts {
+				if part.Text != "" {
+					if part.Thought && includeReasoning {
+						ch <- provider.StreamChunk{Reasoning: part.Text}
+						continue
+					}
+					// Either it's plain content, or it's a thought with
+					// reasoning disabled — treat both as content so the
+					// loop accumulates them and the answer survives.
+					contentBuilder += part.Text
+					ch <- provider.StreamChunk{Content: part.Text}
+				}
+				if part.FunctionCall != nil {
+					argsJSON, _ := json.Marshal(part.FunctionCall.Args)
+					toolCalls = append(toolCalls, message.ToolCall{
 						ID:        part.FunctionCall.ID,
 						Name:      part.FunctionCall.Name,
 						Arguments: argsJSON,
-					}},
+					})
 				}
 			}
 		}
-
-		// Check for usage in last response
-		if resp.UsageMetadata != nil {
-			ch <- provider.StreamChunk{
-				Content: contentBuilder,
-				IsFinal: candidate.FinishReason != "" &&
-					candidate.FinishReason != "STOP" || candidate.FinishReason == "STOP",
-				Usage: &provider.Usage{
-					InputTokens:  int(resp.UsageMetadata.PromptTokenCount),
-					OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount),
-					CachedTokens: int(resp.UsageMetadata.CachedContentTokenCount),
-				},
-			}
-			return
+		if candidate.FinishReason != "" {
+			break
 		}
 	}
 
-	// Final fallback
 	ch <- provider.StreamChunk{
-		Content: contentBuilder,
-		IsFinal: true,
+		Content:   contentBuilder,
+		ToolCalls: toolCalls,
+		Usage:     usage,
+		IsFinal:   true,
 	}
 }
 
@@ -230,7 +384,7 @@ func (t *Translator) buildRequest(systemPrompt string, messages []message.Messag
 		case message.MessageUser:
 			content = &genai.Content{
 				Role:  "user",
-				Parts: []*genai.Part{{Text: msg.Content}},
+				Parts: buildUserParts(msg),
 			}
 		case message.MessageAssistant:
 			var parts []*genai.Part
@@ -352,6 +506,43 @@ func (t *Translator) FromNative(response any) (*provider.LLMResponse, error) {
 	}
 
 	return result, nil
+}
+
+// buildUserParts maps a universal user message to a slice of genai.Parts.
+// Pure-text messages produce a single text Part (matching legacy behavior).
+// Multi-modal messages emit InlineData for ImagePart / FilePart and FileData
+// for ImageURLPart — the latter assumes the Gemini model can fetch the URL
+// (Files API upload happens client-side, outside the framework).
+func buildUserParts(msg message.Message) []*genai.Part {
+	if len(msg.Parts) == 0 {
+		return []*genai.Part{{Text: msg.Content}}
+	}
+	parts := make([]*genai.Part, 0, len(msg.Parts))
+	for _, p := range msg.Parts {
+		switch p.Type {
+		case message.PartText:
+			if p.Text != "" {
+				parts = append(parts, &genai.Part{Text: p.Text})
+			}
+		case message.PartImageURL:
+			parts = append(parts, &genai.Part{
+				FileData: &genai.FileData{FileURI: p.URL, MIMEType: p.MimeType},
+			})
+		case message.PartImage, message.PartAudio:
+			parts = append(parts, &genai.Part{
+				InlineData: &genai.Blob{Data: p.Data, MIMEType: p.MimeType},
+			})
+		case message.PartFile:
+			parts = append(parts, &genai.Part{
+				InlineData: &genai.Blob{Data: p.Data, MIMEType: p.MimeType, DisplayName: p.Name},
+			})
+		}
+	}
+	if len(parts) == 0 {
+		// Gemini rejects empty Contents; emit a placeholder text Part.
+		parts = append(parts, &genai.Part{Text: ""})
+	}
+	return parts
 }
 
 // parseJSONToMap parses raw JSON message arguments into a map.

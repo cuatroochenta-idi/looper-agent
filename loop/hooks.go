@@ -54,9 +54,15 @@ type CallParams struct {
 type Hook func(ctx context.Context, params *CallParams) error
 
 // HookManager stores and triggers hooks in registration order.
+//
+// Two registries live side by side: the legacy CallParams-shaped hooks
+// (BeforeCall, AfterCall, OnCancel, BeforeFinalResponse, AfterFinalResponse)
+// and the BeforeToolExecution hooks that need a different payload shape
+// (ToolExecutionParams with Cancel / Replace methods).
 type HookManager struct {
-	mu    sync.RWMutex
-	hooks map[HookType][]Hook
+	mu            sync.RWMutex
+	hooks         map[HookType][]Hook
+	toolCallHooks []ToolCallHook
 }
 
 // NewHookManager creates an empty hook manager.

@@ -6,7 +6,13 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 )
+
+// timeType is captured once so typeToSchema can fast-path time.Time instead
+// of walking it as a struct (which would expose unexported wall/ext/loc fields
+// to the LLM as garbage properties).
+var timeType = reflect.TypeFor[time.Time]()
 
 // GenerateSchema generates a JSON Schema from a Go struct value.
 // It reads jsonschema struct tags to produce descriptions, enums,
@@ -28,10 +34,13 @@ func GenerateSchema(v any) (json.RawMessage, error) {
 }
 
 // generateStructSchema builds a JSON Schema object from a Go struct type.
+// Emits "additionalProperties": false on every object schema so OpenAI strict
+// mode and Anthropic tool_use validators accept the result without rewriting.
 func generateStructSchema(t reflect.Type) map[string]any {
 	schema := map[string]any{
-		"type":       "object",
-		"properties": map[string]any{},
+		"type":                 "object",
+		"properties":           map[string]any{},
+		"additionalProperties": false,
 	}
 
 	props := schema["properties"].(map[string]any)
@@ -88,10 +97,7 @@ func isFieldRequired(f reflect.StructField) bool {
 
 // generatePropertySchema builds a JSON Schema for a single struct field.
 func generatePropertySchema(f reflect.StructField) map[string]any {
-	prop := map[string]any{}
-
-	// Determine JSON Schema type from Go type
-	prop["type"] = goTypeToJSONType(f.Type)
+	prop := typeToSchema(f.Type)
 
 	// Read jsonschema tag
 	tag := f.Tag.Get("jsonschema")
@@ -105,30 +111,48 @@ func generatePropertySchema(f reflect.StructField) map[string]any {
 	return prop
 }
 
-// goTypeToJSONType maps Go types to JSON Schema types.
-func goTypeToJSONType(t reflect.Type) string {
-	// Handle pointers
-	if t.Kind() == reflect.Ptr {
+// typeToSchema produces a JSON-Schema fragment for any Go type. For slices /
+// arrays it includes an "items" sub-schema describing the element type — OpenAI
+// (and other strict validators) reject `{"type":"array"}` without it.
+//
+// Well-known stdlib types (time.Time, json.RawMessage) are intercepted before
+// the kind switch so we don't walk their unexported fields as struct properties.
+func typeToSchema(t reflect.Type) map[string]any {
+	// Unwrap pointers.
+	for t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
-
+	// Well-known type overrides — must happen before the kind switch.
+	if t == timeType {
+		return map[string]any{"type": "string", "format": "date-time"}
+	}
 	switch t.Kind() {
 	case reflect.String:
-		return "string"
+		return map[string]any{"type": "string"}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64:
-		return "number"
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return map[string]any{"type": "integer"}
+	case reflect.Float32, reflect.Float64:
+		return map[string]any{"type": "number"}
 	case reflect.Bool:
-		return "boolean"
+		return map[string]any{"type": "boolean"}
 	case reflect.Slice, reflect.Array:
-		return "array"
-	case reflect.Map, reflect.Struct:
-		return "object"
+		return map[string]any{
+			"type":  "array",
+			"items": typeToSchema(t.Elem()),
+		}
+	case reflect.Map:
+		return map[string]any{
+			"type":                 "object",
+			"additionalProperties": typeToSchema(t.Elem()),
+		}
+	case reflect.Struct:
+		return generateStructSchema(t)
 	default:
-		return "string"
+		return map[string]any{"type": "string"}
 	}
 }
+
 
 // parseJSTag parses jsonschema tag attributes into the property schema.
 func parseJSTag(prop map[string]any, tag string) {
@@ -189,14 +213,19 @@ func parseNumber(s string) any {
 }
 
 // newToolFromAny creates a Tool from untyped parameters using reflection
-// to match the schema type with the function signature.
-func newToolFromAny(schema any, fn any, cfg ToolConfig) *Tool {
+// to match the schema type with the function signature. Used by the
+// reflection-based registry helpers; returns a structured error for callers
+// that load tools dynamically (MCP, plugins) instead of panicking.
+func newToolFromAny(schema any, fn any, cfg ToolConfig) (*Tool, error) {
 	fnType := reflect.TypeOf(fn)
-	if fnType.Kind() != reflect.Func {
-		panic(fmt.Sprintf("tool %s: fn must be a function, got %T", cfg.Name, fn))
+	if fnType == nil || fnType.Kind() != reflect.Func {
+		return nil, fmt.Errorf("tool %s: fn must be a function, got %T", cfg.Name, fn)
 	}
 
 	schemaType := reflect.TypeOf(schema)
+	if schemaType == nil {
+		return nil, fmt.Errorf("tool %s: schema must be a concrete type, got nil", cfg.Name)
+	}
 
 	// Build the execution wrapper via reflection
 	exec := func(ctx context.Context, args json.RawMessage) (string, error) {
@@ -227,12 +256,17 @@ func newToolFromAny(schema any, fn any, cfg ToolConfig) *Tool {
 
 	rawSchema, err := GenerateSchema(schema)
 	if err != nil {
-		panic(fmt.Sprintf("tool %s: failed to generate schema: %v", cfg.Name, err))
+		return nil, fmt.Errorf("tool %s: generate schema: %w", cfg.Name, err)
+	}
+	compiled, err := compileSchema(cfg.Name, rawSchema)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Tool{
-		config:  cfg,
-		schema:  rawSchema,
-		execute: exec,
-	}
+		config:         cfg,
+		schema:         rawSchema,
+		compiledSchema: compiled,
+		execute:        exec,
+	}, nil
 }

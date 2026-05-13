@@ -40,10 +40,17 @@ const (
 // Message is the universal, provider-agnostic representation of a
 // conversation message. It serializes directly to JSON for persistence
 // in any storage backend (SQL, NoSQL, Redis, filesystem).
+//
+// Parts is the source of truth for content: every constructor populates it,
+// and every Translator reads it. Content is a derived, plain-text view kept
+// for backward compatibility with callers that hash or log the textual
+// portion of a message (e.g. legacy memory strategies). When the message is
+// multi-modal, Content carries only the concatenated text Parts.
 type Message struct {
 	ID        string         `json:"id"`
 	Type      MessageType    `json:"type"`
 	Content   string         `json:"content,omitempty"`
+	Parts     []Part         `json:"parts,omitempty"`
 	ToolCalls []ToolCall     `json:"tool_calls,omitempty"`
 	ToolID    string         `json:"tool_id,omitempty"`
 	Name      string         `json:"name,omitempty"`
@@ -51,24 +58,56 @@ type Message struct {
 	CreatedAt time.Time      `json:"created_at"`
 }
 
-// NewMessage creates a new message with a unique ID and current timestamp.
+// NewMessage creates a new text-only message with a unique ID and current
+// timestamp. Parts is synthesized from Content so every consumer can read
+// from Parts uniformly without checking which constructor was used.
 func NewMessage(msgType MessageType, content string) Message {
-	return Message{
+	m := Message{
 		ID:        uuid.New().String(),
 		Type:      msgType,
 		Content:   content,
 		CreatedAt: time.Now().UTC(),
 	}
+	if content != "" {
+		m.Parts = []Part{TextPart(content)}
+	}
+	return m
 }
 
-// NewUserMessage creates a new user message.
+// NewMessageWithParts creates a new multi-modal message from an explicit
+// list of Parts. Content is derived as the newline-joined concatenation of
+// the text parts so legacy consumers that read Content keep working.
+func NewMessageWithParts(msgType MessageType, parts ...Part) Message {
+	return Message{
+		ID:        uuid.New().String(),
+		Type:      msgType,
+		Parts:     append([]Part(nil), parts...),
+		Content:   joinTextParts(parts),
+		CreatedAt: time.Now().UTC(),
+	}
+}
+
+// NewUserMessage creates a new user message from a plain string.
 func NewUserMessage(content string) Message {
 	return NewMessage(MessageUser, content)
+}
+
+// NewUserMessageWithParts creates a multi-modal user message.
+func NewUserMessageWithParts(parts ...Part) Message {
+	return NewMessageWithParts(MessageUser, parts...)
 }
 
 // NewAssistantMessage creates a new assistant message with optional tool calls.
 func NewAssistantMessage(content string, toolCalls []ToolCall) Message {
 	m := NewMessage(MessageAssistant, content)
+	m.ToolCalls = toolCalls
+	return m
+}
+
+// NewAssistantMessageWithParts creates a multi-modal assistant message.
+// Tool calls remain a separate field — they are not Parts.
+func NewAssistantMessageWithParts(parts []Part, toolCalls []ToolCall) Message {
+	m := NewMessageWithParts(MessageAssistant, parts...)
 	m.ToolCalls = toolCalls
 	return m
 }
@@ -84,6 +123,25 @@ func NewToolResult(callID, name, content string, isError bool) Message {
 // NewSystemMessage creates a new system message (from hooks/middleware).
 func NewSystemMessage(content string) Message {
 	return NewMessage(MessageSystem, content)
+}
+
+// joinTextParts collects the text payload of every text Part into a single
+// newline-joined string. Non-text parts are skipped — Content is meant as a
+// textual digest, not a complete rendering of the message.
+func joinTextParts(parts []Part) string {
+	var b []byte
+	first := true
+	for _, p := range parts {
+		if p.Type != PartText || p.Text == "" {
+			continue
+		}
+		if !first {
+			b = append(b, '\n')
+		}
+		b = append(b, p.Text...)
+		first = false
+	}
+	return string(b)
 }
 
 // ToolCall represents a tool invocation requested by the assistant.

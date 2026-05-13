@@ -1,0 +1,388 @@
+package web
+
+import (
+	"fmt"
+	"html/template"
+)
+
+// copyExpr returns the datastar `data-on-click` expression for a copy button.
+// Uses navigator.clipboard (browser-only API) plus `el` (the bound element).
+// Briefly swaps the icon to ✓ as visual feedback.
+func copyExpr(text string) string {
+	return "navigator.clipboard.writeText('" + jsLit(text) +
+		"').then(() => { el.textContent='✓'; el.classList.add('copied'); setTimeout(() => { el.textContent='⧉'; el.classList.remove('copied'); }, 900); })"
+}
+
+// tabSetExpr sets the active tab for a given callID. Tabs live in the global
+// $tabs object keyed by sanitised call ID.
+func tabSetExpr(callID, tab string) string {
+	return "$tabs['" + jsLit(callID) + "'] = '" + tab + "'"
+}
+
+// tabIsExpr returns the JS expression that's true when the given tab is the
+// active one (defaults to 'args' if no tab was selected yet).
+func tabIsExpr(callID, tab string) string {
+	return "($tabs['" + jsLit(callID) + "'] || 'args') === '" + tab + "'"
+}
+
+templ DetailPaneBody(data DetailData) {
+	{{ streamURL := "@get('/sse/runs/" + data.Run.ID + "')" }}
+	<div class={ "fade-in", templ.KV("is-live", data.Live) } data-init={ streamURL }>
+		@detailHeader(data)
+		<div class="io-block">
+			<div class="io-label">user input</div>
+			<div class="io-body">{ data.Run.Input }</div>
+		</div>
+		if data.Run.Output != "" {
+			<div class="io-block io-output">
+				<div class="io-label">final output</div>
+				<div class="io-body">{ data.Run.Output }</div>
+			</div>
+		}
+		@TraceTree(data.Timeline, data.Live, data.SpawnedByToolCall)
+	</div>
+}
+
+templ detailHeader(data DetailData) {
+	<div class="run-header-sticky">
+		<div class="run-title-row">
+			<span class={ "badge", "badge-" + string(data.Run.Status) }>
+				<span class="dot"></span>
+				{ string(data.Run.Status) }
+				if data.Live {
+					<span class="badge-live">
+						<span class="spin-ring"></span>
+						refreshing
+					</span>
+				}
+			</span>
+			<span class="run-id-pill">
+				<span class="lbl">run</span>
+				<span class="mono">{ data.Run.ID }</span>
+				<button class="copy-btn"
+					data-on:click={ copyExpr(data.Run.ID) }
+					title="Copy run ID">⧉</button>
+			</span>
+			<span style="font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;">
+				started { data.Run.StartedAt.Format("15:04:05.000") }
+				if !data.Run.EndedAt.IsZero() {
+					· { PrettyDuration(data.Timeline.Duration()) } duration
+				}
+			</span>
+		</div>
+		<div class="metric-row">
+			<div class="metric"><span class="lbl">turns</span><span class="val">{ fmt.Sprintf("%d", data.Run.Turns) }</span></div>
+			<div class="metric"><span class="lbl">cost</span><span class="val success">${ fmt.Sprintf("%.5f", data.Run.TotalUSD) }</span></div>
+			<div class="metric"><span class="lbl">input</span><span class="val">{ fmt.Sprintf("%d", data.Run.InputTokens) }</span></div>
+			<div class="metric"><span class="lbl">output</span><span class="val">{ fmt.Sprintf("%d", data.Run.OutputTokens) }</span></div>
+			if data.Run.CachedTokens > 0 {
+				<div class="metric"><span class="lbl">cached</span><span class="val">{ fmt.Sprintf("%d", data.Run.CachedTokens) }</span></div>
+			}
+			<div class="metric"><span class="lbl">latency</span><span class="val">{ PrettyDuration(data.Timeline.Duration()) }</span></div>
+		</div>
+	</div>
+}
+
+templ TraceTree(tl RunTimeline, live bool, spawned map[string][]*RunRecord) {
+	<div class="trace">
+		<div class="section-label">trace · { fmt.Sprintf("%d", len(tl.Turns)) } turn{ pluralS(len(tl.Turns)) }</div>
+		if tl.SystemPrompt != nil {
+			@systemPromptNode(*tl.SystemPrompt)
+		}
+		for i, turn := range tl.Turns {
+			@turnNode(turn, tl, live && i == len(tl.Turns)-1 && turn.Final == nil, spawned)
+		}
+		if len(tl.Turns) == 0 {
+			<div class="empty-state" style="padding:32px 16px;">
+				<span class="icon">…</span>
+				<p>Awaiting first step…</p>
+			</div>
+		}
+	</div>
+}
+
+templ systemPromptNode(s TimelineStep) {
+	<details class="node">
+		<summary>
+			<span class="caret">▸</span>
+			<span class="node-kind k-system">system_prompt</span>
+			<span class="node-title"><span class="preview">{ fmt.Sprintf("%d chars · loaded at start", len(s.Content)) }</span></span>
+			<span class="node-meta"><span class="ts">{ s.At.Format("15:04:05.000") }</span></span>
+		</summary>
+		<div class="node-body">
+			<div class="block-wrap">
+				<button class="copy-btn" data-on:click={ copyExpr(s.Content) }>⧉</button>
+				<pre class="block">{ s.Content }</pre>
+			</div>
+		</div>
+	</details>
+}
+
+templ turnNode(turn TurnNode, tl RunTimeline, inFlight bool, spawned map[string][]*RunRecord) {
+	<details class={ "node", templ.KV("tn-active", inFlight) } open>
+		<summary>
+			<span class="caret">▸</span>
+			<span class="node-kind k-turn">turn { fmt.Sprintf("%d", turn.Index) }</span>
+			<span class="node-title">
+				if turn.Final != nil {
+					<span class="preview preview-success">{ Truncate(turn.Final.Content, 90) }</span>
+				} else {
+					<span class="preview">{ fmt.Sprintf("%d tool call%s · awaiting next turn", len(turn.ToolNodes), pluralS(len(turn.ToolNodes))) }</span>
+				}
+			</span>
+			<span class="node-meta">
+				if inFlight {
+					<span class="live-pill" title="this turn is in flight">
+						<span class="spin-ring"></span>
+						thinking
+					</span>
+				}
+				if turn.HasTokens {
+					<span class="tok">
+						in&thinsp;<b>{ fmt.Sprintf("%d", turn.InTokens) }</b> · out&thinsp;<b>{ fmt.Sprintf("%d", turn.OutTokens) }</b>
+						if turn.CachedToks > 0 {
+							· cached&thinsp;<b>{ fmt.Sprintf("%d", turn.CachedToks) }</b>
+						}
+					</span>
+				}
+				if turn.LLMCall != nil {
+					<span class="dur">{ PrettyDuration(turn.EndAt().Sub(turn.LLMCall.At)) }</span>
+				}
+				<span class="ts">{ turn.StartAt.Format("15:04:05.000") }</span>
+			</span>
+		</summary>
+		<div class="node-body">
+			if turn.LLMCall != nil {
+				@llmCallNode(*turn.LLMCall, turn, inFlight)
+			}
+			if turn.Reasoning != "" {
+				@reasoningNode(turn.Reasoning)
+			}
+			for _, tn := range turn.ToolNodes {
+				@toolNode(tn, tl, spawned[tn.Call.ToolCallID])
+			}
+			if turn.Final != nil {
+				@finalNode(*turn.Final)
+			}
+			if turn.Error != nil {
+				@errorNode(*turn.Error)
+			}
+		</div>
+	</details>
+}
+
+templ llmCallNode(s TimelineStep, turn TurnNode, inFlight bool) {
+	<details class={ "node", "depth-1", templ.KV("tn-active", inFlight) }>
+		<summary>
+			<span class="caret">▸</span>
+			<span class="node-kind k-llm">llm_call</span>
+			<span class="node-title">
+				<span class="preview">
+					if turn.Final != nil {
+						model produced a final response
+					} else if inFlight {
+						awaiting model response…
+					} else {
+						{ fmt.Sprintf("model produced %d tool call%s", len(turn.ToolNodes), pluralS(len(turn.ToolNodes))) }
+					}
+				</span>
+			</span>
+			<span class="node-meta">
+				if inFlight {
+					<span class="spin-ring" title="awaiting model response"></span>
+				}
+				<span class="ts">{ s.At.Format("15:04:05.000") }</span>
+			</span>
+		</summary>
+		<div class="node-body">
+			<div class="field-meta">
+				<span>turn <b>{ fmt.Sprintf("%d", s.Turn) }</b></span>
+				if turn.HasTokens {
+					<span class="callid-chip">in <b>{ fmt.Sprintf("%d", turn.InTokens) }</b></span>
+					<span class="callid-chip">out <b>{ fmt.Sprintf("%d", turn.OutTokens) }</b></span>
+				}
+			</div>
+		</div>
+	</details>
+}
+
+templ toolNode(tn ToolCallNode, tl RunTimeline, children []*RunRecord) {
+	{{ endAt := tn.Call.At }}
+	if tn.Result != nil {
+		{{ endAt = tn.Result.At }}
+	}
+	{{ geom := tl.SpanGeom(tn.Call.At, endAt) }}
+	{{ cid := tn.Call.ToolCallID }}
+	<details class={ "node", "depth-1", templ.KV("tn-active", tn.Result == nil) }>
+		<summary>
+			<span class="caret">▸</span>
+			<span class="node-kind k-tool">tool</span>
+			<span class="tool-name">{ tn.Call.ToolName }</span>
+			<span class="node-title">
+				<span class="preview">({ ArgsPreview(tn.Call.ToolArgs) })</span>
+				if tn.Result != nil {
+					<span class="preview preview-success">→ { Truncate(tn.Result.Content, 60) }</span>
+				}
+			</span>
+			<span class="node-meta">
+				if tn.Result == nil {
+					<span class="spin-ring" title="executing"></span>
+				}
+				<span class="gantt-strip" title="position within run">
+					<span class="gantt-bar b-tool" style={ ganttStyle(geom) }></span>
+				</span>
+				if tn.Result != nil {
+					<span class="dur">{ PrettyDuration(tn.Result.At.Sub(tn.Call.At)) }</span>
+				}
+				<span class="ts">{ tn.Call.At.Format("15:04:05.000") }</span>
+			</span>
+		</summary>
+		<div class="node-body">
+			<div class="tab-bar">
+				<button class="tab-btn"
+					data-on:click={ tabSetExpr(cid, "args") }
+					data-class={ "{active: " + tabIsExpr(cid, "args") + "}" }>arguments</button>
+				if tn.Result != nil {
+					<button class="tab-btn"
+						data-on:click={ tabSetExpr(cid, "result") }
+						data-class={ "{active: " + tabIsExpr(cid, "result") + "}" }>result</button>
+				}
+			</div>
+			<div data-show={ tabIsExpr(cid, "args") }>
+				@jsonBlock(tn.Call.ToolArgs)
+			</div>
+			if tn.Result != nil {
+				<div data-show={ tabIsExpr(cid, "result") }>
+					@jsonBlock(tn.Result.Content)
+				</div>
+			}
+			<div class="field-meta">
+				if tn.Result != nil {
+					<span>took <b class="mono">{ PrettyDuration(tn.Result.At.Sub(tn.Call.At)) }</b></span>
+				} else {
+					<span class="exec-live">
+						<span class="spin-ring"></span>
+						executing…
+					</span>
+				}
+				<span class="callid-chip">
+					{ cid }
+					<button class="copy-btn" data-on:click={ copyExpr(cid) }>⧉</button>
+				</span>
+			</div>
+			if len(children) > 0 {
+				@spawnedRuns(children)
+			}
+		</div>
+	</details>
+}
+
+// spawnedRuns renders a strip of nested cards for every sub-agent run that
+// this tool call kicked off. Click loads the child run into the main detail
+// pane — same datastar pattern as the sidebar cards.
+templ spawnedRuns(children []*RunRecord) {
+	<div class="spawned-runs">
+		<div class="spawned-label">
+			<span class="spawned-arrow">↳</span>
+			{ fmt.Sprintf("spawned %d sub-agent run%s", len(children), pluralS(len(children))) }
+		</div>
+		for _, r := range children {
+			<a class={ "spawn-card", "s-" + string(r.Status) }
+				href={ templ.URL("/runs/" + r.ID) }
+				data-on:click__prevent={ "$selected = '" + r.ID + "'; @get('/partials/runs/" + r.ID + "/pane')" }>
+				<span class="spawn-bar"></span>
+				<div class="spawn-content">
+					<div class="spawn-row1">
+						<span class={ "spawn-status", "s-" + string(r.Status) }>
+							<span class="dot"></span>{ string(r.Status) }
+						</span>
+						<span class="spawn-id mono">{ ShortID(r.ID) }</span>
+					</div>
+					<div class="spawn-input">{ Truncate(r.Input, 90) }</div>
+					<div class="spawn-meta">
+						if r.Status == RunRunning {
+							<span class="spin-ring"></span>
+							<span>running…</span>
+						} else {
+							<span><b>{ fmt.Sprintf("%d", r.Turns) }</b>&thinsp;turns</span>
+							<span class="sep">·</span>
+							<span><b>${ fmt.Sprintf("%.4f", r.TotalUSD) }</b></span>
+							<span class="sep">·</span>
+							<span><b>{ fmt.Sprintf("%d", r.Tokens) }</b>&thinsp;tk</span>
+						}
+						<span class="spawn-open">open →</span>
+					</div>
+				</div>
+			</a>
+		}
+	</div>
+}
+
+templ jsonBlock(raw string) {
+	<div class="block-wrap">
+		<button class="copy-btn" data-on:click={ copyExpr(raw) }>⧉</button>
+		<pre class="block is-json">@templ.Raw(string(PrettyJSON(raw)))</pre>
+	</div>
+}
+
+templ reasoningNode(text string) {
+	<details class="node depth-1 reasoning-node">
+		<summary>
+			<span class="caret">▸</span>
+			<span class="node-kind k-reasoning">reasoning</span>
+			<span class="node-title">
+				<span class="preview">{ Truncate(text, 120) }</span>
+			</span>
+			<span class="node-meta">
+				<span class="tok">{ fmt.Sprintf("%d chars", len(text)) }</span>
+			</span>
+		</summary>
+		<div class="node-body">
+			<pre class="block is-reasoning">{ text }</pre>
+		</div>
+	</details>
+}
+
+templ finalNode(s TimelineStep) {
+	<details class="node depth-1" open>
+		<summary>
+			<span class="caret">▸</span>
+			<span class="node-kind k-final">final</span>
+			<span class="node-title"><span class="preview preview-success">{ Truncate(s.Content, 120) }</span></span>
+			<span class="node-meta"><span class="ts">{ s.At.Format("15:04:05.000") }</span></span>
+		</summary>
+		<div class="node-body">
+			<div class="block-wrap">
+				<button class="copy-btn" data-on:click={ copyExpr(s.Content) }>⧉</button>
+				<pre class="block">{ s.Content }</pre>
+			</div>
+		</div>
+	</details>
+}
+
+templ errorNode(s TimelineStep) {
+	<details class="node depth-1" open>
+		<summary>
+			<span class="caret">▸</span>
+			<span class="node-kind k-error">error</span>
+			<span class="node-title"><span class="preview">{ s.Err }</span></span>
+			<span class="node-meta"><span class="ts">{ s.At.Format("15:04:05.000") }</span></span>
+		</summary>
+		<div class="node-body">
+			<pre class="block">{ s.Err }</pre>
+		</div>
+	</details>
+}
+
+func ganttStyle(g SpanGeom) templ.SafeCSS {
+	return templ.SafeCSS(fmt.Sprintf("left:%.2f%%;width:%.2f%%", g.Offset, g.Width))
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+var _ = template.HTML("")

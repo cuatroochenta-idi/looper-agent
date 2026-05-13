@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Slide Builder · Looper Agent demo</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+	<script src="https://cdn.tailwindcss.com"></script>
+	<script>
+		// Tailwind config — extend the font stack so Inter is the default sans
+		// family. Everything else uses default Tailwind tokens.
+		tailwind.config = {
+			theme: {
+				extend: {
+					fontFamily: {
+						sans: ['Inter', 'system-ui', 'sans-serif'],
+						mono: ['"JetBrains Mono"', 'ui-monospace', 'SF Mono', 'monospace'],
+					},
+				},
+			},
+		};
+	</script>
+	<script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"></script>
+	<style>
+		* { box-sizing: border-box; }
+		html, body { height: 100%; font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+		body { background: #09090b; color: #e4e4e7; }
+
+		/* ── Layout ──────────────────────────────────────────────────────── */
+		.app { display: grid; grid-template-columns: 380px 1fr; height: 100vh; }
+		.app > * { min-height: 0; min-width: 0; }
+
+		/* ── Chat scrollbar ──────────────────────────────────────────────── */
+		#chat-log { scrollbar-width: thin; scrollbar-color: #3f3f46 transparent; }
+		#chat-log::-webkit-scrollbar { width: 8px; }
+		#chat-log::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
+
+		/* ── Busy pulse ──────────────────────────────────────────────────── */
+		.busy-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #fff; margin-left: 6px; animation: pulse 1.2s ease-in-out infinite; }
+		@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(1.4)} }
+
+		/* ── Deck grid ───────────────────────────────────────────────────── */
+		.deck-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 20px; }
+
+		/* ── Progress dots ───────────────────────────────────────────────── */
+		.deck-dot { width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,0.18); transition: all 200ms ease; }
+		.deck-dot-active { background: var(--accent, #818cf8); width: 22px; border-radius: 4px; box-shadow: 0 0 12px var(--accent, #818cf8); }
+
+		/* ── Slide base ──────────────────────────────────────────────────── */
+		.slide {
+			position: relative;
+			aspect-ratio: 16/9;
+			background: #18181b;
+			border: 1px solid #27272a;
+			border-radius: 16px;
+			padding: 24px 28px;
+			display: flex;
+			flex-direction: column;
+			gap: 14px;
+			box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+			overflow: hidden;
+			transition: transform 200ms ease, box-shadow 200ms ease, border-color 200ms ease;
+			color: #e4e4e7;
+			/* Per-slide entry animation keyed on stable id so SSE re-renders
+			   don't re-trigger it (data-slide-key attribute is the dedupe
+			   handle — datastar diffs by it). */
+			animation: slideIn 380ms cubic-bezier(.2,.7,.2,1) both;
+		}
+		@keyframes slideIn {
+			0% { opacity: 0; transform: translateY(14px) scale(0.985); }
+			100% { opacity: 1; transform: translateY(0) scale(1); }
+		}
+		.slide:hover { transform: translateY(-4px); box-shadow: 0 20px 50px rgba(0,0,0,0.55); border-color: var(--accent, #818cf8); }
+
+		.slide-head { display: flex; align-items: center; gap: 12px; }
+		.slide-num { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 700; color: rgba(255,255,255,0.45); letter-spacing: 0.5px; padding: 3px 8px; background: rgba(255,255,255,0.06); border-radius: 5px; }
+		.slide-title { font-size: 22px; font-weight: 700; letter-spacing: -0.4px; line-height: 1.2; flex: 1; }
+		.slide-zoom-btn { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); color: rgba(255,255,255,0.55); cursor: pointer; transition: all 150ms ease; }
+		.slide-zoom-btn:hover { background: rgba(255,255,255,0.10); color: #fff; }
+
+		.slide-body { flex: 1; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+		.slide-body-text { font-size: 15px; line-height: 1.6; color: rgba(228,228,231,0.85); }
+
+		/* Bullets */
+		.slide-bullets { display: flex; flex-direction: column; gap: 8px; padding-left: 4px; list-style: none; }
+		.slide-bullet { position: relative; padding-left: 22px; font-size: 14.5px; line-height: 1.55; cursor: pointer; transition: transform 150ms ease, color 150ms ease; }
+		.slide-bullet::before { content: ''; position: absolute; left: 2px; top: 9px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent, #818cf8); transition: transform 150ms ease, box-shadow 150ms ease; }
+		.slide-bullet:hover { transform: translateX(3px); color: #fff; }
+		.slide-bullet:hover::before { transform: scale(1.35); box-shadow: 0 0 12px var(--accent, #818cf8); }
+		.bullet-hl {
+			background: linear-gradient(90deg, color-mix(in srgb, var(--accent, #818cf8) 20%, transparent), transparent);
+			border-radius: 6px;
+			padding-top: 4px; padding-bottom: 4px;
+			padding-right: 8px;
+			color: #fff;
+			transform: translateX(4px);
+		}
+		.bullet-hl::before { transform: scale(1.4); box-shadow: 0 0 14px var(--accent, #818cf8); }
+
+		/* Two-column layout */
+		.slide-twocol { display: grid !important; grid-template-columns: 1fr 1fr; gap: 18px; }
+		.slide-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+		.slide-col-visual { align-items: center; justify-content: center; }
+
+		/* Figure + bullets row */
+		.slide-fig-row { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: start; }
+
+		/* Title slide */
+		.slide.layout-title .slide-title { font-size: 30px; font-weight: 800; letter-spacing: -0.8px; }
+		.slide.layout-title .slide-body-text { font-size: 17px; line-height: 1.6; color: rgba(228,228,231,0.78); }
+
+		/* Figure */
+		.figure { color: var(--accent, #818cf8); display: flex; align-items: center; justify-content: center; }
+		.figure svg { width: 100%; height: auto; max-width: 140px; max-height: 140px; filter: drop-shadow(0 0 14px color-mix(in srgb, var(--accent, #818cf8) 35%, transparent)); }
+		.slide-col-visual .figure svg { max-width: 180px; max-height: 180px; }
+
+		/* Chart */
+		.chart { display: flex; flex-direction: column; gap: 8px; }
+		.chart-title { font-size: 12px; color: rgba(255,255,255,0.55); font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; }
+		.chart-bars { display: flex; flex-direction: column; gap: 7px; }
+		.bar-row { display: grid; grid-template-columns: 120px 1fr 55px; gap: 12px; align-items: center; font-size: 12.5px; }
+		.bar-label { color: rgba(228,228,231,0.85); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.bar-track { height: 12px; background: rgba(255,255,255,0.07); border-radius: 6px; overflow: hidden; }
+		.bar-fill {
+			display: block;
+			height: 100%;
+			width: 0;
+			background: linear-gradient(90deg, var(--accent, #818cf8), color-mix(in srgb, var(--accent, #818cf8) 50%, white));
+			border-radius: 6px;
+			animation: barFill 700ms cubic-bezier(.2,.7,.2,1) forwards;
+		}
+		@keyframes barFill {
+			0% { width: 0; }
+			100% { width: var(--bar-w, 0%); }
+		}
+		.bar-value { color: rgba(255,255,255,0.6); font-family: 'JetBrains Mono', monospace; font-size: 11.5px; text-align: right; }
+
+		/* ── Themes ─────────────────────────────────────────────────────── */
+		/* Each theme defines --accent + slide background + accent shape */
+		.theme-dark { --accent: #818cf8; }
+		.theme-dark .slide { background: #18181b; }
+		.theme-dark .slide.layout-title {
+			background:
+				radial-gradient(circle at 100% 0%, rgba(129,140,248,0.25), transparent 50%),
+				linear-gradient(135deg, #1c1d29 0%, #0f1014 100%);
+		}
+
+		.theme-light { --accent: #4f46e5; }
+		.theme-light .slide { background: #fafafa; color: #18181b; border-color: #e4e4e7; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
+		.theme-light .slide-num { background: rgba(0,0,0,0.05); color: #71717a; }
+		.theme-light .slide-body-text { color: rgba(24,24,27,0.78); }
+		.theme-light .slide-bullet { color: #27272a; }
+		.theme-light .slide-bullet:hover { color: #18181b; }
+		.theme-light .slide-zoom-btn { background: rgba(0,0,0,0.04); border-color: rgba(0,0,0,0.08); color: #52525b; }
+		.theme-light .slide-zoom-btn:hover { background: rgba(0,0,0,0.08); color: #18181b; }
+		.theme-light .bar-track { background: rgba(0,0,0,0.06); }
+		.theme-light .bar-label { color: rgba(24,24,27,0.78); }
+		.theme-light .bar-value { color: rgba(24,24,27,0.55); }
+		.theme-light .chart-title { color: rgba(24,24,27,0.55); }
+		.theme-light .slide.layout-title {
+			background:
+				radial-gradient(circle at 0% 100%, rgba(79,70,229,0.18), transparent 55%),
+				linear-gradient(135deg, #ffffff 0%, #eef0ff 100%);
+		}
+
+		.theme-sunset { --accent: #f97316; }
+		.theme-sunset .slide {
+			background:
+				radial-gradient(circle at 100% 100%, rgba(249,115,22,0.18), transparent 55%),
+				linear-gradient(135deg, #2d1b3d 0%, #1a1320 100%);
+			border-color: rgba(249,115,22,0.12);
+		}
+		.theme-sunset .slide.layout-title {
+			background:
+				radial-gradient(circle at 0% 0%, rgba(251,191,36,0.35), transparent 55%),
+				linear-gradient(120deg, #f97316 0%, #7c2d12 55%, #1a1320 100%);
+		}
+		.theme-sunset .bar-fill { background: linear-gradient(90deg, #f97316, #fbbf24); }
+
+		.theme-aqua { --accent: #38bdf8; }
+		.theme-aqua .slide {
+			background:
+				radial-gradient(circle at 0% 0%, rgba(56,189,248,0.18), transparent 55%),
+				linear-gradient(160deg, #0c2f3a 0%, #0a1f28 100%);
+			border-color: rgba(56,189,248,0.14);
+		}
+		.theme-aqua .slide.layout-title {
+			background:
+				radial-gradient(circle at 100% 100%, rgba(94,234,212,0.30), transparent 55%),
+				linear-gradient(155deg, #0ea5e9 0%, #134e4a 55%, #0a1f28 100%);
+		}
+		.theme-aqua .bar-fill { background: linear-gradient(90deg, #38bdf8, #5eead4); }
+
+		/* ── Zoomed slide overlay ───────────────────────────────────────── */
+		.slide-zoomed {
+			position: fixed !important;
+			inset: 4vh 4vw !important;
+			z-index: 50;
+			aspect-ratio: auto !important;
+			grid-column: auto !important;
+			transform: none !important;
+			box-shadow: 0 30px 90px rgba(0,0,0,0.7), 0 0 0 1px var(--accent, #818cf8);
+			animation: slideZoom 220ms cubic-bezier(.2,.7,.2,1);
+		}
+		.slide-zoomed .slide-title { font-size: 36px; }
+		.slide-zoomed .slide-body-text { font-size: 20px; }
+		.slide-zoomed .slide-bullet { font-size: 18px; }
+		.slide-zoomed .figure svg { max-width: 240px; max-height: 240px; }
+		@keyframes slideZoom {
+			0% { opacity: 0.6; transform: scale(0.96); }
+			100% { opacity: 1; transform: none; }
+		}
+
+		/* ── Responsive ─────────────────────────────────────────────────── */
+		@media (max-width: 900px) {
+			.app { grid-template-columns: 1fr; grid-template-rows: 50vh 50vh; }
+			.deck-grid { grid-template-columns: 1fr; }
+		}
+	</style>
+</head>
+<body class="bg-zinc-950 text-zinc-100"
+      data-signals="{input:'', busy:false, msgCount:0}"
+      data-init="@get('/sse/chat'); @get('/sse/deck')">
+	<div class="app">
+
+		<!-- ── Chat sidebar ─────────────────────────────────────────────── -->
+		<aside class="flex flex-col bg-zinc-900/80 border-r border-zinc-800 backdrop-blur">
+			<header class="flex items-center gap-3 px-5 py-4 border-b border-zinc-800">
+				<span class="w-2 h-2 rounded-full bg-indigo-400 shadow-[0_0_10px_#818cf8]"></span>
+				<span class="font-bold tracking-tight">Slide<span class="text-indigo-400">Builder</span></span>
+				<span class="ml-auto text-[10.5px] font-mono text-zinc-500">looper · datastar</span>
+			</header>
+
+			<div id="chat-log"
+			     class="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3"
+			     data-effect="$msgCount; queueMicrotask(() => el.scrollTop = el.scrollHeight)"></div>
+
+			<form class="flex items-center gap-2 px-4 py-3 border-t border-zinc-800 bg-zinc-900/80"
+			      data-on:submit__prevent="@post('/chat'); $input = ''">
+				<input type="text" name="input" autocomplete="off" autofocus
+				       class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-indigo-500/70 focus:ring-2 focus:ring-indigo-500/15 transition disabled:opacity-50"
+				       data-bind:input
+				       data-attr:placeholder="$busy ? 'agent is building…' : 'tell me what to build'"
+				       data-attr:disabled="$busy ? 'disabled' : null" />
+				<button type="submit"
+				        class="bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-xl px-4 py-2.5 transition shadow-sm"
+				        data-attr:disabled="$busy ? 'disabled' : null">
+					<span data-show="!$busy">send</span>
+					<span data-show="$busy">…<span class="busy-dot"></span></span>
+				</button>
+			</form>
+		</aside>
+
+		<!-- ── Preview pane ─────────────────────────────────────────────── -->
+		<section class="overflow-y-auto px-7 py-6 bg-zinc-950">
+			<div class="flex items-baseline gap-3 mb-5">
+				<h1 class="text-base font-bold tracking-tight">Preview</h1>
+				<span class="text-xs font-mono text-zinc-500">live · pushed via <span class="text-indigo-400">SSE</span> on every tool call</span>
+			</div>
+			<div id="deck-preview"></div>
+		</section>
+
+	</div>
+</body>
+</html>

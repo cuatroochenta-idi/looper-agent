@@ -37,12 +37,74 @@ type LLMRequest struct {
 
 	// Temperature controls randomness (0.0 to 2.0).
 	Temperature float64
+
+	// Reasoning configures extended thinking / reasoning for models that
+	// support it (OpenAI o-series, Claude extended thinking, Gemini 2.x).
+	// Nil means "use the provider default", which is typically "off". The
+	// provider silently ignores this field on models that don't support it.
+	Reasoning *ReasoningConfig
+
+	// ToolChoice constrains how the model picks tools on this turn. The
+	// zero value (ToolChoice{}) means "auto" — same as ToolChoiceAuto().
+	// Each provider translator maps it to its native shape.
+	ToolChoice ToolChoice
+
+	// ResponseSchema, when non-nil, asks the provider to constrain the
+	// model's output to this JSON Schema. Only providers that implement
+	// ResponseFormatCapable honor it (OpenAI / Gemini today). The framework
+	// passes the same schema this field carries to those providers; for
+	// non-capable providers the agent loop falls back to a final_response
+	// tool injection that achieves the same end via tool calls.
+	ResponseSchema []byte
+
+	// ResponseSchemaName is a human-readable label some providers require
+	// alongside the schema (OpenAI's response_format.json_schema.name).
+	// Defaults to "result" when empty.
+	ResponseSchemaName string
+}
+
+// ReasoningEffort is a provider-neutral level of reasoning effort. Each
+// provider maps it to its native scale: OpenAI reasoning_effort, Anthropic
+// budget_tokens tiers, Gemini thinkingBudget tiers.
+type ReasoningEffort string
+
+const (
+	ReasoningEffortNone    ReasoningEffort = ""
+	ReasoningEffortLow     ReasoningEffort = "low"
+	ReasoningEffortMedium  ReasoningEffort = "medium"
+	ReasoningEffortHigh    ReasoningEffort = "high"
+	// ReasoningEffortMinimal is OpenAI gpt-5 specific; non-OpenAI providers
+	// treat it as "low".
+	ReasoningEffortMinimal ReasoningEffort = "minimal"
+)
+
+// ReasoningConfig controls thinking/reasoning behaviour per request.
+type ReasoningConfig struct {
+	// Effort hints how hard the model should think. Maps to the provider's
+	// native scale. Use ReasoningEffortNone to disable.
+	Effort ReasoningEffort
+
+	// BudgetTokens overrides the tiered Effort with a concrete budget where
+	// supported (Anthropic budget_tokens, Gemini thinkingBudget). Zero
+	// means "use Effort". Ignored by OpenAI (no per-request budget).
+	BudgetTokens int
+
+	// IncludeInOutput controls whether reasoning traces are surfaced via
+	// StreamChunk.Reasoning / LLMResponse.Reasoning. When false (default),
+	// the provider drops reasoning deltas server-side where possible and
+	// strips them client-side otherwise.
+	IncludeInOutput bool
 }
 
 // LLMResponse is a provider-agnostic response from an LLM.
 type LLMResponse struct {
 	// Content is the text content of the response.
 	Content string
+
+	// Reasoning is the model's internal thinking trace, when the request
+	// asked for it via ReasoningConfig.IncludeInOutput and the model
+	// supports it. Empty otherwise.
+	Reasoning string
 
 	// ToolCalls are tool invocations requested by the LLM.
 	ToolCalls []message.ToolCall
@@ -65,6 +127,13 @@ type Usage struct {
 type StreamChunk struct {
 	// Content is the text chunk (partial).
 	Content string
+
+	// Reasoning is a chunk of the model's thinking trace, delivered on a
+	// separate channel from Content. Only populated when the request set
+	// ReasoningConfig.IncludeInOutput=true and the model supports
+	// reasoning. Per-chunk: Content and Reasoning are mutually exclusive
+	// (a chunk carries one OR the other, never both).
+	Reasoning string
 
 	// ToolCalls are partial tool call data (accumulated across chunks).
 	ToolCalls []message.ToolCall

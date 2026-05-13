@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // ToolConfig groups all configuration for a tool.
@@ -39,18 +41,38 @@ type Tool struct {
 	config ToolConfig
 	schema json.RawMessage
 
+	// compiledSchema is the parsed JSON Schema used by Validate. Built once
+	// at Tool construction so the validation hot path is allocation-light.
+	compiledSchema *jsonschema.Schema
+
 	// execute is the internal execution function that receives parsed
 	// JSON arguments and returns a string result.
 	execute func(ctx context.Context, args json.RawMessage) (string, error)
+
+	// preExecute optionally runs before execute; populated via
+	// WithPreExecute. Returns a *RejectionError to surface corrective
+	// feedback to the LLM, or any other error to fail the call.
+	preExecute func(ctx context.Context, args json.RawMessage) error
 }
 
 // NewTool creates a tool from an input schema struct, an execution function,
 // and configuration. The schema struct should use jsonschema tags for
 // descriptions, enums, validation rules, etc.
-func NewTool[I any](schema I, fn func(ctx context.Context, input I) (string, error), cfg ToolConfig) *Tool {
+//
+// Optional behaviour (pre-execution validation, etc.) is supplied via
+// variadic ToolOption values built with WithPreExecute and similar helpers.
+//
+// Returns an error if schema generation or compilation fails. Use MustNewTool
+// when constructing tools declaratively in tests or examples where a
+// build-time failure should be a hard stop.
+func NewTool[I any](schema I, fn func(ctx context.Context, input I) (string, error), cfg ToolConfig, opts ...ToolOption) (*Tool, error) {
 	rawSchema, err := GenerateSchema(schema)
 	if err != nil {
-		panic(fmt.Sprintf("tool %s: failed to generate schema: %v", cfg.Name, err))
+		return nil, fmt.Errorf("tool %s: generate schema: %w", cfg.Name, err)
+	}
+	compiled, err := compileSchema(cfg.Name, rawSchema)
+	if err != nil {
+		return nil, err
 	}
 
 	// Wrap the typed function into the internal execute signature.
@@ -62,11 +84,53 @@ func NewTool[I any](schema I, fn func(ctx context.Context, input I) (string, err
 		return fn(ctx, input)
 	}
 
-	return &Tool{
-		config:  cfg,
-		schema:  rawSchema,
-		execute: exec,
+	to := &toolOptions{}
+	for _, opt := range opts {
+		opt(to)
 	}
+
+	return &Tool{
+		config:         cfg,
+		schema:         rawSchema,
+		compiledSchema: compiled,
+		execute:        exec,
+		preExecute:     to.preExecute,
+	}, nil
+}
+
+// MustNewTool wraps NewTool and panics on error. Use in declarative tool
+// registration where a malformed input schema is a programmer error, not a
+// runtime condition — typically test fixtures and example code.
+func MustNewTool[I any](schema I, fn func(ctx context.Context, input I) (string, error), cfg ToolConfig, opts ...ToolOption) *Tool {
+	tl, err := NewTool(schema, fn, cfg, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return tl
+}
+
+// NewToolFromRawSchema builds a *Tool from a pre-existing JSON Schema —
+// used when the schema comes from an external source (MCP servers,
+// plugins) instead of being generated from a Go type.
+//
+// The exec function receives the JSON arguments verbatim; callers are
+// expected to do their own unmarshalling. Validation against the schema
+// still runs through the framework's compiled-schema gate.
+func NewToolFromRawSchema(
+	name, description string,
+	schema json.RawMessage,
+	exec func(ctx context.Context, args json.RawMessage) (string, error),
+) (*Tool, error) {
+	compiled, err := compileSchema(name, schema)
+	if err != nil {
+		return nil, err
+	}
+	return &Tool{
+		config:         ToolConfig{Name: name, Description: description},
+		schema:         schema,
+		compiledSchema: compiled,
+		execute:        exec,
+	}, nil
 }
 
 // Name returns the tool's name.
@@ -102,6 +166,15 @@ func (t *Tool) Execute(ctx context.Context, args json.RawMessage) (string, error
 	// Validate args before execution
 	if err := Validate(t, args); err != nil {
 		return "", fmt.Errorf("tool %s validation failed: %w", t.config.Name, err)
+	}
+
+	// PreExecute hook: business validation declared at tool-construction
+	// time. Rejections route corrective feedback to the LLM without
+	// burning a retry attempt; other errors fail the call immediately.
+	if t.preExecute != nil {
+		if err := t.preExecute(ctx, args); err != nil {
+			return "", err
+		}
 	}
 
 	// Execute with retries

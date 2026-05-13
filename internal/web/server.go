@@ -1,108 +1,92 @@
-// Package web implements the Looper Agent web UI using html/template + htmx + SSE.
 package web
 
 import (
-	"embed"
-	"html/template"
-	"io/fs"
+	"log"
 	"net/http"
-	"sync"
-	"time"
 )
 
-//go:embed templates/*.html
-var templateFS embed.FS
-
-//go:embed static/*
-var staticFS embed.FS
-
-type RunRecord struct {
-	ID        string    `json:"id"`
-	Input     string    `json:"input"`
-	Output    string    `json:"output"`
-	Status    string    `json:"status"`
-	Turns     int       `json:"turns"`
-	TotalUSD  float64   `json:"total_usd"`
-	Tokens    int       `json:"tokens"`
-	StartedAt time.Time `json:"started_at"`
-	EndedAt   time.Time `json:"ended_at,omitempty"`
-}
-
-type Store struct {
-	mu   sync.RWMutex
-	runs []*RunRecord
-}
-
-func NewStore() *Store { return &Store{runs: make([]*RunRecord, 0)} }
-
-func (s *Store) Add(r *RunRecord) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.runs = append(s.runs, r)
-}
-
-func (s *Store) All() []*RunRecord {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	cp := make([]*RunRecord, len(s.runs))
-	copy(cp, s.runs)
-	return cp
-}
-
+// Server hosts the debug panel. Construct with NewServer, attach a RunFunc
+// with SetRunner, then mount Handler() on any HTTP listener.
 type Server struct {
-	store     *Store
-	templates *template.Template
-	sse       *SSEManager
+	store    *Store
+	hub      *Hub
+	runner   RunFunc
+	storeDir string // on-disk persistence root, e.g. ".looper"
 }
 
-func NewServer() (*Server, error) {
-	tmpl, err := template.ParseFS(templateFS, "templates/*.html")
-	if err != nil {
-		return nil, err
+// Hub exposes the pub/sub bus so callers can publish or subscribe explicitly.
+func (s *Server) Hub() *Hub { return s.hub }
+
+// ServerOption configures a Server at construction time.
+type ServerOption func(*Server)
+
+// WithStoreDir sets the directory used to persist completed runs as JSON.
+// On startup, existing files in that directory are loaded into the store.
+// An empty string disables persistence.
+func WithStoreDir(dir string) ServerOption {
+	return func(s *Server) { s.storeDir = dir }
+}
+
+// NewServer returns a server ready to serve HTTP. If a store directory is
+// configured, it is created (if missing), gitignored, and any pre-existing
+// runs are hydrated into the in-memory store.
+func NewServer(opts ...ServerOption) (*Server, error) {
+	s := &Server{store: NewStore(), hub: NewHub()}
+	for _, opt := range opts {
+		opt(s)
 	}
-	return &Server{store: NewStore(), templates: tmpl, sse: NewSSEManager()}, nil
-}
-
-func isHX(r *http.Request) bool { return r.Header.Get("HX-Request") == "true" }
-
-// renderFull renders the full page (base.html + content block).
-func (s *Server) renderFull(w http.ResponseWriter, title, contentTmpl string, data map[string]any) {
-	if data == nil {
-		data = map[string]any{}
+	if s.storeDir != "" {
+		if err := ensureStoreDir(s.storeDir); err != nil {
+			log.Printf("warn: store dir setup: %v", err)
+		}
+		n, err := loadRunsFromDisk(s.storeDir, s.store)
+		if err != nil {
+			log.Printf("warn: failed to hydrate runs from %s: %v", s.storeDir, err)
+		} else if n > 0 {
+			log.Printf("Loaded %d runs from %s", n, s.storeDir)
+		}
 	}
-	data["Title"] = title
-	data["ContentTemplate"] = contentTmpl
-	s.templates.ExecuteTemplate(w, "base.html", data)
+	return s, nil
 }
 
-// renderHX renders just the content fragment for htmx swap.
-func (s *Server) renderHX(w http.ResponseWriter, contentTmpl string, data map[string]any) {
-	if data == nil {
-		data = map[string]any{}
-	}
-	s.templates.ExecuteTemplate(w, contentTmpl, data)
-}
+// SetRunner wires the agent runner used by POST /api/run. If unset, the
+// endpoint returns an error event instead of executing anything.
+func (s *Server) SetRunner(fn RunFunc) { s.runner = fn }
 
+// Store exposes the underlying run store (used by tests and integrations).
+func (s *Server) Store() *Store { return s.store }
+
+// Handler returns the http.Handler with every route registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /", s.handleDashboard)
-	mux.HandleFunc("GET /runs", s.handleRuns)
-	mux.HandleFunc("GET /runs/{id}", s.handleRunDetail)
-	mux.HandleFunc("GET /live", s.handleLive)
-	mux.HandleFunc("GET /live/{id}", s.handleLiveRun)
+	// ── Pages ────────────────────────────────────────────────────────────────
+	// {$} pins the dashboard to the literal root path (Go 1.22+ semantics) so
+	// any unmatched URL falls through to the 404 below, instead of silently
+	// serving the dashboard from a stale URL.
+	mux.HandleFunc("GET /{$}", s.handleDashboard)
+	mux.HandleFunc("GET /runs", s.handleRunsPage)
+	mux.HandleFunc("GET /runs/{id}", s.handleRunPage)
 
-	mux.HandleFunc("POST /api/run", s.handleAPIRun)
-	mux.HandleFunc("GET /api/runs", s.handleAPIRuns)
-	mux.HandleFunc("GET /api/costs", s.handleAPICosts)
+	// ── HTML fragments (datastar patches them into the DOM) ─────────────────
+	// One-shot fragments for cold loads / fallback polls.
+	mux.HandleFunc("GET /partials/sidebar", s.partialSidebar)
+	mux.HandleFunc("GET /partials/runs/{id}/pane", s.partialDetailPane)
+	mux.HandleFunc("GET /partials/dashboard", s.partialDashboard)
+	// Long-lived SSE streams: server pushes a fresh fragment to every
+	// connected client when the underlying state changes. This replaces
+	// polling for real-time UX.
+	mux.HandleFunc("GET /sse/sidebar", s.sseSidebar)
+	mux.HandleFunc("GET /sse/runs/{id}", s.sseDetailPane)
+	mux.HandleFunc("GET /sse/dashboard", s.sseDashboard)
 
-	mux.HandleFunc("GET /api/stream/{id}", s.sse.HandleStream)
-
-	staticSub, _ := fs.Sub(staticFS, "static")
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
+	// ── JSON / control ───────────────────────────────────────────────────────
+	mux.HandleFunc("POST /api/run", s.apiRun)
+	mux.HandleFunc("GET /api/runs", s.apiListRuns)
+	mux.HandleFunc("GET /api/costs", s.apiCosts)
+	// Trace ingestion endpoint for external agents. Receives one event per
+	// POST (run_start / step / run_end). See agent.go in the root package.
+	mux.HandleFunc("POST /ingest", s.apiIngest)
 
 	return mux
 }
-
-func (s *Server) Store() *Store       { return s.store }
-func (s *Server) SSEManager() *SSEManager { return s.sse }

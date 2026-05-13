@@ -1,9 +1,16 @@
 // Example: structured output — the agent returns a typed Go struct.
 //
-// When the response type is a struct, the framework automatically:
-//  1. Injects a final_response tool with the struct's JSON schema
-//  2. Adds instructions to the system prompt requiring structured output
-//  3. Validates the LLM response against the struct schema
+// WithStructuredOutput[T] generates the JSON Schema from T at agent
+// construction, injects a framework-managed `final_response` tool whose
+// arguments match the schema, and instructs the model to reply by
+// calling it. The framework short-circuits the run as soon as the model
+// invokes that tool: its `output` argument becomes res.Output, ready for
+// Decode[T] to unmarshal into a typed Go value.
+//
+// Works on every provider — Anthropic too, where native response_format
+// is unavailable. Strict-mode invariants from the schema generator
+// (additionalProperties:false, required fields, enum / range constraints)
+// flow through so the model gets a tight contract.
 //
 // Usage:
 //
@@ -16,42 +23,41 @@ import (
 	"fmt"
 	"os"
 
-	looper "github.com/cuatroochenta-idi/looper-agent"
+	"github.com/cuatroochenta-idi/looper-agent/looper"
 	"github.com/cuatroochenta-idi/looper-agent/provider/openai"
-	"github.com/cuatroochenta-idi/looper-agent/tool"
 )
 
 // AnalysisResult is the structured output we expect from the agent.
 type AnalysisResult struct {
-	Sentiment string   `json:"sentiment" jsonschema:"description=Positive/Negative/Neutral,enum=Positive|Negative|Neutral"`
-	Score     float64  `json:"score" jsonschema:"description=Confidence score 0-1,minimum=0,maximum=1"`
-	Keywords  []string `json:"keywords" jsonschema:"description=Key topics found in the text"`
+	Sentiment string   `json:"sentiment" jsonschema:"description=Sentiment verdict,enum=Positive|Negative|Neutral,required"`
+	Score     float64  `json:"score" jsonschema:"description=Confidence 0-1,minimum=0,maximum=1"`
+	Keywords  []string `json:"keywords" jsonschema:"description=Key topics found"`
 }
 
 func main() {
 	ctx := context.Background()
 
-	// 1. Create a provider
 	p := openai.NewProvider(os.Getenv("OPENAI_API_KEY"))
 
-	// 2. Define the system prompt
-	systemPrompt := "You are a sentiment analysis assistant. Always analyze text carefully."
+	agent := looper.MustNewAgent(p,
+		"You are a sentiment analysis assistant. Be precise.",
+		looper.WithStructuredOutput[AnalysisResult](),
+	)
 
-	// 3. Create the agent (no tools needed — final_response is injected automatically)
-	agent := looper.NewAgent(p, systemPrompt)
-
-	// 4. Run with structured output type
-	// The framework detects AnalysisResult and handles everything automatically.
-	result, err := agent.Run(ctx, "Analyze this: 'I absolutely love this product, it's amazing!'")
+	res, err := agent.Run(ctx, "Analyze this: 'I absolutely love this product, it's amazing!'")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "run failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 5. Print results
-	fmt.Printf("Sentiment: %s\n", result.Output)
-	fmt.Printf("Cost:      $%.6f (%d turns)\n", result.Cost.TotalUSD, result.Turns)
+	var out AnalysisResult
+	if err := looper.Decode(res, &out); err != nil {
+		fmt.Fprintf(os.Stderr, "decode failed: %v\nraw output: %s\n", err, res.Output)
+		os.Exit(1)
+	}
 
-	// _ is used to suppress the unused import of tool package
-	_ = tool.ToolConfig{}
+	fmt.Printf("Sentiment: %s\n", out.Sentiment)
+	fmt.Printf("Score:     %.2f\n", out.Score)
+	fmt.Printf("Keywords:  %v\n", out.Keywords)
+	fmt.Printf("Cost:      $%.6f  (%d turns)\n", res.Cost.TotalUSD, res.Turns)
 }

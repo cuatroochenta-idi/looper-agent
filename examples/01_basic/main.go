@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"os"
 
-	looper "github.com/cuatroochenta-idi/looper-agent"
+	"github.com/cuatroochenta-idi/looper-agent/looper"
 	"github.com/cuatroochenta-idi/looper-agent/provider/openai"
 )
 
@@ -28,7 +28,7 @@ func main() {
 	systemPrompt := "You are a helpful and concise assistant. Answer in one sentence."
 
 	// 3. Create the agent
-	agent := looper.NewAgent(p, systemPrompt)
+	agent := looper.MustNewAgent(p, systemPrompt)
 
 	// 4. Run the agent
 	result, err := agent.Run(ctx, "What is the capital of France?")

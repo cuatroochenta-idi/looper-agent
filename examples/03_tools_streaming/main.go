@@ -16,7 +16,7 @@ import (
 	"context"
 	"fmt"
 
-	looper "github.com/cuatroochenta-idi/looper-agent"
+	"github.com/cuatroochenta-idi/looper-agent/looper"
 	"github.com/cuatroochenta-idi/looper-agent/loop"
 	"github.com/cuatroochenta-idi/looper-agent/provider/openai"
 	"github.com/cuatroochenta-idi/looper-agent/tool"
@@ -39,7 +39,7 @@ func main() {
 	p := openai.NewProvider("demo-key") // replace with real key
 
 	// 2. Define tools
-	searchTool := tool.NewTool(SearchInput{},
+	searchTool := tool.MustNewTool(SearchInput{},
 		func(ctx context.Context, input SearchInput) (string, error) {
 			return fmt.Sprintf("Search results for: %s", input.Query), nil
 		},
@@ -50,7 +50,7 @@ func main() {
 		},
 	)
 
-	weatherTool := tool.NewTool(WeatherInput{},
+	weatherTool := tool.MustNewTool(WeatherInput{},
 		func(ctx context.Context, input WeatherInput) (string, error) {
 			return fmt.Sprintf("Weather in %s: 22C, sunny", input.City), nil
 		},
@@ -62,7 +62,7 @@ func main() {
 	)
 
 	// 3. Create the agent with tools
-	agent := looper.NewAgent(p,
+	agent := looper.MustNewAgent(p,
 		"You are a helpful assistant with access to search and weather tools. Use tools when needed.",
 		searchTool, weatherTool,
 	)

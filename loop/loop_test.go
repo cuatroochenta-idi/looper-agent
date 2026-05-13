@@ -91,7 +91,7 @@ func TestAgentLoopWithTools(t *testing.T) {
 		},
 	}
 
-	addTool := tool.NewTool(struct {
+	addTool := tool.MustNewTool(struct {
 		A int `json:"a" jsonschema:"required"`
 		B int `json:"b" jsonschema:"required"`
 	}{}, func(ctx context.Context, input struct {
@@ -137,7 +137,7 @@ func TestAgentLoopToolErrorFeedback(t *testing.T) {
 		},
 	}
 
-	riskyTool := tool.NewTool(struct{}{}, func(ctx context.Context, input struct{}) (string, error) {
+	riskyTool := tool.MustNewTool(struct{}{}, func(ctx context.Context, input struct{}) (string, error) {
 		return "", context.DeadlineExceeded
 	}, tool.ToolConfig{
 		Name:        "risky_op",
@@ -231,7 +231,7 @@ func TestAgentLoopMaxTurns(t *testing.T) {
 		},
 	}
 
-	echoTool := tool.NewTool(struct {
+	echoTool := tool.MustNewTool(struct {
 		Msg string `json:"msg" jsonschema:"required"`
 	}{}, func(ctx context.Context, input struct {
 		Msg string `json:"msg" jsonschema:"required"`
@@ -265,7 +265,7 @@ func TestAgentLoopParallelToolExecution(t *testing.T) {
 		},
 	}
 
-	fastTool := tool.NewTool(struct{}{}, func(ctx context.Context, input struct{}) (string, error) {
+	fastTool := tool.MustNewTool(struct{}{}, func(ctx context.Context, input struct{}) (string, error) {
 		return "fast-result", nil
 	}, tool.ToolConfig{Name: "fast", Description: "Fast tool", Parallel: true})
 

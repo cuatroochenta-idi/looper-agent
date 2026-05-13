@@ -32,7 +32,7 @@ type EnumInput struct {
 // --- Tool creation ---
 
 func TestNewTool(t *testing.T) {
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		return "hello " + input.Name, nil
 	}, ToolConfig{
 		Name:        "greet",
@@ -63,7 +63,7 @@ func TestNewTool(t *testing.T) {
 }
 
 func TestNewToolExecuteSuccess(t *testing.T) {
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		return "hello " + input.Name, nil
 	}, ToolConfig{
 		Name:        "greet",
@@ -80,7 +80,7 @@ func TestNewToolExecuteSuccess(t *testing.T) {
 }
 
 func TestNewToolExecuteValidationError(t *testing.T) {
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		return "ok", nil
 	}, ToolConfig{
 		Name: "greet",
@@ -94,7 +94,7 @@ func TestNewToolExecuteValidationError(t *testing.T) {
 }
 
 func TestNewToolExecuteFunctionError(t *testing.T) {
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		return "", context.DeadlineExceeded
 	}, ToolConfig{
 		Name:    "failing",
@@ -109,7 +109,7 @@ func TestNewToolExecuteFunctionError(t *testing.T) {
 
 func TestNewToolWithRetries(t *testing.T) {
 	attempts := 0
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		attempts++
 		if attempts < 3 {
 			return "", &testError{"temporary failure"}
@@ -133,7 +133,7 @@ func TestNewToolWithRetries(t *testing.T) {
 }
 
 func TestNewToolTimeout(t *testing.T) {
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -237,7 +237,7 @@ func TestGenerateSchemaNested(t *testing.T) {
 }
 
 func TestToolSchemaMap(t *testing.T) {
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		return "ok", nil
 	}, ToolConfig{Name: "test"})
 
@@ -250,7 +250,7 @@ func TestToolSchemaMap(t *testing.T) {
 // --- Validation ---
 
 func TestValidateSuccess(t *testing.T) {
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		return "ok", nil
 	}, ToolConfig{Name: "test"})
 
@@ -261,7 +261,7 @@ func TestValidateSuccess(t *testing.T) {
 }
 
 func TestValidateMissingRequired(t *testing.T) {
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		return "ok", nil
 	}, ToolConfig{Name: "test"})
 
@@ -272,7 +272,7 @@ func TestValidateMissingRequired(t *testing.T) {
 }
 
 func TestValidateEnumValue(t *testing.T) {
-	tl := NewTool(EnumInput{}, func(ctx context.Context, input EnumInput) (string, error) {
+	tl := MustNewTool(EnumInput{}, func(ctx context.Context, input EnumInput) (string, error) {
 		return "ok", nil
 	}, ToolConfig{Name: "test"})
 
@@ -288,7 +288,7 @@ func TestValidateEnumValue(t *testing.T) {
 }
 
 func TestValidateInvalidJSON(t *testing.T) {
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		return "ok", nil
 	}, ToolConfig{Name: "test"})
 
@@ -309,7 +309,7 @@ func TestValidateNilTool(t *testing.T) {
 
 func TestToolRegistryAdd(t *testing.T) {
 	reg := NewToolRegistry()
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		return "ok", nil
 	}, ToolConfig{Name: "test"})
 
@@ -321,9 +321,11 @@ func TestToolRegistryAdd(t *testing.T) {
 
 func TestToolRegistryRegister(t *testing.T) {
 	reg := NewToolRegistry()
-	reg.Register(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	if err := reg.Register(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		return "ok", nil
-	}, ToolConfig{Name: "test"})
+	}, ToolConfig{Name: "test"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
 
 	if reg.Len() != 1 {
 		t.Errorf("expected 1 tool, got %d", reg.Len())
@@ -334,9 +336,20 @@ func TestToolRegistryRegister(t *testing.T) {
 	}
 }
 
+func TestToolRegistryRegister_InvalidFn_ReturnsError(t *testing.T) {
+	reg := NewToolRegistry()
+	err := reg.Register(SimpleInput{}, "not a function", ToolConfig{Name: "bad"})
+	if err == nil {
+		t.Fatal("expected error when fn is not a function")
+	}
+	if reg.Len() != 0 {
+		t.Errorf("registry should stay empty on failure, got %d entries", reg.Len())
+	}
+}
+
 func TestToolRegistryToolsCopy(t *testing.T) {
 	reg := NewToolRegistry()
-	tl := NewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
+	tl := MustNewTool(SimpleInput{}, func(ctx context.Context, input SimpleInput) (string, error) {
 		return "ok", nil
 	}, ToolConfig{Name: "test"})
 	reg.Add(tl)

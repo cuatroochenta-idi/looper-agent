@@ -1,0 +1,158 @@
+package web
+
+import "fmt"
+
+// depthVar emits a CSS custom property so a card can be indented based on
+// how deep it sits in the parent/child tree (root=0, sub-agent=1, …).
+func depthVar(d int) string {
+	return fmt.Sprintf("--card-depth:%d", d)
+}
+
+// All interactions in the sidebar boil down to plain @get calls. Datastar
+// serializes the live signals ($q, $status, $selected) as the `datastar`
+// query parameter; the server reads them via datastar.ReadSignals — so the
+// URL stays static and there's no JS-side string concat.
+
+templ SidebarBody(data SidebarData) {
+	<div class="aside-search">
+		<span class="ico">⌕</span>
+		<input
+			type="text" name="q" autocomplete="off"
+			placeholder="Filter by input or ID…"
+			value={ data.Query }
+			data-bind:q
+			data-on:input__debounce.250ms="@get('/partials/sidebar')"
+		/>
+	</div>
+	@filterPills(data)
+	<div class="aside-list">
+		if len(data.Groups) == 0 && len(data.Loose) == 0 {
+			<div class="empty-state" style="padding:32px 16px;">
+				<span class="icon">∅</span>
+				<p style="font-size:12px;">
+					if data.Query != "" {
+						No matches for "{ data.Query }".
+					} else if data.Filter != "" {
+						No "{ data.Filter }" runs.
+					} else {
+						No runs yet. Trigger one via <code class="kbd">POST /api/run</code>
+						or run <code class="kbd">looper serve -- &lt;cmd&gt;</code>.
+					}
+				</p>
+			</div>
+		} else {
+			for _, g := range data.Groups {
+				@sessionGroup(g, data.Selected)
+			}
+			if len(data.Loose) > 0 {
+				if len(data.Groups) > 0 {
+					<div class="loose-divider">unsessioned</div>
+				}
+				for _, r := range data.Loose {
+					@sidebarCard(r, 0)
+				}
+			}
+		}
+	</div>
+}
+
+templ filterPills(data SidebarData) {
+	<div class="filter-pills">
+		@filterPill("", "all", data.CountAll)
+		@filterPill("running", "running", data.CountRun)
+		@filterPill("completed", "done", data.CountDone)
+		@filterPill("error", "failed", data.CountError)
+	</div>
+}
+
+templ filterPill(status, label string, count int) {
+	<button class="fp"
+		data-class={ "{active: $status === '" + status + "'}" }
+		data-on:click={ "$status = '" + status + "'; @get('/partials/sidebar')" }>
+		{ label } <span class="cnt">{ fmt.Sprintf("%d", count) }</span>
+	</button>
+}
+
+// sessionGroup renders a <details> wrapper around runs that share the same
+// LOOPER_SESSION_ID. Opens by default if the selected run belongs to it.
+templ sessionGroup(g SessionGroup, selected *RunRecord) {
+	{{ open := selected != nil && g.Contains(selected.ID) }}
+	<details class={ "sess", templ.KV("has-running", g.HasRunning), templ.KV("has-error", g.HasError) } open?={ open }>
+		<summary>
+			<span class="sess-caret">▸</span>
+			<span class="sess-meta">
+				<span class="sess-id" title={ g.ID }>session { g.Short() }</span>
+				if g.Project != "" {
+					<span class="sess-proj">{ g.Project }</span>
+				}
+			</span>
+			<span class="sess-stats">
+				<b>{ fmt.Sprintf("%d", len(g.Runs)) }</b> run{ pluralS(len(g.Runs)) }
+				<span class="sep">·</span>
+				<b>${ fmt.Sprintf("%.4f", g.TotalUSD) }</b>
+				<span class="sep">·</span>
+				<span class="mono">{ PrettyDuration(g.Duration()) }</span>
+			</span>
+			if g.HasRunning {
+				<span class="sess-live">● live</span>
+			}
+		</summary>
+		<div class="sess-body">
+			for _, root := range g.Roots {
+				@sidebarRunTree(root, 0)
+			}
+		</div>
+	</details>
+}
+
+// sidebarRunTree renders one run plus its children recursively. Depth
+// controls the left indent so a parent agent and its sub-agents form a
+// readable tree in the sidebar — agents spawned from tools sit one notch
+// inside their caller.
+templ sidebarRunTree(node *RunNode, depth int) {
+	@sidebarCard(node.Run, depth)
+	for _, child := range node.Children {
+		@sidebarRunTree(child, depth+1)
+	}
+}
+
+// sidebarCard renders a single run as a flat selector. A stable id lets
+// datastar's morph engine match the same card across SSE patches, and
+// data-preserve-attr="class" keeps the reactive "selected" class intact
+// during a patch — without it the class blinks off for one frame between
+// the morph and data-class re-evaluation, and the user perceives a deselect.
+//
+// The `depth` parameter sets a CSS custom property so the card is indented
+// proportionally to its place in the parent/child tree.
+templ sidebarCard(run *RunRecord, depth int) {
+	<a id={ "card-" + run.ID }
+		class={ "card-x", "s-" + string(run.Status), templ.KV("nested", depth > 0) }
+		style={ depthVar(depth) }
+		href={ templ.URL("/runs/" + run.ID) }
+		data-class={ "{selected: $selected === '" + run.ID + "'}" }
+		data-preserve-attr="class"
+		data-on:click__prevent={ "$selected = '" + run.ID + "'; @get('/partials/runs/" + run.ID + "/pane')" }>
+		<div class="cx-bar"></div>
+		<div class="cx-content">
+			<div class="cx-row1">
+				<span class={ "cx-status", "s-" + string(run.Status) }>
+					<span class="dot"></span>{ string(run.Status) }
+				</span>
+				<span class="cx-id">{ ShortID(run.ID) }</span>
+				if run.Status == RunRunning {
+					<span class="cx-spin" aria-label="running" title="in flight"></span>
+				}
+			</div>
+			<div class="cx-input">{ run.Input }</div>
+			<div class="cx-row3">
+				<span><b>{ fmt.Sprintf("%d", run.Turns) }</b>&thinsp;turns</span>
+				<span class="sep">·</span>
+				<span><b>${ fmt.Sprintf("%.4f", run.TotalUSD) }</b></span>
+				<span class="sep">·</span>
+				<span><b>{ fmt.Sprintf("%d", run.Tokens) }</b>&thinsp;tk</span>
+				<span class="sep">·</span>
+				<span class="mono">{ run.StartedAt.Format("15:04:05") }</span>
+			</div>
+		</div>
+	</a>
+}

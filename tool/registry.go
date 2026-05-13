@@ -19,14 +19,28 @@ func NewToolRegistry() *ToolRegistry {
 // Register adds a tool to the registry. The schema and fn parameters use the
 // same signature as NewTool but fn is typed as any for registration-time
 // wrapping. The schema struct type and fn input type must match.
-func (r *ToolRegistry) Register(schema any, fn any, cfg ToolConfig) {
-	// fn must be func(context.Context, T) (string, error) where T matches schema type.
-	// We use reflection-free wrapping: the Tool struct stores a generic closure.
-	t := wrapTool(schema, fn, cfg)
+//
+// Returns an error if schema generation or compilation fails. Use MustRegister
+// when the input is known to be valid at compile time (test fixtures, declarative
+// tool sets).
+func (r *ToolRegistry) Register(schema any, fn any, cfg ToolConfig) error {
+	t, err := newToolFromAny(schema, fn, cfg)
+	if err != nil {
+		return err
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tools = append(r.tools, t)
+	return nil
+}
+
+// MustRegister wraps Register and panics on error. Use in declarative
+// registrations where a malformed schema is a programmer error.
+func (r *ToolRegistry) MustRegister(schema any, fn any, cfg ToolConfig) {
+	if err := r.Register(schema, fn, cfg); err != nil {
+		panic(err)
+	}
 }
 
 // Add adds a pre-built *Tool to the registry.
@@ -52,18 +66,3 @@ func (r *ToolRegistry) Len() int {
 	return len(r.tools)
 }
 
-// wrapTool creates a *Tool from untyped schema and fn parameters using
-// runtime type information. It extracts the input type from fn's signature
-// and generates the schema from the provided example struct.
-//
-// This is the internal bridge between the untyped Register method and
-// the type-safe NewTool constructor.
-func wrapTool(schema any, fn any, cfg ToolConfig) *Tool {
-	// At registration time, we call NewTool with the schema as both
-	// the schema source and the type parameter. The fn closure is
-	// already typed correctly at the call site.
-	//
-	// We use a helper that captures the fn via interface{} assertion
-	// to avoid requiring the caller to specify type parameters.
-	return newToolFromAny(schema, fn, cfg)
-}

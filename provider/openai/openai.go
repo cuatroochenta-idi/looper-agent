@@ -8,8 +8,10 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/cuatroochenta-idi/looper-agent/message"
 	"github.com/cuatroochenta-idi/looper-agent/provider"
@@ -31,8 +33,19 @@ type Provider struct {
 	temperature float64
 
 	// apiKeys holds multiple keys for rotation.
-	apiKeys     []string
-	keyIndex    int
+	apiKeys  []string
+	keyIndex int
+
+	// baseURL points at an OpenAI-compatible endpoint (LM Studio, OpenRouter,
+	// Ollama, vLLM…). Empty means the SDK default — api.openai.com.
+	baseURL string
+
+	// reasoningEffort is the default reasoning_effort for o-series / gpt-5.
+	// Per-request ReasoningConfig overrides this.
+	reasoningEffort shared.ReasoningEffort
+	// includeReasoning is the default for "surface reasoning deltas in
+	// StreamChunk.Reasoning". Per-request overrides win.
+	includeReasoning bool
 }
 
 // Option configures an OpenAI Provider.
@@ -63,14 +76,12 @@ func WithTemperature(t float64) Option {
 	return func(p *Provider) { p.temperature = t }
 }
 
-// WithBaseURL sets a custom base URL (for OpenRouter, Ollama, etc.).
+// WithBaseURL sets a custom base URL (for OpenRouter, Ollama, LM Studio, vLLM…).
+// The client is built once in NewProvider after every option has run, so this
+// just stores the URL — earlier we built the client here and the default
+// constructor at the end of NewProvider clobbered it.
 func WithBaseURL(url string) Option {
-	return func(p *Provider) {
-		p.client = openai.NewClient(
-			option.WithAPIKey("custom"),
-			option.WithBaseURL(url),
-		)
-	}
+	return func(p *Provider) { p.baseURL = url }
 }
 
 // WithAPIKeys sets multiple API keys for round-robin rotation.
@@ -78,6 +89,38 @@ func WithAPIKeys(keys ...string) Option {
 	return func(p *Provider) {
 		p.apiKeys = keys
 	}
+}
+
+// WithReasoningEffort sets the default reasoning_effort for o-series and
+// gpt-5 models. Maps from provider.ReasoningEffort to the SDK's enum.
+// Non-reasoning models silently ignore this.
+func WithReasoningEffort(e provider.ReasoningEffort) Option {
+	return func(p *Provider) { p.reasoningEffort = toSDKEffort(e) }
+}
+
+// WithIncludeReasoning controls whether reasoning_content deltas from
+// LM Studio / DeepSeek-R1 / Qwen3 / etc. (and any future first-party
+// surface) are emitted on StreamChunk.Reasoning. When false (default)
+// reasoning is discarded so the loop sees only the model's final text.
+func WithIncludeReasoning(b bool) Option {
+	return func(p *Provider) { p.includeReasoning = b }
+}
+
+// toSDKEffort maps our provider-neutral enum onto the openai-go SDK's
+// shared.ReasoningEffort. Unknown values become the zero value (omitted).
+// "minimal" is gpt-5 only — we send it through; older models will 400.
+func toSDKEffort(e provider.ReasoningEffort) shared.ReasoningEffort {
+	switch e {
+	case provider.ReasoningEffortLow:
+		return shared.ReasoningEffortLow
+	case provider.ReasoningEffortMedium:
+		return shared.ReasoningEffortMedium
+	case provider.ReasoningEffortHigh:
+		return shared.ReasoningEffortHigh
+	case provider.ReasoningEffortMinimal:
+		return shared.ReasoningEffort("minimal")
+	}
+	return ""
 }
 
 // NewProvider creates an OpenAI provider with the given API key.
@@ -98,7 +141,11 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 		p.apiKeys = []string{apiKey}
 	}
 
-	p.client = openai.NewClient(option.WithAPIKey(p.apiKeys[0]))
+	clientOpts := []option.RequestOption{option.WithAPIKey(p.apiKeys[0])}
+	if p.baseURL != "" {
+		clientOpts = append(clientOpts, option.WithBaseURL(p.baseURL))
+	}
+	p.client = openai.NewClient(clientOpts...)
 
 	p.translator = &Translator{
 		model:       p.model,
@@ -126,6 +173,17 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	if req.Temperature != 0 {
 		params.Temperature = openai.Float(req.Temperature)
 	}
+	if eff := p.resolveEffort(req.Reasoning); eff != "" {
+		params.ReasoningEffort = eff
+	}
+	if tc := buildToolChoiceParams(req.ToolChoice); tc != nil && len(req.Tools) > 0 {
+		params.ToolChoice = *tc
+	}
+	if rf, err := buildResponseFormatParams(req.ResponseSchema, req.ResponseSchemaName); err != nil {
+		return nil, fmt.Errorf("openai response_format: %w", err)
+	} else if rf != nil {
+		params.ResponseFormat = *rf
+	}
 
 	chat, err := p.client.Chat.Completions.New(ctx, params)
 	if err != nil {
@@ -136,7 +194,32 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	if err != nil {
 		return nil, fmt.Errorf("openai translate response: %w", err)
 	}
+	// reasoning_content is non-standard but emitted by LM Studio / DeepSeek /
+	// Qwen3 — peek into the raw JSON of the first choice's message.
+	if p.shouldIncludeReasoning(req.Reasoning) && len(chat.Choices) > 0 {
+		if r := extractReasoningField(chat.Choices[0].Message.RawJSON()); r != "" {
+			resp.Reasoning = r
+		}
+	}
 	return resp, nil
+}
+
+// resolveEffort picks the effort to send: per-request if set, else the
+// provider default. Returns "" to omit the field entirely.
+func (p *Provider) resolveEffort(rc *provider.ReasoningConfig) shared.ReasoningEffort {
+	if rc != nil && rc.Effort != provider.ReasoningEffortNone {
+		return toSDKEffort(rc.Effort)
+	}
+	return p.reasoningEffort
+}
+
+// shouldIncludeReasoning is true when the caller (per-request or provider
+// default) asked for reasoning traces in the output.
+func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
+	if rc != nil {
+		return rc.IncludeInOutput
+	}
+	return p.includeReasoning
 }
 
 // ChatStream sends a streaming chat completion request.
@@ -154,7 +237,24 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 	if req.Temperature != 0 {
 		params.Temperature = openai.Float(req.Temperature)
 	}
+	if eff := p.resolveEffort(req.Reasoning); eff != "" {
+		params.ReasoningEffort = eff
+	}
+	if tc := buildToolChoiceParams(req.ToolChoice); tc != nil && len(req.Tools) > 0 {
+		params.ToolChoice = *tc
+	}
+	if rf, err := buildResponseFormatParams(req.ResponseSchema, req.ResponseSchemaName); err != nil {
+		return nil, fmt.Errorf("openai response_format: %w", err)
+	} else if rf != nil {
+		params.ResponseFormat = *rf
+	}
+	// Request token usage in the streaming response — OpenAI omits it by default.
+	params.StreamOptions = openai.ChatCompletionStreamOptionsParam{
+		IncludeUsage: openai.Bool(true),
+	}
 
+	includeReasoning := p.shouldIncludeReasoning(req.Reasoning)
+	harmony := newHarmonyFilter(includeReasoning)
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 	ch := make(chan provider.StreamChunk, 64)
 
@@ -162,6 +262,11 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		defer close(ch)
 		var toolCallMap map[int]*toolCallAccumulator
 		var contentBuilder string
+		// With stream_options.include_usage=true, OpenAI emits an extra chunk
+		// after finish_reason whose Choices slice is empty and whose Usage
+		// is populated. We must drain the stream until completion to capture
+		// it, rather than returning at finish_reason.
+		var finalChunk *openai.ChatCompletionChunk
 
 		for stream.Next() {
 			chunk := stream.Current()
@@ -169,11 +274,28 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 			if len(chunk.Choices) > 0 {
 				delta := chunk.Choices[0].Delta
 
-				// Text content delta
+				// reasoning_content is a non-standard delta field used by
+				// LM Studio, DeepSeek-R1, Qwen3, etc. We read it off the
+				// raw JSON since the SDK schema doesn't expose it.
+				if r := extractReasoningField(delta.RawJSON()); r != "" {
+					if includeReasoning {
+						ch <- provider.StreamChunk{Reasoning: r}
+					}
+					// Either way: skip the content-arm — many local
+					// models repeat the same text in both fields.
+				}
+
+				// Text content delta — pipe through the Harmony filter,
+				// which routes <|channel|>analysis fragments to reasoning
+				// and surfaces only the final-channel text as content.
 				if delta.Content != "" {
-					contentBuilder += delta.Content
-					ch <- provider.StreamChunk{
-						Content: delta.Content,
+					cText, rText := harmony.feed(delta.Content)
+					if cText != "" {
+						contentBuilder += cText
+						ch <- provider.StreamChunk{Content: cText}
+					}
+					if rText != "" && includeReasoning {
+						ch <- provider.StreamChunk{Reasoning: rText}
 					}
 				}
 
@@ -198,16 +320,31 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 					}
 				}
 
-				// Check finish reason
 				if chunk.Choices[0].FinishReason != "" {
-					ch <- buildFinalChunk(contentBuilder, toolCallMap, &chunk)
-					return
+					c := chunk
+					finalChunk = &c
+				}
+			}
+
+			// Usage-only chunk arrives after finish_reason; merge it.
+			if chunk.Usage.TotalTokens > 0 || chunk.Usage.PromptTokens > 0 {
+				if finalChunk == nil {
+					c := chunk
+					finalChunk = &c
+				} else {
+					finalChunk.Usage = chunk.Usage
 				}
 			}
 		}
 
-		// Stream ended — emit accumulated content
-		ch <- buildFinalChunk(contentBuilder, toolCallMap, nil)
+		final := buildFinalChunk(contentBuilder, toolCallMap, finalChunk)
+		// Surface stream errors so callers see HTTP 4xx/5xx, malformed SSE,
+		// connection drops, etc. Without this the agent silently sees an
+		// empty final chunk and looks "successful but mute."
+		if err := stream.Err(); err != nil {
+			final.Error = fmt.Errorf("openai stream: %w", err)
+		}
+		ch <- final
 	}()
 
 	return ch, nil
@@ -275,7 +412,7 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 		case message.MessageSystem:
 			openaiMessages = append(openaiMessages, openai.SystemMessage(msg.Content))
 		case message.MessageUser:
-			openaiMessages = append(openaiMessages, openai.UserMessage(msg.Content))
+			openaiMessages = append(openaiMessages, buildUserMessage(msg))
 		case message.MessageAssistant:
 			if len(msg.ToolCalls) > 0 {
 				params := openai.ChatCompletionAssistantMessageParam{}
@@ -334,6 +471,77 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 	}
 
 	return params
+}
+
+// buildUserMessage translates a universal user message into an OpenAI
+// ChatCompletionMessageParamUnion. Pure-text messages take the legacy
+// fast path (plain string content) so we don't regress the wire shape
+// users have relied on for billing and trace expectations. Multi-modal
+// messages (any non-text Part) emit OpenAI's content array form, with
+// inline images rendered as base64 data URLs.
+func buildUserMessage(msg message.Message) openai.ChatCompletionMessageParamUnion {
+	if isPureText(msg) {
+		return openai.UserMessage(textOf(msg))
+	}
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(msg.Parts))
+	for _, p := range msg.Parts {
+		switch p.Type {
+		case message.PartText:
+			if p.Text != "" {
+				parts = append(parts, openai.TextContentPart(p.Text))
+			}
+		case message.PartImageURL:
+			parts = append(parts, openai.ImageContentPart(
+				openai.ChatCompletionContentPartImageImageURLParam{URL: p.URL},
+			))
+		case message.PartImage:
+			dataURL := "data:" + p.MimeType + ";base64," + base64.StdEncoding.EncodeToString(p.Data)
+			parts = append(parts, openai.ImageContentPart(
+				openai.ChatCompletionContentPartImageImageURLParam{URL: dataURL},
+			))
+		// PartFile / PartAudio fall through — only newer chat models accept
+		// them and the SDK requires extra plumbing; skip silently for now
+		// instead of refusing the whole message.
+		}
+	}
+	return openai.UserMessage(parts)
+}
+
+// isPureText returns true when a message has no Parts (legacy) or every
+// Part is a text Part. Used as the fast-path gate in buildUserMessage.
+func isPureText(msg message.Message) bool {
+	if len(msg.Parts) == 0 {
+		return true
+	}
+	for _, p := range msg.Parts {
+		if p.Type != message.PartText {
+			return false
+		}
+	}
+	return true
+}
+
+// textOf returns the textual content of a message. Prefers Parts if present
+// (multi-modal builds set both Content and Parts) and falls back to the
+// legacy Content field for messages built without Parts.
+func textOf(msg message.Message) string {
+	if len(msg.Parts) == 0 {
+		return msg.Content
+	}
+	if msg.Content != "" {
+		return msg.Content
+	}
+	// Last resort: concatenate text parts.
+	var b strings.Builder
+	for _, p := range msg.Parts {
+		if p.Type == message.PartText {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(p.Text)
+		}
+	}
+	return b.String()
 }
 
 // FromNative converts an OpenAI ChatCompletion response to universal format.

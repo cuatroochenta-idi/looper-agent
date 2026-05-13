@@ -60,6 +60,13 @@ func (h *History) AddUserMessage(content string) {
 	h.messages = append(h.messages, NewUserMessage(content))
 }
 
+// AddUserMessageParts appends a multi-modal user message built from Parts.
+func (h *History) AddUserMessageParts(parts ...Part) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.messages = append(h.messages, NewUserMessageWithParts(parts...))
+}
+
 // AddAssistantMessage appends an assistant message with optional tool calls.
 func (h *History) AddAssistantMessage(content string, toolCalls []ToolCall) {
 	h.mu.Lock()
@@ -130,6 +137,43 @@ func (h *History) Truncate(maxMessages int) {
 	if len(h.messages) > maxMessages {
 		h.messages = h.messages[len(h.messages)-maxMessages:]
 	}
+}
+
+// TruncateByTurns keeps only the last maxUserTurns user-turn blocks and the
+// assistant + tool messages that belong to them. Use this instead of
+// Truncate when the history contains tool_use / tool_result pairs:
+// Anthropic returns a 400 when those pairs are split across the request
+// boundary, so the cut point is always a user message.
+//
+// Semantics:
+//
+//   - n == 0 empties the history.
+//   - n >= total user turns keeps everything.
+//   - The retained window starts at the (count - n)th user message and
+//     extends to the end of the history, so every tool_use is paired with
+//     its tool_result(s) inside the window.
+func (h *History) TruncateByTurns(maxUserTurns int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if maxUserTurns <= 0 {
+		h.messages = nil
+		return
+	}
+
+	// Collect indices of user messages so we can pick the cut point.
+	var userIdx []int
+	for i, m := range h.messages {
+		if m.Type == MessageUser {
+			userIdx = append(userIdx, i)
+		}
+	}
+	if len(userIdx) <= maxUserTurns {
+		return
+	}
+
+	cut := userIdx[len(userIdx)-maxUserTurns]
+	h.messages = append([]Message(nil), h.messages[cut:]...)
 }
 
 // TurnCount returns the number of user turns (user messages).
