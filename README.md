@@ -1,17 +1,16 @@
-# Looper Agent (Nautilus)
+# Looper Agent
 
-A minimalist, production-oriented LLM agent framework for Go. Functional-first
-API, three first-party providers (OpenAI, Anthropic, Google), and the
-operational primitives you actually need in production: typed structured
-output with retry, validators, concurrent-session-safe state, native prompt
-caching, circuit breakers, MCP integration.
+A minimalist LLM agent framework for Go, built on each provider's
+official SDK. Ships with typed structured output and auto-retry, real
+prompt caching, circuit breakers, concurrent-session-safe state, and a
+native MCP client.
 
 ```go
 agent := looper.MustNewAgent(
     openai.NewProvider(os.Getenv("OPENAI_API_KEY")),
     "You are a precise assistant.",
 )
-res, _ := agent.Run(ctx, "What's the capital of France?")
+res, _ := agent.Run(context.Background(), "What's the capital of France?")
 fmt.Println(res.Output, res.Cost.TotalUSD)
 ```
 
@@ -42,23 +41,25 @@ fmt.Println(res.Output, res.Cost.TotalUSD)
 
 ## Install & quick start
 
-**One-liner — install the `looper` CLI globally**:
+### CLI tool
 
 ```bash
-go install github.com/cuatroochenta-idi/looper-agent/cmd/looper@latest \
-  && export PATH="$PATH:$(go env GOPATH)/bin" \
-  && looper version
+go install github.com/cuatroochenta-idi/looper-agent/cmd/looper@latest
 ```
 
-That drops a `looper` binary in `$(go env GOPATH)/bin`, puts it on your
-`$PATH` for the current shell, and prints the installed version. To make
-the PATH change permanent, append the same `export` line to your
-`~/.zshrc` / `~/.bashrc`. Upgrade later with the same command.
+The `looper` binary lands in `$(go env GOPATH)/bin`. Ensure that
+directory is on your `PATH`, then:
 
-After install you can run the debug UI, the MCP server, or wrap any Go
-program with traces — see [Debug CLI](#debug-cli-looper-command).
+```bash
+looper version    # confirms the install
+looper            # prints usage
+```
 
-**Use as a Go library** in your own project:
+Upgrade later with the same `go install` command. Pin a release with
+`@v0.0.3`. See [Debug CLI](#debug-cli-looper-command) for what each
+subcommand does.
+
+### Go library
 
 ```bash
 go get github.com/cuatroochenta-idi/looper-agent@latest
@@ -891,10 +892,11 @@ See `tests/e2e/README.md` for details.
 
 ---
 
-## License & status
+## Further reading
 
-Internal framework, status: feature-complete v1. The PRD in
-`docs/prds/looper-agent_2026-05-11.md` was the original kickoff;
-`docs/CHANGELOG.md` (if you keep one) is the canonical "what landed when".
-
-For deeper architecture notes, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — internal runtime
+  layout, design principles, where to extend.
+- [`docs/RECIPES.md`](docs/RECIPES.md) — copy-pasteable patterns for
+  the most common production scenarios.
+- [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) — telemetry, traces,
+  cost tracking, debugging tips.

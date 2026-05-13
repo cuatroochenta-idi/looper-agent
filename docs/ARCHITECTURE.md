@@ -1,7 +1,7 @@
 # Architecture
 
-Internal map of Nautilus for contributors and curious users. Follows the
-runtime path from `agent.Run` down through providers.
+Internal map of the framework for contributors and curious users.
+Follows the runtime path from `agent.Run` down through providers.
 
 ## Top-down: a single Run
 

@@ -1,4 +1,4 @@
-# Nautilus E2E suite
+# Looper Agent — E2E suite
 
 These tests pin the wire-shape contract of every major framework feature
 against the real OpenAI / Gemini / Anthropic APIs. They are **gated by a
