@@ -4,7 +4,8 @@
 *.dll
 *.so
 *.dylib
-/looper
+# (the `looper` binary lives in /bin which is ignored at the bottom of this
+# file — do not add `/looper` here: it shadows the looper/ package directory)
 
 # Test binary
 *.test
