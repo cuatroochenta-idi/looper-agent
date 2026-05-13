@@ -42,6 +42,24 @@ fmt.Println(res.Output, res.Cost.TotalUSD)
 
 ## Install & quick start
 
+**One-liner — install the `looper` CLI globally**:
+
+```bash
+go install github.com/cuatroochenta-idi/looper-agent/cmd/looper@latest \
+  && export PATH="$PATH:$(go env GOPATH)/bin" \
+  && looper version
+```
+
+That drops a `looper` binary in `$(go env GOPATH)/bin`, puts it on your
+`$PATH` for the current shell, and prints the installed version. To make
+the PATH change permanent, append the same `export` line to your
+`~/.zshrc` / `~/.bashrc`. Upgrade later with the same command.
+
+After install you can run the debug UI, the MCP server, or wrap any Go
+program with traces — see [Debug CLI](#debug-cli-looper-command).
+
+**Use as a Go library** in your own project:
+
 ```bash
 go get github.com/cuatroochenta-idi/looper-agent@latest
 ```
