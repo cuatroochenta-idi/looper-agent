@@ -682,13 +682,42 @@ Run any of them with `go run ./examples/12_multimodal` (after sourcing
 
 ## Debug CLI (`looper` command)
 
-A small CLI lives in `cmd/looper`. Build it once:
+A small CLI lives in `cmd/looper`. Two install paths depending on whether
+you want a shareable tool or a local dev build.
+
+**Install globally as a CLI** (recommended for everyday use):
+
+```bash
+go install github.com/cuatroochenta-idi/looper-agent/cmd/looper@latest
+
+looper version          # → looper v0.0.3
+looper                  # prints usage
+```
+
+The binary lands in `$(go env GOBIN)` — falls back to `$(go env GOPATH)/bin`,
+which is typically `~/go/bin`. Make sure that's on your `$PATH`:
+
+```bash
+echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.zshrc  # or ~/.bashrc
+```
+
+Pin to a specific release if you need reproducibility:
+
+```bash
+go install github.com/cuatroochenta-idi/looper-agent/cmd/looper@v0.0.3
+```
+
+Upgrade later with the same command + `@latest`.
+
+**Build from a local checkout** (recommended when contributing):
 
 ```bash
 go build -o ./bin/looper ./cmd/looper
-./bin/looper version              # → looper version 0.1.0
-./bin/looper                      # prints usage
+./bin/looper version    # → looper (devel a1b2c3d4e5f6)
 ```
+
+Local builds report `(devel)` with the short commit SHA when Go embedded
+VCS info. Installs from a tagged module print the tag verbatim.
 
 Three subcommands. Each one targets a different debugging surface — a
 live web UI for running agents, a child-process wrapper that tees
@@ -699,7 +728,7 @@ framework-level tools to MCP-aware clients (Claude Code, Cursor, Zed,
 ### `looper serve` — live web UI + trace ingest
 
 ```bash
-./bin/looper serve [--port 9090] [--store .looper] [-- <child-cmd> [args...]]
+looper serve [--port 9090] [--store .looper] [-- <child-cmd> [args...]]
 ```
 
 | Flag | Default | Effect |
@@ -711,7 +740,7 @@ framework-level tools to MCP-aware clients (Claude Code, Cursor, Zed,
 Pattern A — UI only, drive the demo agent from the browser / curl:
 
 ```bash
-./bin/looper serve --port 9090
+looper serve --port 9090
 # open http://localhost:9090
 curl -s -X POST localhost:9090/api/run --data-urlencode 'input=hello'
 ```
@@ -719,7 +748,7 @@ curl -s -X POST localhost:9090/api/run --data-urlencode 'input=hello'
 Pattern B — wrap any Go program so its runs flow through the panel:
 
 ```bash
-./bin/looper serve -- go run ./examples/05_hooks_lifecycle
+looper serve -- go run ./examples/05_hooks_lifecycle
 ```
 
 The child's first `agent.Run` posts to the panel within ~150 ms of
@@ -743,15 +772,15 @@ child exits the panel stays alive (Ctrl-C to stop).
 **Demo provider** (used by `POST /api/run`) is picked by env:
 
 ```bash
-LOOPER_PROVIDER=openai   ./bin/looper serve   # default, needs OPENAI_API_KEY
-LOOPER_PROVIDER=anthropic ./bin/looper serve  # needs ANTHROPIC_API_KEY
-LOOPER_PROVIDER=google   ./bin/looper serve   # needs GOOGLE_API_KEY or GEMINI_API_KEY
+LOOPER_PROVIDER=openai   looper serve   # default, needs OPENAI_API_KEY
+LOOPER_PROVIDER=anthropic looper serve  # needs ANTHROPIC_API_KEY
+LOOPER_PROVIDER=google   looper serve   # needs GOOGLE_API_KEY or GEMINI_API_KEY
 ```
 
 ### `looper mcp` — MCP debug server over stdio
 
 ```bash
-./bin/looper mcp
+looper mcp
 ```
 
 JSON-RPC over stdio, ready to be wired into any MCP-aware client:
@@ -777,7 +806,7 @@ Quick smoke test from the shell:
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  | ./bin/looper mcp
+  | looper mcp
 ```
 
 For Claude Code / Cursor / Zed: add `looper mcp` as an MCP server in
@@ -815,7 +844,7 @@ docker run --rm -p 4317:4317 -p 16686:16686 \
   -e COLLECTOR_OTLP_ENABLED=true \
   jaegertracing/all-in-one:latest
 
-LOOPER_OTEL_ENABLED=true ./bin/looper serve -- go run ./examples/05_hooks_lifecycle
+LOOPER_OTEL_ENABLED=true looper serve -- go run ./examples/05_hooks_lifecycle
 # Jaeger UI → http://localhost:16686
 ```
 

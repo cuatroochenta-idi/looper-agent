@@ -17,6 +17,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 )
 
 func main() {
@@ -33,11 +34,36 @@ func main() {
 	case "mcp":
 		mcpCmd(os.Args[2:])
 	case "version", "--version", "-v":
-		fmt.Println("looper version 0.1.0")
+		fmt.Println("looper", versionString())
 	default:
 		printUsage()
 		os.Exit(1)
 	}
+}
+
+// versionString reports the module version embedded by `go install` /
+// `go build` when the binary was built from a tagged commit. Falls back
+// to "(devel)" for ad-hoc local builds — same convention as `go version
+// -m`.
+func versionString() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok || bi == nil {
+		return "(unknown)"
+	}
+	if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	// Local dev build — surface the VCS commit if Go embedded it.
+	for _, s := range bi.Settings {
+		if s.Key == "vcs.revision" && s.Value != "" {
+			rev := s.Value
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+			return "(devel " + rev + ")"
+		}
+	}
+	return "(devel)"
 }
 
 func printUsage() {
