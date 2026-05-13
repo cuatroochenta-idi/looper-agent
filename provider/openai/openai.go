@@ -162,14 +162,22 @@ func (p *Provider) Model() string { return p.model }
 func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider.LLMResponse, error) {
 	params := p.translator.ToNative(req.SystemPrompt, req.Messages, req.Tools).(openai.ChatCompletionNewParams)
 
-	if req.Model != "" {
-		params.Model = shared.ChatModel(req.Model)
-	} else {
-		params.Model = shared.ChatModel(p.model)
+	// Resolve the effective model BEFORE applying request-level config:
+	// applyMaxTokens routes by model family (o-series / gpt-5 need
+	// max_completion_tokens; legacy chat models keep max_tokens), so it
+	// must see the final model name, not the translator's default.
+	model := req.Model
+	if model == "" {
+		model = p.model
 	}
-	if req.MaxTokens > 0 {
-		params.MaxTokens = openai.Int(int64(req.MaxTokens))
+	params.Model = shared.ChatModel(model)
+
+	maxTokens := req.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = p.maxTokens
 	}
+	applyMaxTokens(&params, model, maxTokens)
+
 	if req.Temperature != 0 {
 		params.Temperature = openai.Float(req.Temperature)
 	}
@@ -226,14 +234,18 @@ func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
 func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-chan provider.StreamChunk, error) {
 	params := p.translator.ToNative(req.SystemPrompt, req.Messages, req.Tools).(openai.ChatCompletionNewParams)
 
-	if req.Model != "" {
-		params.Model = shared.ChatModel(req.Model)
-	} else {
-		params.Model = shared.ChatModel(p.model)
+	model := req.Model
+	if model == "" {
+		model = p.model
 	}
-	if req.MaxTokens > 0 {
-		params.MaxTokens = openai.Int(int64(req.MaxTokens))
+	params.Model = shared.ChatModel(model)
+
+	maxTokens := req.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = p.maxTokens
 	}
+	applyMaxTokens(&params, model, maxTokens)
+
 	if req.Temperature != 0 {
 		params.Temperature = openai.Float(req.Temperature)
 	}
@@ -463,9 +475,12 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 		Model:       shared.ChatModel(t.model),
 		Temperature: openai.Float(t.temperature),
 	}
-	if t.maxTokens > 0 {
-		params.MaxTokens = openai.Int(int64(t.maxTokens))
-	}
+	// Token cap is set by Chat / ChatStream, not here — they know the
+	// effective model after request-level overrides and route to either
+	// MaxTokens or MaxCompletionTokens accordingly. Doing it in the
+	// translator would re-introduce the v0.0.2 bug where gpt-5 / o-series
+	// models received the legacy max_tokens field and got rejected by
+	// the API.
 	if len(openaiTools) > 0 {
 		params.Tools = openaiTools
 	}
