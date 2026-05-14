@@ -127,9 +127,15 @@ func toSDKEffort(e provider.ReasoningEffort) shared.ReasoningEffort {
 func NewProvider(apiKey string, opts ...Option) *Provider {
 	cfg := provider.DefaultCacheConfig()
 	p := &Provider{
-		model:       "gpt-4o",
-		config:      &cfg,
-		maxTokens:   4096,
+		model:  "gpt-4o",
+		config: &cfg,
+		// Default raised from 4096 → 200k so reasoning families (gpt-5,
+		// o-series) and large structured tool calls aren't silently
+		// truncated. OpenAI clamps per-model to the actual completion
+		// cap, so this is effectively "no artificial cap from the
+		// framework" — callers that need a tighter budget still use
+		// WithMaxTokens.
+		maxTokens:   200_000,
 		temperature: 0.7,
 	}
 

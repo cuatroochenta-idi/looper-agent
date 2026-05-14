@@ -149,9 +149,12 @@ func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
 // NewProvider creates an Anthropic provider.
 func NewProvider(apiKey string, opts ...Option) *Provider {
 	p := &Provider{
-		model:       anthropic.ModelClaudeSonnet4_20250514,
-		config:      &provider.CacheConfig{Strategy: provider.CacheAuto},
-		maxTokens:   4096,
+		model:  anthropic.ModelClaudeSonnet4_20250514,
+		config: &provider.CacheConfig{Strategy: provider.CacheAuto},
+		// Default raised from 4096 → 200k so extended-thinking models
+		// and large structured tool calls don't silently truncate.
+		// Anthropic clamps per-model to the actual completion cap.
+		maxTokens:   200_000,
 		temperature: 1.0,
 	}
 	for _, opt := range opts {

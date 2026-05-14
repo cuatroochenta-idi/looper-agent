@@ -134,9 +134,12 @@ func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
 // NewProvider creates a Google GenAI provider.
 func NewProvider(apiKey string, opts ...Option) *Provider {
 	p := &Provider{
-		model:       "gemini-2.5-pro",
-		config:      &provider.CacheConfig{Strategy: provider.CacheAuto},
-		maxTokens:   4096,
+		model:  "gemini-2.5-pro",
+		config: &provider.CacheConfig{Strategy: provider.CacheAuto},
+		// Default raised from 4096 → 200k so reasoning Gemini variants
+		// and large structured tool calls don't silently truncate.
+		// Google clamps per-model to the actual completion cap.
+		maxTokens:   200_000,
 		temperature: 0.7,
 	}
 	for _, opt := range opts {
