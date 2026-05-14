@@ -7,6 +7,7 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -212,12 +213,22 @@ func (l *AgentLoop) validateStructuredOutput(raw string) (ok bool, hint string) 
 	bytes := []byte(raw)
 	if l.structuredOutputCompiled != nil {
 		if err := l.structuredOutputCompiled(bytes); err != nil {
-			return false, "Your previous reply did not match the required schema: " + err.Error()
+			return false, fmt.Sprintf(
+				"Your previous reply did not match the required schema: %v. "+
+					"Apply the required changes and reply again with a single "+
+					"JSON object that satisfies the schema — do not include "+
+					"prose, markdown fences, or commentary.",
+				err,
+			)
 		}
 	}
 	if l.outputCustomValidator != nil {
 		if err := l.outputCustomValidator(bytes); err != nil {
-			return false, "Your previous reply was rejected: " + err.Error()
+			return false, fmt.Sprintf(
+				"Your previous reply was rejected: %v. Apply the required "+
+					"changes and reply again with a corrected response.",
+				err,
+			)
 		}
 	}
 	return true, ""
@@ -586,7 +597,7 @@ func (l *AgentLoop) executeSingleTool(ctx context.Context, tt *tool.Tool, tc mes
 	if err != nil {
 		return message.ToolResult{
 			ToolCallID: tc.ID,
-			Content:    fmt.Sprintf("Tool %q error: %v", tc.Name, err),
+			Content:    toolErrorContent(tc.Name, err),
 			IsError:    true,
 		}
 	}
@@ -596,6 +607,25 @@ func (l *AgentLoop) executeSingleTool(ctx context.Context, tt *tool.Tool, tc mes
 		Content:    output,
 		IsError:    false,
 	}
+}
+
+// toolErrorContent formats a tool execution error as feedback for the
+// model. Schema-level validation failures get an explicit "fix and retry"
+// instruction so the model self-corrects on the next turn instead of
+// looping on the same malformed payload; non-validation errors fall back
+// to the legacy phrasing because they don't necessarily mean the model
+// should redrive the call (network, timeout, business rejection, etc.).
+func toolErrorContent(name string, err error) string {
+	var vErr *tool.ValidationError
+	if errors.As(err, &vErr) {
+		return fmt.Sprintf(
+			"Tool %q call rejected: arguments did not match the input schema. "+
+				"%s. Apply the required changes and call the tool again with "+
+				"corrected arguments that satisfy the schema.",
+			name, vErr.Message,
+		)
+	}
+	return fmt.Sprintf("Tool %q error: %v", name, err)
 }
 
 // resolveSystemPrompt evaluates the system prompt function and appends
