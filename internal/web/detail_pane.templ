@@ -20,9 +20,11 @@ func tabSetExpr(callID, tab string) string {
 }
 
 // tabIsExpr returns the JS expression that's true when the given tab is the
-// active one (defaults to 'args' if no tab was selected yet).
-func tabIsExpr(callID, tab string) string {
-	return "($tabs['" + jsLit(callID) + "'] || 'args') === '" + tab + "'"
+// active one. `defaultTab` is the tab to fall back to when the user hasn't
+// clicked one yet — pass "result" for completed tool calls so the operator
+// lands on the output, "args" otherwise.
+func tabIsExpr(callID, tab, defaultTab string) string {
+	return "($tabs['" + jsLit(callID) + "'] || '" + defaultTab + "') === '" + tab + "'"
 }
 
 templ DetailPaneBody(data DetailData) {
@@ -125,9 +127,20 @@ templ turnNode(turn TurnNode, tl RunTimeline, inFlight bool, spawned map[string]
 			<span class="node-kind k-turn">turn { fmt.Sprintf("%d", turn.Index) }</span>
 			<span class="node-title">
 				if turn.Final != nil {
-					<span class="preview preview-success">{ Truncate(turn.Final.Content, 90) }</span>
+					<span class="preview preview-success">{ Truncate(turn.Final.Content, 140) }</span>
+				} else if len(turn.ToolNodes) > 0 {
+					<span class="preview">
+						{ fmt.Sprintf("%d tool call%s", len(turn.ToolNodes), pluralS(len(turn.ToolNodes))) }
+						if turn.AssistantText != "" {
+							 · "{ Truncate(turn.AssistantText, 90) }"
+						}
+					</span>
+				} else if turn.AssistantText != "" {
+					<span class="preview">"{ Truncate(turn.AssistantText, 140) }"</span>
+				} else if inFlight {
+					<span class="preview">awaiting model response…</span>
 				} else {
-					<span class="preview">{ fmt.Sprintf("%d tool call%s · awaiting next turn", len(turn.ToolNodes), pluralS(len(turn.ToolNodes))) }</span>
+					<span class="preview">no content</span>
 				}
 			</span>
 			<span class="node-meta">
@@ -172,34 +185,58 @@ templ turnNode(turn TurnNode, tl RunTimeline, inFlight bool, spawned map[string]
 }
 
 templ llmCallNode(s TimelineStep, turn TurnNode, inFlight bool) {
-	<details class={ "node", "depth-1", templ.KV("tn-active", inFlight) }>
+	{{
+		// Skip duplicating the model's text in the LLM-call body when the
+		// turn already renders it as the Final node — that node is more
+		// prominent and would just repeat the same content here.
+		showAssistantText := turn.AssistantText != "" && turn.Final == nil
+		preview := ""
+		switch {
+		case turn.AssistantText != "":
+			preview = Truncate(turn.AssistantText, 140)
+		case turn.Final != nil:
+			preview = "produced a final response"
+		case inFlight:
+			preview = "awaiting model response…"
+		case len(turn.ToolNodes) > 0:
+			preview = fmt.Sprintf("produced %d tool call%s", len(turn.ToolNodes), pluralS(len(turn.ToolNodes)))
+		default:
+			preview = "no visible content"
+		}
+	}}
+	<details class={ "node", "depth-1", templ.KV("tn-active", inFlight) } open?={ showAssistantText }>
 		<summary>
 			<span class="caret">▸</span>
 			<span class="node-kind k-llm">llm_call</span>
 			<span class="node-title">
-				<span class="preview">
-					if turn.Final != nil {
-						model produced a final response
-					} else if inFlight {
-						awaiting model response…
-					} else {
-						{ fmt.Sprintf("model produced %d tool call%s", len(turn.ToolNodes), pluralS(len(turn.ToolNodes))) }
-					}
-				</span>
+				<span class="preview">{ preview }</span>
 			</span>
 			<span class="node-meta">
 				if inFlight {
 					<span class="spin-ring" title="awaiting model response"></span>
 				}
+				if turn.AssistantText != "" {
+					<span class="tok" title="output characters in this assistant message">{ fmt.Sprintf("%d chars", len(turn.AssistantText)) }</span>
+				}
 				<span class="ts">{ s.At.Format("15:04:05.000") }</span>
 			</span>
 		</summary>
 		<div class="node-body">
+			if showAssistantText {
+				<div class="io-label io-label-inline">model output</div>
+				<div class="block-wrap">
+					<button class="copy-btn" data-on:click={ copyExpr(turn.AssistantText) }>⧉</button>
+					<pre class="block is-assistant">{ turn.AssistantText }</pre>
+				</div>
+			}
 			<div class="field-meta">
 				<span>turn <b>{ fmt.Sprintf("%d", s.Turn) }</b></span>
 				if turn.HasTokens {
 					<span class="callid-chip">in <b>{ fmt.Sprintf("%d", turn.InTokens) }</b></span>
 					<span class="callid-chip">out <b>{ fmt.Sprintf("%d", turn.OutTokens) }</b></span>
+					if turn.CachedToks > 0 {
+						<span class="callid-chip">cached <b>{ fmt.Sprintf("%d", turn.CachedToks) }</b></span>
+					}
 				}
 			</div>
 		</div>
@@ -213,6 +250,15 @@ templ toolNode(tn ToolCallNode, tl RunTimeline, children []*RunRecord) {
 	}
 	{{ geom := tl.SpanGeom(tn.Call.At, endAt) }}
 	{{ cid := tn.Call.ToolCallID }}
+	{{
+		// Default the tab to "result" once a result exists — the operator's
+		// usual question is "what did this call return", not "what did the
+		// model send". "args" stays default for in-flight calls.
+		defaultTab := "args"
+		if tn.Result != nil {
+			defaultTab = "result"
+		}
+	}}
 	<details class={ "node", "depth-1", templ.KV("tn-active", tn.Result == nil) }>
 		<summary>
 			<span class="caret">▸</span>
@@ -221,7 +267,7 @@ templ toolNode(tn ToolCallNode, tl RunTimeline, children []*RunRecord) {
 			<span class="node-title">
 				<span class="preview">({ ArgsPreview(tn.Call.ToolArgs) })</span>
 				if tn.Result != nil {
-					<span class="preview preview-success">→ { Truncate(tn.Result.Content, 60) }</span>
+					<span class="preview preview-success">→ { Truncate(tn.Result.Content, 140) }</span>
 				}
 			</span>
 			<span class="node-meta">
@@ -241,19 +287,34 @@ templ toolNode(tn ToolCallNode, tl RunTimeline, children []*RunRecord) {
 			<div class="tab-bar">
 				<button class="tab-btn"
 					data-on:click={ tabSetExpr(cid, "args") }
-					data-class={ "{active: " + tabIsExpr(cid, "args") + "}" }>arguments</button>
+					data-class={ "{active: " + tabIsExpr(cid, "args", defaultTab) + "}" }>arguments</button>
 				if tn.Result != nil {
 					<button class="tab-btn"
 						data-on:click={ tabSetExpr(cid, "result") }
-						data-class={ "{active: " + tabIsExpr(cid, "result") + "}" }>result</button>
+						data-class={ "{active: " + tabIsExpr(cid, "result", defaultTab) + "}" }>result</button>
+					<button class="tab-btn"
+						data-on:click={ tabSetExpr(cid, "both") }
+						data-class={ "{active: " + tabIsExpr(cid, "both", defaultTab) + "}" }>both</button>
 				}
 			</div>
-			<div data-show={ tabIsExpr(cid, "args") }>
+			<div data-show={ tabIsExpr(cid, "args", defaultTab) }>
+				<div class="io-label io-label-inline">arguments</div>
 				@jsonBlock(tn.Call.ToolArgs)
 			</div>
 			if tn.Result != nil {
-				<div data-show={ tabIsExpr(cid, "result") }>
+				<div data-show={ tabIsExpr(cid, "result", defaultTab) }>
+					<div class="io-label io-label-inline">result</div>
 					@jsonBlock(tn.Result.Content)
+				</div>
+				<div class="tool-both-grid" data-show={ tabIsExpr(cid, "both", defaultTab) }>
+					<div>
+						<div class="io-label io-label-inline">arguments</div>
+						@jsonBlock(tn.Call.ToolArgs)
+					</div>
+					<div>
+						<div class="io-label io-label-inline">result</div>
+						@jsonBlock(tn.Result.Content)
+					</div>
 				</div>
 			}
 			<div class="field-meta">

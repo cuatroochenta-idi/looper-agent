@@ -19,20 +19,25 @@ type ToolCallNode struct {
 
 // TurnNode aggregates everything that happened in one agentic turn.
 type TurnNode struct {
-	Index      int
-	StartAt    time.Time
-	LLMCall    *TimelineStep
-	ToolNodes  []ToolCallNode
-	Final      *TimelineStep
-	Error      *TimelineStep
+	Index     int
+	StartAt   time.Time
+	LLMCall   *TimelineStep
+	ToolNodes []ToolCallNode
+	Final     *TimelineStep
+	Error     *TimelineStep
 	// Reasoning is the concatenation of every reasoning_chunk emitted in
 	// the turn. Surfaced as a collapsible node so the operator can keep
 	// the timeline tidy.
-	Reasoning  string
-	HasTokens  bool
-	InTokens   int
-	OutTokens  int
-	CachedToks int
+	Reasoning string
+	// AssistantText is the model's visible text response for this turn,
+	// rebuilt from streaming_chunk deltas. Always reflects what the model
+	// actually said — including "thought" text emitted alongside tool calls
+	// and intermediate-turn responses that never reach StepKindFinal.
+	AssistantText string
+	HasTokens     bool
+	InTokens      int
+	OutTokens     int
+	CachedToks    int
 }
 
 // EndAt returns the timestamp when the turn finished — either the Final step,
@@ -176,6 +181,8 @@ func BuildTimeline(steps []TimelineStep) RunTimeline {
 			t.Error = &e
 		case StepKindReasoning:
 			t.Reasoning += s.Content
+		case StepKindStreamingChunk:
+			t.AssistantText += s.Content
 		}
 	}
 	for _, idx := range turnOrder {

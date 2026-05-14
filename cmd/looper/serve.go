@@ -350,6 +350,10 @@ func toWebStep(s loop.Step) web.StepEvent {
 		out.Kind = web.StepKindError
 	case loop.StepSystemPrompt:
 		out.Kind = web.StepKindSystemPrompt
+	case loop.StepStreamingChunk:
+		out.Kind = web.StepKindStreamingChunk
+	case loop.StepReasoningChunk:
+		out.Kind = web.StepKindReasoning
 	}
 	return out
 }

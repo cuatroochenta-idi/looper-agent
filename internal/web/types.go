@@ -20,12 +20,18 @@ const (
 	StepKindLLMCall      StepKind = "llm_call"
 	StepKindToolCall     StepKind = "tool_call"
 	StepKindToolResult   StepKind = "tool_result"
-	StepKindFinal        StepKind = "final"
+	StepKindFinal        StepKind = "final_response"
 	StepKindError        StepKind = "error"
 	// StepKindReasoning carries an extended-thinking delta. Rendered apart
 	// from the model's visible text so the operator can fold it away. The
 	// string must match loop.StepReasoningChunk on the wire.
-	StepKindReasoning    StepKind = "reasoning_chunk"
+	StepKindReasoning StepKind = "reasoning_chunk"
+	// StepKindStreamingChunk is a delta of the model's visible text response
+	// emitted during a streaming turn. The trace builder accumulates these
+	// per-turn into TurnNode.AssistantText so the operator can read what the
+	// model actually said — including the "thought" text emitted alongside a
+	// tool call.
+	StepKindStreamingChunk StepKind = "streaming_chunk"
 )
 
 // StepEvent is the per-step record the web UI consumes from a runner.

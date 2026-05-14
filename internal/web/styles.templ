@@ -270,6 +270,13 @@ nav.tabs .nav-link.active { background: var(--bg-elevated); color: var(--text); 
 /* Content blocks + JSON */
 .block { background: var(--bg-sunken); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; font-family: 'JetBrains Mono', monospace; font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; color: var(--text); position: relative; }
 .block.is-json { white-space: pre; }
+/* Model output prose block — softer body font, more line-height so multi-paragraph answers stay readable. */
+.block.is-assistant { font-family: 'Inter', -apple-system, sans-serif; font-size: 12.5px; line-height: 1.65; color: var(--text); }
+/* Inline io-label used inside a node body (no left bar, smaller margin). */
+.io-label-inline { font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.7px; margin: 8px 0 4px; }
+/* Side-by-side "both" view for tool args + result. Stacks on narrow panes. */
+.tool-both-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+@media (max-width: 900px) { .tool-both-grid { grid-template-columns: 1fr; } }
 .block-wrap { position: relative; }
 .block-wrap .copy-btn { position: absolute; top: 6px; right: 6px; opacity: 0; }
 .block-wrap:hover .copy-btn { opacity: 1; }
