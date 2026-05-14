@@ -29,7 +29,7 @@ import (
 
 // AnalysisResult is the structured output we expect from the agent.
 type AnalysisResult struct {
-	Sentiment string   `json:"sentiment" jsonschema:"description=Sentiment verdict,enum=Positive|Negative|Neutral,required"`
+	Sentiment string   `json:"sentiment" jsonschema:"description=Sentiment verdict,enum=Positive,enum=Negative,enum=Neutral,required"`
 	Score     float64  `json:"score" jsonschema:"description=Confidence 0-1,minimum=0,maximum=1"`
 	Keywords  []string `json:"keywords" jsonschema:"description=Key topics found"`
 }

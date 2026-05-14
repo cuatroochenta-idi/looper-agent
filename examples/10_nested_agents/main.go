@@ -178,8 +178,8 @@ func runResearcher(ctx context.Context, p *openai.Provider, topic, focus string)
 // ─── Orchestrator tool: spawn-and-run a research sub-agent ────────────────────
 
 type ResearchTopicIn struct {
-	Topic string `json:"topic" jsonschema:"description=The subject to research, e.g. 'quantum computing'"`
-	Focus string `json:"focus" jsonschema:"description=The specific angle, e.g. 'current state' or 'risks for finance'"`
+	Topic string `json:"topic" jsonschema_description:"The subject to research, e.g. 'quantum computing'"`
+	Focus string `json:"focus" jsonschema_description:"The specific angle, e.g. 'current state' or 'risks for finance'"`
 }
 
 const orchestratorSystemPrompt = `You are a research orchestrator. You delegate

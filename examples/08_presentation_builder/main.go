@@ -303,7 +303,7 @@ func (a *App) snapshotMsgs() []ChatMsg {
 
 type AddSlideIn struct {
 	Title  string `json:"title" jsonschema:"description=Slide heading"`
-	Layout string `json:"layout" jsonschema:"description=Visual layout,enum=title|content|two_column|chart"`
+	Layout string `json:"layout" jsonschema:"description=Visual layout,enum=title,enum=content,enum=two_column,enum=chart"`
 }
 
 type AddBulletsIn struct {
@@ -324,7 +324,7 @@ type AddChartIn struct {
 }
 
 type SetThemeIn struct {
-	Name string `json:"name" jsonschema:"description=Theme name,enum=dark|light|sunset|aqua"`
+	Name string `json:"name" jsonschema:"description=Theme name,enum=dark,enum=light,enum=sunset,enum=aqua"`
 }
 
 type DeleteSlideIn struct {
@@ -337,7 +337,7 @@ type ReorderIn struct {
 
 type AddFigureIn struct {
 	SlideIndex int    `json:"slide_index" jsonschema:"description=0-indexed slide position"`
-	Kind       string `json:"kind" jsonschema:"description=Figure kind,enum=rocket|graph|team|globe|lightbulb|gears"`
+	Kind       string `json:"kind" jsonschema:"description=Figure kind,enum=rocket,enum=graph,enum=team,enum=globe,enum=lightbulb,enum=gears"`
 }
 
 // ─── Build the agent ──────────────────────────────────────────────────────────

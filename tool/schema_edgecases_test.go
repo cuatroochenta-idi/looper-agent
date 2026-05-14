@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+// These tests pin down the schema generator's behaviour on the cases that
+// originally motivated the invopop/jsonschema adoption. They assert the
+// emitted shape end-to-end so a future generator swap (or invopop upgrade)
+// surfaces regressions immediately.
+
 // ---------- helpers ----------------------------------------------------------
 
 func decodeSchema(t *testing.T, raw json.RawMessage) map[string]any {
@@ -24,6 +29,15 @@ func props(t *testing.T, schema map[string]any) map[string]any {
 		t.Fatalf("schema missing properties: %v", schema)
 	}
 	return p
+}
+
+func defs(t *testing.T, schema map[string]any) map[string]any {
+	t.Helper()
+	d, ok := schema["$defs"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema missing $defs (recursive types require them): %v", schema)
+	}
+	return d
 }
 
 func required(t *testing.T, schema map[string]any) []string {
@@ -51,38 +65,60 @@ func hasRequired(t *testing.T, schema map[string]any, name string) bool {
 	return false
 }
 
+// resolveRef returns the schema entry under "$defs/<name>" when the given
+// node is a $ref pointing into the root's $defs. Fails the test if either
+// the node isn't a $ref or the target is missing.
+func resolveRef(t *testing.T, root, node map[string]any) map[string]any {
+	t.Helper()
+	ref, ok := node["$ref"].(string)
+	if !ok {
+		t.Fatalf("expected $ref node, got %v", node)
+	}
+	const prefix = "#/$defs/"
+	if !strings.HasPrefix(ref, prefix) {
+		t.Fatalf("unexpected $ref shape %q", ref)
+	}
+	name := strings.TrimPrefix(ref, prefix)
+	d := defs(t, root)
+	target, ok := d[name].(map[string]any)
+	if !ok {
+		t.Fatalf("$defs missing entry %q: %v", name, d)
+	}
+	return target
+}
+
 // ---------- json.RawMessage --------------------------------------------------
 
 type rawMessageHolder struct {
-	Sections json.RawMessage `json:"sections" jsonschema:"description=Array of section objects (recursive)"`
+	Sections json.RawMessage `json:"sections" jsonschema_description:"Array of section objects (recursive shape pinned by description, type-free schema)"`
 }
 
-// TestSchema_RawMessageIsPermissive asserts json.RawMessage maps to a permissive
-// schema (NOT array-of-integer). The bug this fixes: the generator descended
-// into the underlying []byte and emitted {type:array, items:{type:integer}},
-// which prompted gpt-5-mini to send `[1,2,3,4,5,6,7]` as the value.
+// TestSchema_RawMessageIsPermissive asserts json.RawMessage maps to a
+// permissive `{}` schema (NOT array-of-integer, NOT bare `true`). The bug
+// this guards against: descending into the underlying []byte and emitting
+// {type:array, items:{type:integer}} prompted gpt-5-mini to send `[1,2,3]`
+// in place of structured data.
 func TestSchema_RawMessageIsPermissive(t *testing.T) {
 	raw, err := GenerateSchema(rawMessageHolder{})
 	if err != nil {
 		t.Fatalf("generate schema: %v", err)
 	}
 	m := decodeSchema(t, raw)
-	sections := props(t, m)["sections"].(map[string]any)
-
+	sections, ok := props(t, m)["sections"].(map[string]any)
+	if !ok {
+		t.Fatalf("sections should be an object schema (mapper output), got %v", props(t, m)["sections"])
+	}
 	if _, hasType := sections["type"]; hasType {
-		t.Errorf("json.RawMessage must NOT declare a type (saw %v)", sections["type"])
+		t.Errorf("json.RawMessage must NOT declare a type (got %v)", sections["type"])
 	}
 	if _, hasItems := sections["items"]; hasItems {
-		t.Errorf("json.RawMessage must NOT carry items (saw %v)", sections["items"])
-	}
-	if sections["description"] != "Array of section objects (recursive)" {
-		t.Errorf("description tag lost on RawMessage field: %v", sections["description"])
+		t.Errorf("json.RawMessage must NOT carry items (got %v)", sections["items"])
 	}
 }
 
-// TestSchema_RawMessageAcceptsAnyJSON ensures the compiled schema accepts the
-// shapes a caller would realistically want to pass through (array of objects,
-// nested objects, primitives) — confirming the relaxation is end-to-end.
+// TestSchema_RawMessageAcceptsAnyJSON validates the compiled schema accepts
+// every shape a caller would realistically pass through json.RawMessage
+// (array of nested objects, plain object, primitives).
 func TestSchema_RawMessageAcceptsAnyJSON(t *testing.T) {
 	raw, err := GenerateSchema(rawMessageHolder{})
 	if err != nil {
@@ -112,7 +148,7 @@ func TestSchema_RawMessageAcceptsAnyJSON(t *testing.T) {
 
 type recursiveSection struct {
 	ID       string             `json:"id" jsonschema:"required"`
-	Heading  string             `json:"heading"`
+	Heading  string             `json:"heading,omitempty"`
 	Children []recursiveSection `json:"children,omitempty"`
 }
 
@@ -120,48 +156,35 @@ type recursiveInput struct {
 	Root recursiveSection `json:"root" jsonschema:"required"`
 }
 
-// TestSchema_RecursiveTypeUsesDefs asserts the generator handles a struct that
-// references itself via a slice field by emitting $defs + $ref instead of
-// blowing the stack.
+// TestSchema_RecursiveTypeUsesDefs asserts the generator handles a struct
+// that references itself via a slice field by emitting $defs + $ref instead
+// of either inlining infinitely or blowing the stack.
 func TestSchema_RecursiveTypeUsesDefs(t *testing.T) {
 	raw, err := GenerateSchema(recursiveInput{})
 	if err != nil {
 		t.Fatalf("generate schema: %v", err)
 	}
 	m := decodeSchema(t, raw)
-
-	defs, ok := m["$defs"].(map[string]any)
+	d := defs(t, m)
+	def, ok := d["recursiveSection"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected $defs on recursive schema, got %v", m)
-	}
-	// Find the recursiveSection def by exact-suffix match on the key.
-	var defKey string
-	for k := range defs {
-		if strings.HasSuffix(k, "_recursiveSection") {
-			defKey = k
-			break
-		}
-	}
-	if defKey == "" {
-		t.Fatalf("expected a $defs entry for recursiveSection, got keys %v", keysOf(defs))
+		t.Fatalf("expected a $defs entry for recursiveSection, got %v", keysOf(d))
 	}
 
-	def := defs[defKey].(map[string]any)
-	defProps := def["properties"].(map[string]any)
-	children := defProps["children"].(map[string]any)
+	children := props(t, def)["children"].(map[string]any)
 	if children["type"] != "array" {
 		t.Errorf("children should be an array, got %v", children["type"])
 	}
 	inner := children["items"].(map[string]any)
-	if ref, ok := inner["$ref"].(string); !ok || !strings.HasSuffix(ref, defKey) {
-		t.Errorf("children.items should $ref the recursiveSection def, got %v", inner)
+	if ref, _ := inner["$ref"].(string); ref != "#/$defs/recursiveSection" {
+		t.Errorf("children.items should $ref recursiveSection, got %v", inner)
 	}
 }
 
 // TestSchema_RecursiveSchemaCompiles validates the recursive schema with a
-// real document. Without $defs/$ref the generator would either stack-overflow
-// or produce a finite-depth schema; with $defs the compiler honours arbitrary
-// nesting depth.
+// real deeply-nested document — without $defs/$ref this either stack-
+// overflowed or produced a finite-depth schema; with $defs the validator
+// honours arbitrary nesting depth.
 func TestSchema_RecursiveSchemaCompiles(t *testing.T) {
 	raw, err := GenerateSchema(recursiveInput{})
 	if err != nil {
@@ -210,28 +233,25 @@ type mutualInput struct {
 	Start nodeA `json:"start"`
 }
 
-// TestSchema_MutualRecursionUsesDefs covers A → B → A cycle handling.
+// TestSchema_MutualRecursionUsesDefs covers an A→B→A cycle: both types must
+// land in $defs and the cross-references must resolve to those entries.
 func TestSchema_MutualRecursionUsesDefs(t *testing.T) {
 	raw, err := GenerateSchema(mutualInput{})
 	if err != nil {
 		t.Fatalf("generate schema: %v", err)
 	}
 	m := decodeSchema(t, raw)
-	defs, ok := m["$defs"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected $defs on mutually-recursive schema, got %v", m)
-	}
-	hasA, hasB := false, false
-	for k := range defs {
-		if strings.HasSuffix(k, "_nodeA") {
-			hasA = true
-		}
-		if strings.HasSuffix(k, "_nodeB") {
-			hasB = true
+	d := defs(t, m)
+	for _, want := range []string{"nodeA", "nodeB"} {
+		if _, ok := d[want]; !ok {
+			t.Fatalf("expected $defs entry %q, got %v", want, keysOf(d))
 		}
 	}
-	if !hasA || !hasB {
-		t.Fatalf("expected both nodeA and nodeB in $defs, got %v", keysOf(defs))
+
+	defA := d["nodeA"].(map[string]any)
+	bField := props(t, defA)["b"].(map[string]any)
+	if ref, _ := bField["$ref"].(string); ref != "#/$defs/nodeB" {
+		t.Errorf("nodeA.b should $ref nodeB, got %v", bField)
 	}
 }
 
@@ -248,9 +268,12 @@ type promotedInput struct {
 	Names []string `json:"names" jsonschema:"required"`
 }
 
-// TestSchema_EmbeddedAnonymousIsPromoted asserts that an embedded struct whose
-// fields are all `json:"-"` produces a schema that exposes ONLY the parent's
-// own fields — not a leaked "runtimeContext" required object.
+// TestSchema_EmbeddedAnonymousIsPromoted asserts that an embedded struct
+// whose fields are all `json:"-"` produces a schema that exposes ONLY the
+// parent's own fields — encoding/json drops the empty embed entirely and so
+// must the schema generator. The pre-invopop generator leaked it as a
+// required empty `runtimeContext` object the model had to satisfy on every
+// call.
 func TestSchema_EmbeddedAnonymousIsPromoted(t *testing.T) {
 	raw, err := GenerateSchema(promotedInput{})
 	if err != nil {
@@ -259,7 +282,7 @@ func TestSchema_EmbeddedAnonymousIsPromoted(t *testing.T) {
 	m := decodeSchema(t, raw)
 	p := props(t, m)
 
-	for forbidden := range map[string]struct{}{"runtimeContext": {}, "RuntimeContext": {}, "AppID": {}, "OrgID": {}, "DBName": {}} {
+	for _, forbidden := range []string{"runtimeContext", "RuntimeContext", "AppID", "OrgID", "DBName"} {
 		if _, leaked := p[forbidden]; leaked {
 			t.Errorf("anonymous-embedded field %q leaked into schema: %v", forbidden, p)
 		}
@@ -283,9 +306,9 @@ type embedWithFields struct {
 	UserID string `json:"user_id" jsonschema:"required"`
 }
 
-// TestSchema_EmbeddedPromotesRealFields asserts that an embedded struct with
-// real JSON-visible fields has its fields flattened into the parent (same as
-// encoding/json behaviour).
+// TestSchema_EmbeddedPromotesRealFields asserts that an embedded struct
+// with real JSON-visible fields has its fields flattened into the parent —
+// matching encoding/json behaviour.
 func TestSchema_EmbeddedPromotesRealFields(t *testing.T) {
 	raw, err := GenerateSchema(embedWithFields{})
 	if err != nil {
@@ -301,8 +324,6 @@ func TestSchema_EmbeddedPromotesRealFields(t *testing.T) {
 	if _, leaked := p["sidebar"]; leaked {
 		t.Errorf("embedded type name leaked as property: %v", p)
 	}
-	// `width` and `title` use omitempty → must NOT be required; `open` and
-	// `user_id` lack omitempty → must be required.
 	for _, want := range []string{"open", "user_id"} {
 		if !hasRequired(t, m, want) {
 			t.Errorf("expected required field %q, required=%v", want, required(t, m))
@@ -320,9 +341,10 @@ type namedEmbed struct {
 	UserID  string `json:"user_id"`
 }
 
-// TestSchema_EmbeddedWithExplicitJSONNameStaysNested asserts that an embedded
-// struct WITH a json tag name is NOT promoted — it nests under that name,
-// matching encoding/json.
+// TestSchema_EmbeddedWithExplicitJSONNameStaysNested asserts that an
+// embedded struct WITH a json tag name is NOT promoted — encoding/json
+// nests it under that name and so does the schema (here via $ref since the
+// embedded type is named).
 func TestSchema_EmbeddedWithExplicitJSONNameStaysNested(t *testing.T) {
 	raw, err := GenerateSchema(namedEmbed{})
 	if err != nil {
@@ -332,10 +354,11 @@ func TestSchema_EmbeddedWithExplicitJSONNameStaysNested(t *testing.T) {
 	p := props(t, m)
 	sb, ok := p["sidebar"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected nested 'sidebar' object, got %v", p)
+		t.Fatalf("expected nested 'sidebar' node, got %v", p)
 	}
-	if sb["type"] != "object" {
-		t.Errorf("nested sidebar should be object, got %v", sb["type"])
+	def := resolveRef(t, m, sb)
+	if def["type"] != "object" {
+		t.Errorf("resolved sidebar def should be object, got %v", def["type"])
 	}
 	if _, leaked := p["open"]; leaked {
 		t.Errorf("nested sidebar fields must not promote when json tag is set: %v", p)
@@ -348,13 +371,21 @@ type anyHolder struct {
 	Payload any `json:"payload"`
 }
 
+// TestSchema_InterfaceIsPermissive asserts that an interface{} field
+// produces the canonical "any JSON value" schema (`{}`), not invopop's
+// default `true` (spec-valid but rejected by some strict provider
+// validators) and not `{type:string}`.
 func TestSchema_InterfaceIsPermissive(t *testing.T) {
 	raw, err := GenerateSchema(anyHolder{})
 	if err != nil {
 		t.Fatalf("generate schema: %v", err)
 	}
 	m := decodeSchema(t, raw)
-	payload := props(t, m)["payload"].(map[string]any)
+	payload, ok := props(t, m)["payload"].(map[string]any)
+	if !ok {
+		t.Fatalf("interface{} should produce an object-shaped schema (mapper override), got %v (%T)",
+			props(t, m)["payload"], props(t, m)["payload"])
+	}
 	if _, has := payload["type"]; has {
 		t.Errorf("interface{} should produce no type constraint, got %v", payload)
 	}
@@ -386,15 +417,29 @@ func TestSchema_MapStringKeyExposesValueSchema(t *testing.T) {
 	}
 }
 
-func TestSchema_MapNonStringKeyFallsBackToNeutralObject(t *testing.T) {
+// TestSchema_MapNonStringKeyUsesPatternProperties asserts non-string-keyed
+// maps are represented via patternProperties so the schema still validates
+// the on-the-wire JSON object representation.
+func TestSchema_MapNonStringKeyUsesPatternProperties(t *testing.T) {
 	raw, _ := GenerateSchema(intMapHolder{})
 	m := decodeSchema(t, raw)
 	lookup := props(t, m)["lookup"].(map[string]any)
 	if lookup["type"] != "object" {
 		t.Errorf("non-string-keyed map should still be an object schema, got %v", lookup)
 	}
-	if _, has := lookup["additionalProperties"]; has {
-		t.Errorf("non-string-keyed map must not declare additionalProperties shape, got %v", lookup)
+	pp, ok := lookup["patternProperties"].(map[string]any)
+	if !ok {
+		t.Fatalf("non-string-keyed map should use patternProperties, got %v", lookup)
+	}
+	// Exactly one pattern entry whose schema describes the value type.
+	if len(pp) != 1 {
+		t.Errorf("expected a single pattern entry, got %v", pp)
+	}
+	for _, v := range pp {
+		entry := v.(map[string]any)
+		if entry["type"] != "string" {
+			t.Errorf("map[int]string value should be string, got %v", entry["type"])
+		}
 	}
 }
 
@@ -459,8 +504,7 @@ type requiredOverride struct {
 }
 
 // TestSchema_JsonschemaRequiredOverridesOmitempty: an explicit
-// `jsonschema:"required"` wins over `,omitempty` (matches the original
-// generator's documented behaviour).
+// `jsonschema:"required"` wins over `,omitempty`.
 func TestSchema_JsonschemaRequiredOverridesOmitempty(t *testing.T) {
 	raw, _ := GenerateSchema(requiredOverride{})
 	m := decodeSchema(t, raw)
@@ -491,13 +535,20 @@ func TestSchema_PrivateFieldsExcluded(t *testing.T) {
 // ---------- description with commas / examples ------------------------------
 
 type descriptionWithCommas struct {
-	Sections json.RawMessage `json:"sections" jsonschema:"description=JSON array of section objects: [{\"id\":\"objetivo\",\"children\":[{\"id\":\"sub\",\"body\":\"…\"}]}], required"`
-	Status   string          `json:"status,omitempty" jsonschema:"description=Lifecycle state. Use draft, then approved, finally published.,enum=draft|approved|published"`
+	// Use jsonschema_description for content containing commas — the
+	// canonical way to ship descriptions with embedded JSON examples.
+	Sections json.RawMessage `json:"sections" jsonschema:"required" jsonschema_description:"JSON array of section objects: [{\"id\":\"objetivo\",\"children\":[{\"id\":\"sub\",\"body\":\"…\"}]}]"`
+	// `jsonschema:"description=..."` supports backslash-escaped commas for
+	// the inline case (kept here to pin invopop's escape behaviour). Each
+	// enum value is its own `enum=X` attribute — the pipe-separated style
+	// of the legacy hand-rolled generator is no longer supported.
+	Status string `json:"status,omitempty" jsonschema:"description=Lifecycle state. Use draft\\, then approved\\, finally published.,enum=draft,enum=approved,enum=published"`
 }
 
-// TestSchema_DescriptionPreservesCommas asserts the tag parser does NOT split
-// the description at internal commas — the canonical bug that hid the actual
-// shape of the value from the LLM.
+// TestSchema_DescriptionPreservesCommas asserts both escape paths preserve
+// commas inside descriptions: the dedicated jsonschema_description tag for
+// arbitrary content, and the inline `description=...` with backslash-
+// escaped commas.
 func TestSchema_DescriptionPreservesCommas(t *testing.T) {
 	raw, err := GenerateSchema(descriptionWithCommas{})
 	if err != nil {
@@ -510,20 +561,20 @@ func TestSchema_DescriptionPreservesCommas(t *testing.T) {
 	desc, _ := sections["description"].(string)
 	wantSubstr := `"children":[{"id":"sub"`
 	if !strings.Contains(desc, wantSubstr) {
-		t.Errorf("description should preserve commas inside JSON example, got %q", desc)
+		t.Errorf("jsonschema_description should preserve commas inside JSON example, got %q", desc)
 	}
 	if !hasRequired(t, m, "sections") {
-		t.Errorf("trailing `, required` must still be recognised, required=%v", required(t, m))
+		t.Errorf("jsonschema:\"required\" must still be picked up alongside description, required=%v", required(t, m))
 	}
 
 	status := p["status"].(map[string]any)
 	statusDesc, _ := status["description"].(string)
 	if !strings.Contains(statusDesc, "draft, then approved, finally published") {
-		t.Errorf("status description should preserve prose commas, got %q", statusDesc)
+		t.Errorf("backslash-escaped commas in description= should unescape, got %q", statusDesc)
 	}
 	enum, ok := status["enum"].([]any)
 	if !ok || len(enum) != 3 {
-		t.Errorf("status enum should still be parsed alongside comma-bearing description, got %v", status["enum"])
+		t.Errorf("enum should still be parsed alongside comma-bearing description, got %v", status["enum"])
 	}
 }
 

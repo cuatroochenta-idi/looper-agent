@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -26,7 +27,7 @@ type UserInfo struct {
 }
 
 type EnumInput struct {
-	Status string `json:"status" jsonschema:"description=The status,enum=active|inactive|pending"`
+	Status string `json:"status" jsonschema:"description=The status,enum=active,enum=inactive,enum=pending"`
 }
 
 // --- Tool creation ---
@@ -231,8 +232,20 @@ func TestGenerateSchemaNested(t *testing.T) {
 	if !ok {
 		t.Fatal("expected 'user' property")
 	}
-	if user["type"] != "object" {
-		t.Errorf("expected user type=object, got %v", user["type"])
+	// Nested named structs go through $defs/$ref so recursive shapes are
+	// representable; resolve the reference to assert the underlying shape.
+	ref, ok := user["$ref"].(string)
+	if !ok {
+		t.Fatalf("expected user to be a $ref node, got %v", user)
+	}
+	defs := m["$defs"].(map[string]any)
+	defName := strings.TrimPrefix(ref, "#/$defs/")
+	def, ok := defs[defName].(map[string]any)
+	if !ok {
+		t.Fatalf("expected $defs entry %q, got %v", defName, defs)
+	}
+	if def["type"] != "object" {
+		t.Errorf("expected resolved user def type=object, got %v", def["type"])
 	}
 }
 

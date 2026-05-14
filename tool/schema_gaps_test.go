@@ -2,9 +2,36 @@ package tool
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
+
+// resolveDefRef walks a "$ref": "#/$defs/<name>" node back to its definition
+// inside the same root schema. Returns the underlying schema map. Fails the
+// test on any structural surprise (non-$ref node, malformed pointer, missing
+// $defs entry) so callers can chain assertions on the resolved shape.
+func resolveDefRef(t *testing.T, root, node map[string]any) map[string]any {
+	t.Helper()
+	ref, ok := node["$ref"].(string)
+	if !ok {
+		t.Fatalf("expected $ref node, got %v", node)
+	}
+	const prefix = "#/$defs/"
+	if !strings.HasPrefix(ref, prefix) {
+		t.Fatalf("unexpected $ref shape %q", ref)
+	}
+	name := strings.TrimPrefix(ref, prefix)
+	defs, ok := root["$defs"].(map[string]any)
+	if !ok {
+		t.Fatalf("root schema missing $defs to resolve %q", name)
+	}
+	target, ok := defs[name].(map[string]any)
+	if !ok {
+		t.Fatalf("$defs entry %q missing, got keys %v", name, defs)
+	}
+	return target
+}
 
 // These tests document gaps in the hand-rolled schema generator that need to
 // pass after the invopop/jsonschema migration. Each case below corresponds to
@@ -45,8 +72,9 @@ type pointerHolder struct {
 	User *UserInfo `json:"user" jsonschema:"required"`
 }
 
-// TestSchema_PointerToStruct asserts that *Struct fields produce a normal
-// object schema (not nil / empty / panic).
+// TestSchema_PointerToStruct asserts that *Struct fields produce a usable
+// object schema. Named structs go through $defs/$ref so we resolve before
+// inspecting the underlying shape.
 func TestSchema_PointerToStruct(t *testing.T) {
 	raw, err := GenerateSchema(pointerHolder{})
 	if err != nil {
@@ -59,12 +87,13 @@ func TestSchema_PointerToStruct(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing 'user' property: %v", props)
 	}
-	if user["type"] != "object" {
-		t.Errorf("*Struct should produce object schema, got %v", user["type"])
+	def := resolveDefRef(t, m, user)
+	if def["type"] != "object" {
+		t.Errorf("*Struct should produce object schema, got %v", def["type"])
 	}
-	userProps, ok := user["properties"].(map[string]any)
+	userProps, ok := def["properties"].(map[string]any)
 	if !ok {
-		t.Fatalf("pointer struct should expose its fields, got %v", user)
+		t.Fatalf("pointer struct should expose its fields, got %v", def)
 	}
 	if _, ok := userProps["id"]; !ok {
 		t.Errorf("pointer struct should preserve nested fields, got %v", userProps)
@@ -97,12 +126,13 @@ func TestSchema_SliceOfStructsHasItems(t *testing.T) {
 	if !ok {
 		t.Fatalf("array missing items schema: %v", items)
 	}
-	if inner["type"] != "object" {
-		t.Errorf("inner items should be object, got %v", inner["type"])
+	def := resolveDefRef(t, m, inner)
+	if def["type"] != "object" {
+		t.Errorf("inner items should resolve to object, got %v", def["type"])
 	}
-	innerProps, ok := inner["properties"].(map[string]any)
+	innerProps, ok := def["properties"].(map[string]any)
 	if !ok || innerProps["id"] == nil {
-		t.Errorf("slice-of-struct should expose element fields, got %v", inner)
+		t.Errorf("slice-of-struct should expose element fields via $defs, got %v", def)
 	}
 }
 

@@ -131,8 +131,22 @@ func TestSchemaMap_StrictModeShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("items.items schema missing: %v", items)
 	}
-	if inner["additionalProperties"] != false {
-		t.Errorf("nested compatItem schema should also be strict, got %v", inner["additionalProperties"])
+	// Named structs land in $defs/$ref; resolve before asserting strict mode.
+	defs, ok := m["$defs"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected $defs for nested compatItem, got root=%v", m)
+	}
+	ref, _ := inner["$ref"].(string)
+	const prefix = "#/$defs/"
+	if !strings.HasPrefix(ref, prefix) {
+		t.Fatalf("expected items.items to be a $ref into $defs, got %v", inner)
+	}
+	def, ok := defs[strings.TrimPrefix(ref, prefix)].(map[string]any)
+	if !ok {
+		t.Fatalf("$defs missing %q: %v", ref, defs)
+	}
+	if def["additionalProperties"] != false {
+		t.Errorf("nested compatItem schema should also be strict, got %v", def["additionalProperties"])
 	}
 
 	// Sanity: avoid unused imports if message ever stops being needed.

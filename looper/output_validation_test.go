@@ -14,7 +14,7 @@ import (
 // constrained 0..1 and sentiment is enum-bound so a malformed response is
 // easy to engineer deterministically.
 type gradedReply struct {
-	Sentiment string  `json:"sentiment" jsonschema:"enum=positive|negative|neutral,required"`
+	Sentiment string  `json:"sentiment" jsonschema:"enum=positive,enum=negative,enum=neutral,required"`
 	Score     float64 `json:"score" jsonschema:"minimum=0,maximum=1"`
 }
 
