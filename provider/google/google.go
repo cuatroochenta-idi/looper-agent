@@ -136,10 +136,10 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 	p := &Provider{
 		model:  "gemini-2.5-pro",
 		config: &provider.CacheConfig{Strategy: provider.CacheAuto},
-		// Default raised from 4096 → 200k so reasoning Gemini variants
-		// and large structured tool calls don't silently truncate.
-		// Google clamps per-model to the actual completion cap.
-		maxTokens:   200_000,
+		// No explicit cap by default — google.go skips MaxOutputTokens
+		// when n <= 0, so Gemini's per-model completion ceiling applies.
+		// Callers that need a tighter budget use WithMaxTokens.
+		maxTokens:   0,
 		temperature: 0.7,
 	}
 	for _, opt := range opts {

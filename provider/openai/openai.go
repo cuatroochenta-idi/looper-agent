@@ -129,13 +129,15 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 	p := &Provider{
 		model:  "gpt-4o",
 		config: &cfg,
-		// Default raised from 4096 → 200k so reasoning families (gpt-5,
-		// o-series) and large structured tool calls aren't silently
-		// truncated. OpenAI clamps per-model to the actual completion
-		// cap, so this is effectively "no artificial cap from the
-		// framework" — callers that need a tighter budget still use
-		// WithMaxTokens.
-		maxTokens:   200_000,
+		// No explicit cap by default. applyMaxTokens skips the param
+		// entirely when n <= 0, so OpenAI's per-model completion
+		// ceiling applies (e.g. 128k for gpt-5-mini). Callers that
+		// need a smaller budget use WithMaxTokens. The previous 4096
+		// default silently truncated tool_call arguments on reasoning
+		// families; a 200k default was rejected by gpt-5-mini's actual
+		// 128k cap — neither extreme is right, so the framework now
+		// stays out of the way.
+		maxTokens:   0,
 		temperature: 0.7,
 	}
 

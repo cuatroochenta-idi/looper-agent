@@ -151,10 +151,15 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 	p := &Provider{
 		model:  anthropic.ModelClaudeSonnet4_20250514,
 		config: &provider.CacheConfig{Strategy: provider.CacheAuto},
-		// Default raised from 4096 → 200k so extended-thinking models
-		// and large structured tool calls don't silently truncate.
-		// Anthropic clamps per-model to the actual completion cap.
-		maxTokens:   200_000,
+		// Anthropic REQUIRES max_tokens on every request — omitting it
+		// returns a 400 from the API — so we cannot default to 0 like
+		// the OpenAI provider does. 16384 is the historical Anthropic
+		// default and fits the standard 8k assistant turn plus a margin
+		// for tool-call arguments. Callers with large structured tool
+		// payloads (e.g. lanbu's generate_prd) should override via
+		// WithMaxTokens up to the model's actual ceiling — 64k for
+		// Claude Sonnet 4, 128k for Sonnet 4.5 with the beta header.
+		maxTokens:   16384,
 		temperature: 1.0,
 	}
 	for _, opt := range opts {
