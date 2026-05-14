@@ -182,6 +182,116 @@ func TestCostModelDefaultPricesExist(t *testing.T) {
 	}
 }
 
+// TestCostModelFamilyPrefixLookup verifies that dated and minor-version
+// model ids inherit pricing from their registered family entry. This is
+// the safety net that keeps cost tracking from silently dropping to $0
+// whenever OpenAI/Anthropic/Google ship a new point release.
+func TestCostModelFamilyPrefixLookup(t *testing.T) {
+	cm := NewCostModel()
+
+	tests := []struct {
+		name       string
+		provider   string
+		model      string
+		familyKey  string // the entry the prefix lookup is expected to resolve to
+		usage      Usage
+	}{
+		{
+			name:      "openai gpt-5 dated id falls back to family",
+			provider:  "openai",
+			model:     "gpt-5-2025-08-07",
+			familyKey: "gpt-5",
+			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000},
+		},
+		{
+			name:      "openai gpt-5.5 inherits gpt-5 pricing across dot boundary",
+			provider:  "openai",
+			model:     "gpt-5.5",
+			familyKey: "gpt-5",
+			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
+		},
+		{
+			name:      "openai gpt-5-mini wins over gpt-5 (longest prefix)",
+			provider:  "openai",
+			model:     "gpt-5-mini-2025-08-07",
+			familyKey: "gpt-5-mini",
+			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
+		},
+		{
+			name:      "anthropic claude-opus-4-7 inherits opus-4 family",
+			provider:  "anthropic",
+			model:     "claude-opus-4-7-20260301",
+			familyKey: "claude-opus-4",
+			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
+		},
+		{
+			name:      "anthropic claude-sonnet-4-5 inherits sonnet-4 family",
+			provider:  "anthropic",
+			model:     "claude-sonnet-4-5",
+			familyKey: "claude-sonnet-4",
+			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 500_000, CachedTokens: 400_000},
+		},
+		{
+			name:      "anthropic claude-haiku-4 family lookup",
+			provider:  "anthropic",
+			model:     "claude-haiku-4-1",
+			familyKey: "claude-haiku-4",
+			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
+		},
+		{
+			name:      "openai dated gpt-4o resolves to family",
+			provider:  "openai",
+			model:     "gpt-4o-2024-08-06",
+			familyKey: "gpt-4o",
+			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cm.Calculate(tt.provider, tt.model, tt.usage)
+			want := cm.Calculate(tt.provider, tt.familyKey, tt.usage)
+			if !almostEqual(got.TotalUSD, want.TotalUSD, 0.0001) {
+				t.Errorf("TotalUSD = %.6f, want %.6f (inherited from %q)",
+					got.TotalUSD, want.TotalUSD, tt.familyKey)
+			}
+			if got.TotalUSD == 0 {
+				t.Errorf("family lookup returned zero — expected inheritance from %q", tt.familyKey)
+			}
+		})
+	}
+}
+
+// TestCostModelFamilyPrefixBoundary makes sure prefix matching respects
+// `-` / `.` family separators so we never silently bill an unrelated model
+// with a sister family's price.
+func TestCostModelFamilyPrefixBoundary(t *testing.T) {
+	cm := NewCostModel()
+	// Inject a synthetic family entry whose prefix would naively match a
+	// neighbouring id. With the boundary guard, "gpt-40" must NOT pick up
+	// "gpt-4" pricing because the next char after the prefix is `0`, not
+	// `-` or `.`.
+	cm.UpdateCost("openai", "gpt-4", CostConfig{
+		InputCostPer1MTokens:  99.0,
+		OutputCostPer1MTokens: 99.0,
+	})
+
+	result := cm.Calculate("openai", "gpt-40", Usage{InputTokens: 1_000_000})
+	if result.TotalUSD != 0 {
+		t.Errorf("gpt-40 must not inherit gpt-4 pricing, got %.6f", result.TotalUSD)
+	}
+}
+
+// TestCostModelWarnMissDoesNotPanic exercises the warn path on a miss and
+// confirms repeated calls for the same (provider, model) stay quiet — the
+// log itself is best-effort, but the dedupe map must not blow up.
+func TestCostModelWarnMissDoesNotPanic(t *testing.T) {
+	cm := NewCostModel()
+	for range 5 {
+		_ = cm.Calculate("unknown-provider", "unknown-model", Usage{InputTokens: 100, OutputTokens: 50})
+	}
+}
+
 func almostEqual(a, b, epsilon float64) bool {
 	diff := a - b
 	if diff < 0 {

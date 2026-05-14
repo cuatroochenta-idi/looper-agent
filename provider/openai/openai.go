@@ -388,6 +388,11 @@ func buildFinalChunk(content string, tcm map[int]*toolCallAccumulator, chunk *op
 		sc.Usage = &provider.Usage{
 			InputTokens:  int(chunk.Usage.PromptTokens),
 			OutputTokens: int(chunk.Usage.CompletionTokens),
+			// OpenAI carries prompt_tokens_details on the final usage chunk
+			// when stream_options.include_usage is set. Omitting it here
+			// was the silent cost-tracking bug: cache hits read as zero,
+			// so InputUSD was billed at full rate and SavingsUSD stayed 0.
+			CachedTokens: int(chunk.Usage.PromptTokensDetails.CachedTokens),
 		}
 	}
 
