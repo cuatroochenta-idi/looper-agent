@@ -639,6 +639,49 @@ The agent emits `Step` events (`StepLLMCall`, `StepStreamingChunk`,
 `StepReasoningChunk`, `StepToolCall`, `StepToolResult`, `StepFinalResponse`,
 `StepError`) — drive a live UI by ranging over `agent.Iterate(...)`.
 
+### Run identifiers — grouping calls into conversations
+
+Every emitted trace event carries three ids, in widening scope:
+
+| field | source | meaning |
+|---|---|---|
+| `run_id` | one per `agent.Run` / `Iterate` call | the smallest unit — one full agentic loop from input to final response. Auto-generated UUID, or supplied via `looper.WithRunID(id)`. |
+| `parent_run_id` | `ParentRunIDFromContext(ctx)` | set automatically when a tool function spawns a sub-agent — the child reads the parent's id off `ctx`. Empty for top-level runs. |
+| `session_id` | `LOOPER_SESSION_ID` env var | groups N independent `agent.Run` calls (or a long-lived chat) into one conversation in the debug panel. |
+
+The dashboard renders these as a tree: each session contains its runs,
+sub-agents nest under the tool call that spawned them, and the cost / token
+roll-ups aggregate at every level.
+
+```go
+// Pin a stable run id when you need to correlate with your own logs.
+res, _ := agent.Run(ctx, input, looper.WithRunID("chat-msg-42"))
+
+// Sub-agents inherit parenting automatically — just forward ctx.
+tool := tool.MustNewTool(struct{}{},
+    func(ctx context.Context, _ struct{}) (string, error) {
+        sub, _ := looper.NewAgent(p, "you are a sub-agent")
+        r, err := sub.Run(ctx, "do the thing") // r.run_id ⇒ parent_run_id = outer.run_id
+        if err != nil {
+            return "", err
+        }
+        return r.Output, nil
+    },
+    tool.ToolConfig{Name: "delegate"})
+```
+
+```bash
+# Group every run in this process under one panel "session" card.
+export LOOPER_SESSION_ID="$(uuidgen)"
+export LOOPER_TRACE_ENDPOINT="http://localhost:9090/api/trace"
+go run ./examples/01_basic
+go run ./examples/03_tools_streaming   # both runs land in the same session
+```
+
+`looper serve -- <cmd>` auto-generates a `LOOPER_SESSION_ID` and forwards it
+to the wrapped child, so anything you exec under the panel is already
+grouped without manual setup.
+
 ---
 
 ## Concurrent sessions
