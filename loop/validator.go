@@ -39,6 +39,20 @@ type TurnSnapshot struct {
 // system message and re-prompts the model, up to the configured retry budget.
 //
 // The retry budget is per consecutive failure streak: a single OK resets it.
+//
+// SkipBudget — use on tool-call turns where the validator wants to inject a
+// corrective hint without penalising the budget. This is the idiomatic signal
+// for "the model is still in the middle of a multi-step plan; I want to steer
+// it, but the plan isn't failing yet". Without SkipBudget, a long but healthy
+// execution chain (plan_tasks → update_task → add_tables → …) exhausts
+// validatorMaxRetries and aborts with "validation_exhausted" even though every
+// individual turn was working correctly.
+//
+// Semantics summary:
+//
+//	OK=true              → accept, reset budget counter.
+//	OK=false, SkipBudget=false → inject Hint + decrement budget (current default).
+//	OK=false, SkipBudget=true  → inject Hint but do NOT touch the budget counter.
 type Outcome struct {
 	// OK indicates the turn is acceptable. When true Hint/Reason are ignored.
 	OK bool
@@ -50,6 +64,14 @@ type Outcome struct {
 	// Hint is the corrective instruction shown to the LLM as a system message
 	// on the next turn. Required when OK is false.
 	Hint string
+
+	// SkipBudget prevents the rejection from counting against the retry
+	// budget. The Hint is still injected so the model receives the steering
+	// signal. Only meaningful when OK is false; ignored when OK is true.
+	//
+	// Canonical use case: mid-batch tool progress where the validator wants
+	// to guide without budgeting against the failure counter.
+	SkipBudget bool
 }
 
 // TurnValidator inspects every completed turn and decides whether the loop
@@ -59,6 +81,19 @@ type Outcome struct {
 // state-tracker queries) or call out to a grader LLM. Errors are reported
 // by returning Outcome{OK: false, Reason: "validator: ..."} — a validator
 // that itself fails should not crash the loop.
+//
+// # Semantics by turn shape
+//
+// On text-only turns (snap.ToolCalls is empty):
+//   - proceed=true  → record the final response and return.
+//   - proceed=false → inject Hint, iterate (model will re-prompt).
+//
+// On tool-call turns (snap.ToolCalls is non-empty):
+//   - proceed is IGNORED — the loop always continues because tools have
+//     already executed and their side-effects cannot be rolled back.
+//   - To signal "rejected without burning budget", set Outcome.SkipBudget.
+//   - To stop the run cleanly from inside a tool body, set
+//     message.ToolResult.Halt on the result the tool returns.
 type TurnValidator interface {
 	Validate(ctx context.Context, snap TurnSnapshot) Outcome
 }
@@ -89,12 +124,21 @@ func WithLoopTurnValidator(v TurnValidator, maxRetries int) LoopOption {
 //     hint has been added and the loop should iterate again.
 //   - abort: true when the validator rejected and the retry budget is
 //     exhausted — the caller must stop emitting steps and return.
-//   - hadValidator: true when a validator was actually consulted; used by
-//     the streaming path to know whether to reset its failure counter.
+//   - outcome: the Outcome returned by the validator (or a synthetic OK one).
 //
 // failures is a pointer so the caller's counter can be mutated in place,
 // keeping the per-run state with the Iterator rather than the AgentLoop
 // (which is shared across runs).
+//
+// # Semantics by turn shape
+//
+// On text-only turns: proceed=true → record final + return;
+// proceed=false → inject Hint + iterate.
+//
+// On tool-call turns: proceed is ignored — the loop always continues because
+// tools already executed. To reject without burning budget, use
+// Outcome.SkipBudget. To stop the run from a tool body, set
+// message.ToolResult.Halt on the result the tool returns.
 func (l *AgentLoop) validateTurn(
 	ctx context.Context,
 	snap TurnSnapshot,
@@ -107,6 +151,14 @@ func (l *AgentLoop) validateTurn(
 	if out.OK {
 		*failures = 0
 		return true, false, out
+	}
+	// SkipBudget: inject the hint but don't touch the failure counter.
+	// The run continues; the budget is preserved for genuine failures.
+	if out.SkipBudget {
+		if out.Hint != "" {
+			snap.History.AddSystemMessage(out.Hint)
+		}
+		return false, false, out
 	}
 	if *failures < l.validatorMaxRetries {
 		if out.Hint != "" {

@@ -168,4 +168,19 @@ type ToolResult struct {
 	// When true, the agent interprets this as feedback for self-correction
 	// rather than a fatal exception.
 	IsError bool `json:"is_error"`
+
+	// Halt signals that the tool wants to terminate the run cleanly after
+	// this result is recorded. The loop stops with status "halted_by_tool"
+	// without issuing another LLM call. Side-effects of the tool have
+	// already happened, so the loop does not roll anything back.
+	//
+	// Canonical use cases:
+	//   - request_user_decision: pause the run until a human provides input.
+	//   - end_of_conversation: the workflow is logically complete and the
+	//     tool signals that no further model reasoning is needed.
+	//
+	// When multiple tool calls in one turn include Halt=true, the loop
+	// still records all results in history before stopping, so no output
+	// is silently dropped. The first halting result determines the status.
+	Halt bool `json:"halt,omitempty"`
 }

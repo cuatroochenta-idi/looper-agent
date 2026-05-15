@@ -40,6 +40,18 @@ const (
 )
 
 // Step represents a single event in the agentic loop.
+//
+// For StepToolResult, IsError mirrors message.ToolResult.IsError so that
+// downstream consumers (UI streams, audit logs, retry counters) don't have
+// to parse Content to decide whether the call failed. The framework sets it
+// to true on tool-function errors AND on framework-level rejections
+// (schema validation, unknown tool, cancellation). It's false for any
+// successful execution, even when the tool's payload uses a JSON "ok": false
+// convention — that distinction is the tool's responsibility, not the loop's.
+//
+// Halt is set on StepToolResult when the tool requested a clean termination
+// of the run (e.g. request_user_decision, end_of_conversation). The loop
+// stops after emitting this step and sets RunResult.Status to "halted_by_tool".
 type Step struct {
 	Type       StepType
 	Content    string
@@ -48,6 +60,10 @@ type Step struct {
 	ToolCallID string // matches StepToolCall ↔ StepToolResult pairs
 	Turn       int
 	Error      error
+	// IsError is true when the tool execution resulted in an error.
+	IsError bool
+	// Halt is true when the tool requested a clean termination of the run.
+	Halt bool
 	// Usage is populated on the final chunk of an LLM call (one per turn).
 	// Nil on tool / system / intermediate streaming chunk steps.
 	Usage *provider.Usage
@@ -442,6 +458,20 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 				history.AddToolResult(r.ToolCallID, "", r.Content, r.IsError)
 			}
 			toolResults = append(toolResults, executed...)
+
+			// Halt detection: if any tool result signals Halt, stop the run
+			// cleanly after recording all results. All tool results are
+			// already in history; the LLM is not called again.
+			if anyHalted(toolResults) {
+				return &RunResult{
+					Output:  lastAttemptedOutput,
+					History: history,
+					Cost:    l.calculateCost(llmResp.Usage, totalInputTokens, totalOutputTokens, totalCachedTokens),
+					Usage:   Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+					Turns:   turn + 1,
+					Status:  "halted_by_tool",
+				}, nil
+			}
 		}
 
 		// Trigger AfterCall hooks once per turn — fires for both tool-call
@@ -456,40 +486,36 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 		// Run the turn validator (if any). On rejection we add the hint as
 		// a system message and let the loop iterate again — without
 		// returning the assistant's final text, so it doesn't bleed through
-		// as the run output.
-		if l.validator != nil {
-			out := l.validator.Validate(ctx, TurnSnapshot{
-				Turn:                 turn,
-				LastAssistantContent: llmResp.Content,
-				ToolCalls:            llmResp.ToolCalls,
-				ToolResults:          toolResults,
-				History:              history,
-			})
-			if !out.OK {
-				if consecutiveValidatorFail < l.validatorMaxRetries {
-					if out.Hint != "" {
-						history.AddSystemMessage(out.Hint)
-					}
-					consecutiveValidatorFail++
-					continue
-				}
-				// Retries exhausted — surface the last attempted output and
-				// stop so observers can still see what the model produced.
-				return &RunResult{
-					Output:  lastAttemptedOutput,
-					History: history,
-					Cost:    l.calculateCost(llmResp.Usage, totalInputTokens, totalOutputTokens, totalCachedTokens),
-					Usage:   Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
-					Turns:   turn + 1,
-					Status:  "validation_exhausted",
-				}, nil
-			}
-			consecutiveValidatorFail = 0
+		// as the run output. SkipBudget rejections steer without consuming
+		// the budget counter.
+		proceed, abort, _ := l.validateTurn(ctx, TurnSnapshot{
+			Turn:                 turn,
+			LastAssistantContent: llmResp.Content,
+			ToolCalls:            llmResp.ToolCalls,
+			ToolResults:          toolResults,
+			History:              history,
+		}, &consecutiveValidatorFail)
+		if abort {
+			// Retries exhausted — surface the last attempted output and
+			// stop so observers can still see what the model produced.
+			return &RunResult{
+				Output:  lastAttemptedOutput,
+				History: history,
+				Cost:    l.calculateCost(llmResp.Usage, totalInputTokens, totalOutputTokens, totalCachedTokens),
+				Usage:   Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+				Turns:   turn + 1,
+				Status:  "validation_exhausted",
+			}, nil
 		}
 
 		// If this turn had no tool calls, it's the final response — return
-		// only after the validator has had a chance to accept it.
+		// only after the validator has had a chance to accept it (proceed
+		// returned true, meaning validator accepted or no validator is set).
+		// On tool-call turns proceed is advisory and we always continue.
 		if len(llmResp.ToolCalls) == 0 {
+			if !proceed {
+				continue
+			}
 			return &RunResult{
 				Output:  llmResp.Content,
 				History: history,
@@ -592,6 +618,10 @@ func (l *AgentLoop) executeSingleTool(ctx context.Context, tt *tool.Tool, tc mes
 	// uses it to render the spawned run nested under the right tool node.
 	ctx = ContextWithToolCallID(ctx, tc.ID)
 
+	// Attach a halt signal so the tool body can call tool.SetHalt(ctx)
+	// to request a clean termination of the run after this turn.
+	ctx, isHalted := tool.WithHaltSignal(ctx)
+
 	// Execute the tool
 	output, err := tt.Execute(ctx, tc.Arguments)
 	if err != nil {
@@ -606,6 +636,7 @@ func (l *AgentLoop) executeSingleTool(ctx context.Context, tt *tool.Tool, tc mes
 		ToolCallID: tc.ID,
 		Content:    output,
 		IsError:    false,
+		Halt:       isHalted(),
 	}
 }
 
@@ -733,6 +764,18 @@ func toolNames(toolMap map[string]*tool.Tool) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// anyHalted reports whether any tool result in the slice has Halt=true.
+// Used to detect when a tool body called tool.SetHalt(ctx), signalling
+// that the run should stop cleanly without another LLM call.
+func anyHalted(results []message.ToolResult) bool {
+	for _, r := range results {
+		if r.Halt {
+			return true
+		}
+	}
+	return false
 }
 
 // HookManager returns the loop's hook manager.
@@ -1141,7 +1184,15 @@ func (it *Iterator) run(ctx context.Context) {
 						// Execute tools and validate the turn so the model gets
 						// corrective feedback when it called the wrong tools.
 						results := it.loop.executeToolCallsStreaming(ctx, history, chunk.ToolCalls, it.steps, turn)
-						proceed, abort, out := it.loop.validateTurn(ctx, TurnSnapshot{
+						// Halt detection: if any tool called tool.SetHalt(ctx),
+						// stop the run cleanly. All results are already in
+						// history; no further LLM call is issued.
+						if anyHalted(results) {
+							it.recordFinal(final, turn, "halted_by_tool")
+							it.steps <- Step{Type: StepFinalResponse, Content: final, Turn: turn, Usage: chunk.Usage}
+							return
+						}
+						_, abort, out := it.loop.validateTurn(ctx, TurnSnapshot{
 							Turn:                 turn,
 							LastAssistantContent: final,
 							ToolCalls:            chunk.ToolCalls,
@@ -1153,7 +1204,6 @@ func (it *Iterator) run(ctx context.Context) {
 							it.steps <- Step{Type: StepError, Error: fmt.Errorf("validation_exhausted: %s", out.Reason), Turn: turn}
 							return
 						}
-						_ = proceed
 					} else {
 						// Final-text candidate — let the validator inspect it
 						// before we commit. On rejection with budget remaining
@@ -1247,6 +1297,12 @@ func (it *Iterator) run(ctx context.Context) {
 					}
 				}
 				results := it.loop.executeToolCallsStreaming(ctx, history, llmResp.ToolCalls, it.steps, turn)
+				// Halt detection (non-streaming fallback path).
+				if anyHalted(results) {
+					it.recordFinal(llmResp.Content, turn, "halted_by_tool")
+					it.steps <- Step{Type: StepFinalResponse, Content: llmResp.Content, Turn: turn, Usage: &usagePtr}
+					return
+				}
 				_, abort, out := it.loop.validateTurn(ctx, TurnSnapshot{
 					Turn:                 turn,
 					LastAssistantContent: llmResp.Content,
@@ -1309,6 +1365,11 @@ func (it *Iterator) run(ctx context.Context) {
 // Resume (or the timeout elapses). A "cancel" response short-circuits the
 // tool with an error result so the LLM sees it but the process continues.
 //
+// Each Step on the channel carries the tool NAME (not the call_id) so SSE
+// consumers can render "tool=add_tables" without a parallel lookup table.
+// IsError and Halt are propagated from message.ToolResult so consumers know
+// the outcome without parsing Content.
+//
 // Returns the collected tool results so the caller can hand them to a
 // TurnValidator without re-reading history.
 func (l *AgentLoop) executeToolCallsStreaming(ctx context.Context, history *message.History, calls []message.ToolCall, steps chan<- Step, turn int) []message.ToolResult {
@@ -1343,6 +1404,7 @@ func (l *AgentLoop) executeToolCallsStreaming(ctx context.Context, history *mess
 					Content:    "(cancelled by pause point)",
 					ToolName:   c.Name,
 					ToolCallID: c.ID,
+					IsError:    true,
 					Turn:       turn,
 				}
 				continue
@@ -1365,6 +1427,7 @@ func (l *AgentLoop) executeToolCallsStreaming(ctx context.Context, history *mess
 			Content:    r.Content,
 			ToolName:   nameByID[r.ToolCallID],
 			ToolCallID: r.ToolCallID,
+			IsError:    r.IsError,
 			Turn:       turn,
 		}
 	}
@@ -1376,6 +1439,8 @@ func (l *AgentLoop) executeToolCallsStreaming(ctx context.Context, history *mess
 			Content:    r.Content,
 			ToolName:   nameByID[r.ToolCallID],
 			ToolCallID: r.ToolCallID,
+			IsError:    r.IsError,
+			Halt:       r.Halt,
 			Turn:       turn,
 		}
 		history.AddToolResult(r.ToolCallID, "", r.Content, r.IsError)
