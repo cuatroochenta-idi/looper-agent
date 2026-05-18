@@ -72,8 +72,9 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 	// Notify scope: TopicRun(id) is hit on every event so the detail pane
 	// keeps streaming, but TopicSidebar only fires on structural changes
 	// (new run, finished run) — that way the user's card selection survives
-	// the 30+ step events of a single agent run.
-	topics := []Topic{TopicRun(ev.RunID)}
+	// the 30+ step events of a single agent run. TopicChats fires on every
+	// event so the chat thread renders streaming tokens live.
+	topics := []Topic{TopicRun(ev.RunID), TopicChats}
 
 	switch ev.Type {
 	case "run_start":

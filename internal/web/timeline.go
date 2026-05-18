@@ -25,14 +25,7 @@ type TurnNode struct {
 	ToolNodes []ToolCallNode
 	Final     *TimelineStep
 	Error     *TimelineStep
-	// Reasoning is the concatenation of every reasoning_chunk emitted in
-	// the turn. Surfaced as a collapsible node so the operator can keep
-	// the timeline tidy.
 	Reasoning string
-	// AssistantText is the model's visible text response for this turn,
-	// rebuilt from streaming_chunk deltas. Always reflects what the model
-	// actually said — including "thought" text emitted alongside tool calls
-	// and intermediate-turn responses that never reach StepKindFinal.
 	AssistantText string
 	HasTokens     bool
 	InTokens      int
@@ -60,6 +53,7 @@ func (t TurnNode) EndAt() time.Time {
 // RunTimeline is the hierarchical view of a run consumed by templ components.
 type RunTimeline struct {
 	SystemPrompt *TimelineStep
+	UserInput    *TimelineStep
 	Turns        []TurnNode
 	StartAt      time.Time
 	EndAt        time.Time
@@ -124,6 +118,11 @@ func BuildTimeline(steps []TimelineStep) RunTimeline {
 		if s.Kind == StepKindSystemPrompt {
 			sp := s
 			tl.SystemPrompt = &sp
+			continue
+		}
+		if s.Kind == StepKindUserInput {
+			ui := s
+			tl.UserInput = &ui
 			continue
 		}
 		t, ok := byTurn[s.Turn]
@@ -193,7 +192,6 @@ func BuildTimeline(steps []TimelineStep) RunTimeline {
 
 // ─── View-model types used by templ components ───────────────────────────────
 
-// DashboardData is the view model for the dashboard page.
 type DashboardData struct {
 	TotalRuns   int
 	TotalCost   float64
@@ -202,10 +200,9 @@ type DashboardData struct {
 	Recent      []*RunRecord
 }
 
-// SidebarData is the view model for the sidebar fragment.
 type SidebarData struct {
 	Groups     []SessionGroup
-	Loose      []*RunRecord // runs without a SessionID (e.g. POST /api/run)
+	Loose      []*RunRecord
 	Selected   *RunRecord
 	Filter     string
 	Query      string
@@ -215,12 +212,6 @@ type SidebarData struct {
 	CountError int
 }
 
-// SessionGroup is the bucket of runs sharing one LOOPER_SESSION_ID. Sorted by
-// the start time of the FIRST run; runs inside sorted chronologically.
-//
-// Roots is the hierarchy view: every run with empty ParentRunID becomes a
-// top-level RunNode, and its Children are recursively attached by matching
-// ParentRunID. Used by the sidebar to render nested cards.
 type SessionGroup struct {
 	ID         string
 	Project    string
@@ -233,18 +224,13 @@ type SessionGroup struct {
 	HasError   bool
 }
 
-// RunNode is a node in the session's parent/child tree. Used only for
-// rendering — the flat Runs slice on SessionGroup remains the source of
-// truth for aggregate stats.
 type RunNode struct {
 	Run      *RunRecord
 	Children []*RunNode
 }
 
-// Short returns the first 8 chars of the session ID for display.
 func (g SessionGroup) Short() string { return ShortID(g.ID) }
 
-// Duration returns the elapsed time across all runs in the session.
 func (g SessionGroup) Duration() time.Duration {
 	if g.StartedAt.IsZero() {
 		return 0
@@ -256,7 +242,6 @@ func (g SessionGroup) Duration() time.Duration {
 	return end.Sub(g.StartedAt)
 }
 
-// Contains returns true if any run in the group matches the given ID.
 func (g SessionGroup) Contains(runID string) bool {
 	for _, r := range g.Runs {
 		if r.ID == runID {
@@ -266,11 +251,6 @@ func (g SessionGroup) Contains(runID string) bool {
 	return false
 }
 
-// DetailData is the view model for the run detail pane.
-//
-// SpawnedByToolCall keys each ParentToolCallID a child run carries (i.e. the
-// tool call_id that produced it) to the slice of child RunRecords. The trace
-// renderer uses it to attach sub-agent cards under the right tool node.
 type DetailData struct {
 	Run               *RunRecord
 	Timeline          RunTimeline
@@ -278,15 +258,74 @@ type DetailData struct {
 	SpawnedByToolCall map[string][]*RunRecord
 }
 
-// RunsViewData wraps the sidebar + detail for the runs page.
 type RunsViewData struct {
 	Sidebar SidebarData
 	Detail  *DetailData
 }
 
+// ─── Time range filter ────────────────────────────────────────────────────────
+
+type TimeRange struct {
+	Since string
+	From  string
+	To    string
+}
+
+func (tr TimeRange) Active() bool { return tr.Since != "" && tr.Since != "all" }
+
+func SinceOptions() []struct{ Value, Label string } {
+	return []struct{ Value, Label string }{
+		{"15m", "15 min"},
+		{"1h", "1 hour"},
+		{"24h", "24 hours"},
+		{"custom", "custom"},
+	}
+}
+
+// ─── Chat view models ────────────────────────────────────────────────────────
+
+type ChatViewData struct {
+	Sidebar ChatSidebarData
+	Detail  *DetailData
+}
+
+type ChatSidebarData struct {
+	Conversations []ChatConversation
+	Selected      *RunRecord
+	Filter        string
+	Query         string
+	CountAll      int
+	CountRun      int
+	CountDone     int
+	CountError    int
+}
+
+type ChatConversation struct {
+	ID         string
+	ShortID    string
+	Project    string
+	Messages   []ChatMessage
+	TotalUSD   float64
+	HasRunning bool
+	HasError   bool
+}
+
+type ChatMessage struct {
+	Run         *RunRecord
+	Association ChatAssociation
+	Text        string
+	StatusClass string
+}
+
+type ChatAssociation string
+
+const (
+	ChatUser  ChatAssociation = "user"
+	ChatAgent ChatAssociation = "agent"
+)
+
 // ─── Presentation helpers (used by templ components) ─────────────────────────
 
-// PrettyDuration formats a duration with sensible precision.
 func PrettyDuration(d time.Duration) string {
 	switch {
 	case d < time.Microsecond:
@@ -302,7 +341,6 @@ func PrettyDuration(d time.Duration) string {
 	}
 }
 
-// ShortID returns the first 8 characters of an ID.
 func ShortID(s string) string {
 	if len(s) > 8 {
 		return s[:8]
@@ -310,7 +348,6 @@ func ShortID(s string) string {
 	return s
 }
 
-// ArgsPreview compacts JSON to one line and truncates it.
 func ArgsPreview(s string) string {
 	t := strings.TrimSpace(s)
 	if t == "" {
@@ -327,7 +364,6 @@ func ArgsPreview(s string) string {
 	return Truncate(string(b), 80)
 }
 
-// Truncate caps a string with an ellipsis.
 func Truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -335,9 +371,6 @@ func Truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// PrettyJSON returns syntax-highlighted JSON HTML, safe to embed via templ's
-// `@templ.Raw` / dangerous-unsafe injection. If the input isn't valid JSON,
-// it falls back to escaped plain text in a neutral span.
 func PrettyJSON(s string) template.HTML {
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
@@ -434,3 +467,5 @@ func colorizeJSON(s string) string {
 	}
 	return b.String()
 }
+
+var _ = fmt.Sprintf

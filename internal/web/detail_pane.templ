@@ -31,16 +31,6 @@ templ DetailPaneBody(data DetailData) {
 	{{ streamURL := "@get('/sse/runs/" + data.Run.ID + "')" }}
 	<div class={ "fade-in", templ.KV("is-live", data.Live) } data-init={ streamURL }>
 		@detailHeader(data)
-		<div class="io-block">
-			<div class="io-label">user input</div>
-			<div class="io-body">{ data.Run.Input }</div>
-		</div>
-		if data.Run.Output != "" {
-			<div class="io-block io-output">
-				<div class="io-label">final output</div>
-				<div class="io-body">{ data.Run.Output }</div>
-			</div>
-		}
 		@TraceTree(data.Timeline, data.Live, data.SpawnedByToolCall)
 	</div>
 }
@@ -72,6 +62,10 @@ templ detailHeader(data DetailData) {
 				}
 			</span>
 		</div>
+		<div class="run-input-line">
+			<span class="lbl">input</span>
+			<span class="run-input-text">{ Truncate(data.Run.Input, 200) }</span>
+		</div>
 		<div class="metric-row">
 			<div class="metric"><span class="lbl">turns</span><span class="val">{ fmt.Sprintf("%d", data.Run.Turns) }</span></div>
 			<div class="metric"><span class="lbl">cost</span><span class="val success">${ fmt.Sprintf("%.5f", data.Run.TotalUSD) }</span></div>
@@ -88,6 +82,9 @@ templ detailHeader(data DetailData) {
 templ TraceTree(tl RunTimeline, live bool, spawned map[string][]*RunRecord) {
 	<div class="trace">
 		<div class="section-label">trace · { fmt.Sprintf("%d", len(tl.Turns)) } turn{ pluralS(len(tl.Turns)) }</div>
+		if tl.UserInput != nil {
+			@userInputNode(*tl.UserInput)
+		}
 		if tl.SystemPrompt != nil {
 			@systemPromptNode(*tl.SystemPrompt)
 		}
@@ -109,6 +106,23 @@ templ systemPromptNode(s TimelineStep) {
 			<span class="caret">▸</span>
 			<span class="node-kind k-system">system_prompt</span>
 			<span class="node-title"><span class="preview">{ fmt.Sprintf("%d chars · loaded at start", len(s.Content)) }</span></span>
+			<span class="node-meta"><span class="ts">{ s.At.Format("15:04:05.000") }</span></span>
+		</summary>
+		<div class="node-body">
+			<div class="block-wrap">
+				<button class="copy-btn" data-on:click={ copyExpr(s.Content) }>⧉</button>
+				<pre class="block">{ s.Content }</pre>
+			</div>
+		</div>
+	</details>
+}
+
+templ userInputNode(s TimelineStep) {
+	<details class="node" open>
+		<summary>
+			<span class="caret">▸</span>
+			<span class="node-kind k-user">user</span>
+			<span class="node-title"><span class="preview">{ Truncate(s.Content, 140) }</span></span>
 			<span class="node-meta"><span class="ts">{ s.At.Format("15:04:05.000") }</span></span>
 		</summary>
 		<div class="node-body">
@@ -444,6 +458,28 @@ func pluralS(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+templ ChatTraceBody(data DetailData) {
+	<div class="chat-trace-inner fade-in">
+		<div class="chat-trace-bar">
+			<div class="chat-trace-bar-left">
+				<span class={ "badge", "badge-" + string(data.Run.Status) }>
+					<span class="dot"></span>{ string(data.Run.Status) }
+				</span>
+				<span class="mono" style="font-size:11.5px;color:var(--text-muted);">{ ShortID(data.Run.ID) }</span>
+			</div>
+			<div class="chat-trace-bar-right">
+				if data.Run.TotalUSD > 0 {
+					<span class="chat-trace-cost">${ fmt.Sprintf("%.4f", data.Run.TotalUSD) }</span>
+				}
+				<button class="chat-trace-close" type="button"
+					title="Close detail panel" aria-label="Close detail panel"
+					data-on:click="$selected = ''">×</button>
+			</div>
+		</div>
+		@DetailPaneBody(data)
+	</div>
 }
 
 var _ = template.HTML("")

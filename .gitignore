@@ -35,3 +35,6 @@ looper-traces/
 # Looper Agent trace store — agent runs streamed by LOOPER_TRACE_ENDPOINT.
 .looper/
 bin/
+
+# Playwright MCP artifacts
+.playwright-mcp/

@@ -67,18 +67,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.handleDashboard)
 	mux.HandleFunc("GET /runs", s.handleRunsPage)
 	mux.HandleFunc("GET /runs/{id}", s.handleRunPage)
+	mux.HandleFunc("GET /chats", s.handleChatsPage)
 
 	// ── HTML fragments (datastar patches them into the DOM) ─────────────────
 	// One-shot fragments for cold loads / fallback polls.
 	mux.HandleFunc("GET /partials/sidebar", s.partialSidebar)
 	mux.HandleFunc("GET /partials/runs/{id}/pane", s.partialDetailPane)
 	mux.HandleFunc("GET /partials/dashboard", s.partialDashboard)
+	mux.HandleFunc("GET /partials/chat-sidebar", s.partialChatSidebar)
+	mux.HandleFunc("GET /partials/chat-thread", s.partialChatThread)
+	mux.HandleFunc("GET /partials/chat-trace/{id}", s.partialChatTrace)
+	mux.HandleFunc("GET /partials/time-refresh/{since}", s.partialTimeRefresh)
 	// Long-lived SSE streams: server pushes a fresh fragment to every
 	// connected client when the underlying state changes. This replaces
 	// polling for real-time UX.
 	mux.HandleFunc("GET /sse/sidebar", s.sseSidebar)
 	mux.HandleFunc("GET /sse/runs/{id}", s.sseDetailPane)
 	mux.HandleFunc("GET /sse/dashboard", s.sseDashboard)
+	mux.HandleFunc("GET /sse/chat-sidebar", s.sseChatSidebar)
+	mux.HandleFunc("GET /sse/chat-thread", s.sseChatThread)
 
 	// ── JSON / control ───────────────────────────────────────────────────────
 	mux.HandleFunc("POST /api/run", s.apiRun)

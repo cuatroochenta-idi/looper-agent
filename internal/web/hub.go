@@ -10,6 +10,12 @@ const (
 	// on it when a card-visible field changed — run start, run finish, status
 	// flip — so transient per-step churn doesn't blow away the user's clicks.
 	TopicSidebar Topic = "sidebar"
+
+	// TopicChats fires on every chat-relevant event (run_start, step,
+	// run_end). The chat thread subscribes to it so streaming chunks render
+	// in the agent bubble as they arrive. Kept distinct from TopicSidebar so
+	// the runs sidebar doesn't get re-rendered on every token.
+	TopicChats Topic = "chats"
 )
 
 // TopicRun returns the topic identifier for a specific run ID. Subscribers

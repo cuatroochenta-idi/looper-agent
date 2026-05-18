@@ -21,6 +21,7 @@ const (
 	StepKindToolCall     StepKind = "tool_call"
 	StepKindToolResult   StepKind = "tool_result"
 	StepKindFinal        StepKind = "final_response"
+	StepKindUserInput    StepKind = "user_input"
 	StepKindError        StepKind = "error"
 	// StepKindReasoning carries an extended-thinking delta. Rendered apart
 	// from the model's visible text so the operator can fold it away. The

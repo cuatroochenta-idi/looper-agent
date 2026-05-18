@@ -1,0 +1,201 @@
+package web
+
+import "fmt"
+
+templ ChatsPage(data ChatViewData) {
+	<div class="chat-layout fade-in"
+		data-signals={
+			"{q:'" + jsLit(data.Sidebar.Query) +
+			"', status:'" + jsLit(data.Sidebar.Filter) +
+			"', selected:'" + jsLit(selectedID(data.Sidebar.Selected)) +
+			"', conv:'" + jsLit(firstConvID(data.Sidebar.Conversations)) + "'}",
+		}
+		data-init="@get('/sse/chat-sidebar')">
+		<aside class="chat-conv-list">
+			<div id="chat-sidebar-body"
+				style="display:flex;flex-direction:column;min-height:0;flex:1;overflow:hidden;">
+				@ChatSidebarBody(data.Sidebar)
+			</div>
+		</aside>
+		<section class="chat-main" id="chat-main">
+			<div class="chat-thread" id="chat-thread"
+				data-init="@get('/sse/chat-thread')">
+				@chatThreadContent(data.Sidebar)
+			</div>
+			<div class="chat-trace-panel" id="chat-trace"
+				data-class="{open: $selected !== ''}">
+			</div>
+		</section>
+	</div>
+}
+
+func firstConvID(convs []ChatConversation) string {
+	if len(convs) > 0 {
+		return convs[0].ID
+	}
+	return ""
+}
+
+// ChatSidebarBody renders the conversation list sidebar.
+templ ChatSidebarBody(data ChatSidebarData) {
+	<div class="aside-search">
+		<span class="ico">⌕</span>
+		<input
+			type="text" name="q" autocomplete="off"
+			placeholder="Filter…"
+			value={ data.Query }
+			data-bind:q
+			data-on:input__debounce.250ms="@get('/partials/chat-sidebar')"
+		/>
+	</div>
+	@chatFilterPills(data)
+	<div class="aside-list">
+		if len(data.Conversations) == 0 {
+			<div class="empty-state" style="padding:32px 16px;">
+				<span class="icon">∅</span>
+				<p style="font-size:12px;">
+					if data.Query != "" {
+						No matches for "{ data.Query }".
+					} else if data.Filter != "" {
+						No "{ data.Filter }" runs.
+					} else {
+						No chats yet. Trigger one via <code class="kbd">POST /api/run</code>.
+					}
+				</p>
+			</div>
+		} else {
+			for _, conv := range data.Conversations {
+				@convListItem(conv)
+			}
+		}
+	</div>
+}
+
+templ chatFilterPills(data ChatSidebarData) {
+	<div class="filter-pills">
+		@chatFilterPill("", "all", data.CountAll)
+		@chatFilterPill("running", "running", data.CountRun)
+		@chatFilterPill("completed", "done", data.CountDone)
+		@chatFilterPill("error", "failed", data.CountError)
+	</div>
+}
+
+templ chatFilterPill(status, label string, count int) {
+	<button class="fp"
+		data-class={ "{active: $status === '" + status + "'}" }
+		data-on:click={ "$status = '" + status + "'; @get('/partials/chat-sidebar')" }>
+		{ label } <span class="cnt">{ fmt.Sprintf("%d", count) }</span>
+	</button>
+}
+
+// convListItem renders a single conversation entry in the left sidebar.
+templ convListItem(conv ChatConversation) {
+	<button class="conv-item"
+		data-class={ "{active: $conv === '" + conv.ID + "'}" }
+		data-on:click={
+			"$conv = '" + conv.ID + "'; " +
+			"$selected = ''; " +
+			"@get('/partials/chat-thread')" }>
+		<div class="conv-item-head">
+			<span class="conv-item-id mono">{ conv.ShortID }</span>
+			if conv.Project != "" {
+				<span class="conv-item-proj">{ conv.Project }</span>
+			}
+			if conv.HasRunning {
+				<span class="conv-live-dot" title="live"></span>
+			}
+		</div>
+		<div class="conv-item-meta">
+			<span>{ fmt.Sprintf("%d", len(conv.Messages)/2) } exchanges</span>
+			<span class="sep">·</span>
+			<span>${ fmt.Sprintf("%.4f", conv.TotalUSD) }</span>
+		</div>
+		<div class="conv-item-preview">
+			for i, msg := range conv.Messages {
+				if i >= 2 {
+					break
+				}
+				<span class="conv-msg-role">
+					if msg.Association == ChatUser {
+						you:
+					} else {
+						agent:
+					}
+				</span>
+				<span class="conv-msg-text">{ Truncate(msg.Text, 60) }</span>
+			}
+		</div>
+	</button>
+}
+
+// chatMessagesContent renders just the message list (used by partial refreshes).
+templ chatMessagesContent(data ChatSidebarData) {
+	for _, conv := range data.Conversations {
+		<div class="chat-conv-messages"
+			data-show={ "$conv === '" + conv.ID + "'" }>
+			<div class="chat-conv-title-bar">
+				<span class="chat-conv-title mono">{ conv.ID }</span>
+				if conv.Project != "" {
+					<span class="chat-conv-title-proj">{ conv.Project }</span>
+				}
+				<span class="chat-conv-title-cost">${ fmt.Sprintf("%.4f", conv.TotalUSD) }</span>
+			</div>
+			for _, msg := range conv.Messages {
+				@chatMsgBubble(msg)
+			}
+		</div>
+	}
+}
+
+// chatThreadContent renders the full chat thread wrapper.
+templ chatThreadContent(data ChatSidebarData) {
+	<div class="chat-thread-inner">
+		<div id="chat-messages">
+			@chatMessagesContent(data)
+		</div>
+	</div>
+}
+
+// chatMsgBubble renders a single message bubble in the chat thread.
+templ chatMsgBubble(msg ChatMessage) {
+	<div class={ "msg-row", templ.KV("is-agent", msg.Association == ChatAgent), templ.KV("is-user", msg.Association == ChatUser), msg.StatusClass }
+		data-class={ "{highlight: $selected === '" + msg.Run.ID + "'}" }
+		data-on:click={
+			"$selected = '" + msg.Run.ID + "'; " +
+			"@get('/partials/chat-trace/" + msg.Run.ID + "')" }>
+		<div class="msg-bubble">
+			<div class="msg-head">
+				<span class="msg-role">
+					if msg.Association == ChatUser {
+						you
+					} else {
+						agent
+					}
+				</span>
+				<span class="msg-id mono">{ ShortID(msg.Run.ID) }</span>
+				<span class={ "msg-dot", msg.StatusClass }></span>
+			</div>
+			<div class="msg-body">
+				if msg.Text == "" && msg.Run.Status == RunRunning {
+					<span class="msg-thinking">
+						<span class="spin-ring"></span>thinking…
+					</span>
+				} else if msg.Text != "" {
+					{ msg.Text }
+				} else {
+					<span class="msg-empty">(no output)</span>
+				}
+			</div>
+			<div class="msg-foot">
+				<span><b>{ fmt.Sprintf("%d", msg.Run.Turns) }</b> turn{ pluralS(msg.Run.Turns) }</span>
+				<span class="sep">·</span>
+				<span><b>${ fmt.Sprintf("%.4f", msg.Run.TotalUSD) }</b></span>
+				<span class="sep">·</span>
+				<span class="mono">{ msg.Run.StartedAt.Format("15:04:05") }</span>
+				if msg.Run.Status == RunRunning {
+					<span class="msg-live"><span class="spin-ring"></span>live</span>
+				}
+			</div>
+		</div>
+	</div>
+}

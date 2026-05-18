@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -18,12 +17,12 @@ import (
 // ─── Page renders (full HTML, direct navigation) ─────────────────────────────
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	data := s.dashboardData()
+	data := s.dashboardData(readTimeRange(r))
 	page(w, r, "Dashboard — Looper Agent", "/", DashboardPage(data))
 }
 
 func (s *Server) handleRunsPage(w http.ResponseWriter, r *http.Request) {
-	view := s.runsViewData("", r.URL.Query().Get("q"), "")
+	view := s.runsViewData("", r.URL.Query().Get("q"), "", readTimeRange(r))
 	page(w, r, "Traces — Looper Agent", "/runs", RunsPage(view))
 }
 
@@ -34,8 +33,13 @@ func (s *Server) handleRunPage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	view := s.runsViewData("", "", id)
+	view := s.runsViewData("", "", id, readTimeRange(r))
 	page(w, r, "Run "+shortIDOf(id), "/runs", RunsPage(view))
+}
+
+func (s *Server) handleChatsPage(w http.ResponseWriter, r *http.Request) {
+	view := s.chatViewData("", "", "", readTimeRange(r))
+	page(w, r, "Chats — Looper Agent", "/chats", ChatsPage(view))
 }
 
 
@@ -43,7 +47,7 @@ func (s *Server) handleRunPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) partialDashboard(w http.ResponseWriter, r *http.Request) {
 	patch(w, r, "#dashboard-body", datastar.ElementPatchModeInner,
-		DashboardBody(s.dashboardData()))
+		DashboardBody(s.dashboardData(readSignalTimeRange(r))))
 }
 
 // partialSidebar reads $q / $status / $selected from the datastar signal
@@ -53,9 +57,22 @@ func (s *Server) partialSidebar(w http.ResponseWriter, r *http.Request) {
 		Q        string `json:"q"`
 		Status   string `json:"status"`
 		Selected string `json:"selected"`
+		Since    string `json:"since"`
+		From     string `json:"from"`
+		To       string `json:"to"`
 	}
 	_ = datastar.ReadSignals(r, &sig)
-	view := s.sidebarData(sig.Status, sig.Q, sig.Selected)
+	if sig.Since == "" {
+		sig.Since = r.URL.Query().Get("since")
+	}
+	if sig.From == "" {
+		sig.From = r.URL.Query().Get("from")
+	}
+	if sig.To == "" {
+		sig.To = r.URL.Query().Get("to")
+	}
+	tr := TimeRange{Since: sig.Since, From: sig.From, To: sig.To}
+	view := s.sidebarData(sig.Status, sig.Q, sig.Selected, tr)
 	patch(w, r, "#sidebar-body", datastar.ElementPatchModeInner, SidebarBody(view))
 }
 
@@ -69,6 +86,85 @@ func (s *Server) partialDetailPane(w http.ResponseWriter, r *http.Request) {
 	data := s.detailData(run)
 	patch(w, r, "#detail-pane", datastar.ElementPatchModeInner,
 		DetailPaneBody(data))
+}
+
+func (s *Server) partialChatSidebar(w http.ResponseWriter, r *http.Request) {
+	var sig struct {
+		Q      string `json:"q"`
+		Status string `json:"status"`
+		Since  string `json:"since"`
+		From   string `json:"from"`
+		To     string `json:"to"`
+	}
+	_ = datastar.ReadSignals(r, &sig)
+	tr := TimeRange{Since: sig.Since, From: sig.From, To: sig.To}
+	patch(w, r, "#chat-sidebar-body", datastar.ElementPatchModeInner,
+		ChatSidebarBody(s.chatSidebarData(sig.Status, sig.Q, "", tr)))
+}
+
+func (s *Server) partialChatThread(w http.ResponseWriter, r *http.Request) {
+	var sig struct {
+		Q     string `json:"q"`
+		Conv  string `json:"conv"`
+		Since string `json:"since"`
+		From  string `json:"from"`
+		To    string `json:"to"`
+	}
+	_ = datastar.ReadSignals(r, &sig)
+	tr := TimeRange{Since: sig.Since, From: sig.From, To: sig.To}
+	patch(w, r, "#chat-messages", datastar.ElementPatchModeInner,
+		chatMessagesContent(s.chatSidebarData("", sig.Q, "", tr)))
+}
+
+func (s *Server) partialChatTrace(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	run := s.store.Find(id)
+	if run == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	patch(w, r, "#chat-trace", datastar.ElementPatchModeInner,
+		ChatTraceBody(s.detailData(run)))
+}
+
+func (s *Server) partialTimeRefresh(w http.ResponseWriter, r *http.Request) {
+	since := r.PathValue("since")
+	var from, to string
+	if since == "custom" {
+		var sig struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		}
+		_ = datastar.ReadSignals(r, &sig)
+		from = sig.From
+		to = sig.To
+		if from == "" {
+			from = r.URL.Query().Get("from")
+		}
+		if to == "" {
+			to = r.URL.Query().Get("to")
+		}
+	}
+	tr := TimeRange{Since: since, From: from, To: to}
+
+	sse := datastar.NewSSE(w, r)
+
+	_ = sse.PatchElements(renderComponent(r, SidebarBody(s.sidebarData("", "", "", tr))),
+		datastar.WithSelector("#sidebar-body"),
+		datastar.WithMode(datastar.ElementPatchModeInner),
+	)
+	_ = sse.PatchElements(renderComponent(r, ChatSidebarBody(s.chatSidebarData("", "", "", tr))),
+		datastar.WithSelector("#chat-sidebar-body"),
+		datastar.WithMode(datastar.ElementPatchModeInner),
+	)
+	_ = sse.PatchElements(renderComponent(r, chatMessagesContent(s.chatSidebarData("", "", "", tr))),
+		datastar.WithSelector("#chat-messages"),
+		datastar.WithMode(datastar.ElementPatchModeInner),
+	)
+	_ = sse.PatchElements(renderComponent(r, DashboardBody(s.dashboardData(tr))),
+		datastar.WithSelector("#dashboard-body"),
+		datastar.WithMode(datastar.ElementPatchModeInner),
+	)
 }
 
 // ─── JSON / control ──────────────────────────────────────────────────────────
@@ -85,9 +181,13 @@ func (s *Server) apiRun(w http.ResponseWriter, r *http.Request) {
 		Input:     input,
 		Status:    RunRunning,
 		StartedAt: time.Now(),
+		Steps: []TimelineStep{
+			{Kind: StepKindUserInput, Content: input, At: time.Now()},
+		},
 	})
 	// New card: sidebar needs to rebuild. Detail pane is wired via TopicRun.
-	s.hub.Publish(TopicRun(id), TopicSidebar)
+	// TopicChats keeps the chat view in sync with the new run.
+	s.hub.Publish(TopicRun(id), TopicSidebar, TopicChats)
 
 	if s.runner == nil {
 		s.store.Update(id, func(r *RunRecord) {
@@ -171,9 +271,9 @@ func (s *Server) executeRun(runID, input string) {
 			OutputTokens: step.OutputTokens,
 			CachedTokens: step.CachedTokens,
 		})
-		// Per-step: only the detail pane needs to re-render. Sidebar stays
-		// put so the user's card selection isn't clobbered by churn.
-		s.hub.Publish(TopicRun(runID))
+		// Per-step: detail pane + chat thread re-render. Sidebar stays put
+		// so the user's card selection isn't clobbered by churn.
+		s.hub.Publish(TopicRun(runID), TopicChats)
 	}
 
 	sum, ok := <-summary
@@ -200,8 +300,9 @@ func (s *Server) executeRun(runID, input string) {
 		r.EndedAt = time.Now()
 	})
 	// Final state: detail pane gets a refresh AND sidebar gets the new
-	// status / totals / final cost.
-	s.hub.Publish(TopicRun(runID), TopicSidebar)
+	// status / totals / final cost. Chat thread too so the agent bubble
+	// flips from streaming text to the final output.
+	s.hub.Publish(TopicRun(runID), TopicSidebar, TopicChats)
 	// Mirror to disk so the next `looper serve` reload can replay this run.
 	if r := s.store.Find(runID); r != nil {
 		_ = writeRunFile(s.storeDir, r)
@@ -210,8 +311,9 @@ func (s *Server) executeRun(runID, input string) {
 
 // ─── View-model builders ─────────────────────────────────────────────────────
 
-func (s *Server) dashboardData() DashboardData {
+func (s *Server) dashboardData(tr TimeRange) DashboardData {
 	runs := s.store.All()
+	runs = s.filterByTime(runs, tr)
 	var usd float64
 	var tok, turns int
 	for _, r := range runs {
@@ -240,8 +342,8 @@ func (s *Server) dashboardData() DashboardData {
 	}
 }
 
-func (s *Server) runsViewData(filter, query, selectedID string) RunsViewData {
-	sidebar := s.sidebarData(filter, query, selectedID)
+func (s *Server) runsViewData(filter, query, selectedID string, tr TimeRange) RunsViewData {
+	sidebar := s.sidebarData(filter, query, selectedID, tr)
 	var detail *DetailData
 	if sidebar.Selected != nil {
 		d := s.detailData(sidebar.Selected)
@@ -250,8 +352,9 @@ func (s *Server) runsViewData(filter, query, selectedID string) RunsViewData {
 	return RunsViewData{Sidebar: sidebar, Detail: detail}
 }
 
-func (s *Server) sidebarData(filter, query, selectedID string) SidebarData {
+func (s *Server) sidebarData(filter, query, selectedID string, tr TimeRange) SidebarData {
 	all := s.store.All()
+	all = s.filterByTime(all, tr)
 	q := strings.ToLower(strings.TrimSpace(query))
 
 	// Apply filter + search.
@@ -336,6 +439,124 @@ func (s *Server) sidebarData(filter, query, selectedID string) SidebarData {
 		CountRun:   run,
 		CountDone:  done,
 		CountError: errN,
+	}
+}
+
+func (s *Server) chatViewData(filter, query, selectedID string, tr TimeRange) ChatViewData {
+	sidebar := s.chatSidebarData(filter, query, selectedID, tr)
+	var detail *DetailData
+	if sidebar.Selected != nil {
+		d := s.detailData(sidebar.Selected)
+		detail = &d
+	}
+	return ChatViewData{Sidebar: sidebar, Detail: detail}
+}
+
+func (s *Server) chatSidebarData(filter, query, selectedID string, tr TimeRange) ChatSidebarData {
+	all := s.store.All()
+	all = s.filterByTime(all, tr)
+	q := strings.ToLower(strings.TrimSpace(query))
+
+	matched := make([]*RunRecord, 0, len(all))
+	for _, r := range all {
+		if filter != "" && string(r.Status) != filter {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(r.Input), q) && !strings.Contains(strings.ToLower(r.ID), q) {
+			continue
+		}
+		matched = append(matched, r)
+	}
+
+	byID := map[string]*ChatConversation{}
+	for _, r := range matched {
+		sid := r.SessionID
+		if sid == "" {
+			sid = r.ID
+		}
+		conv, ok := byID[sid]
+		if !ok {
+			conv = &ChatConversation{ID: sid, ShortID: ShortID(sid), Project: r.Project}
+			byID[sid] = conv
+		}
+		statusClass := ""
+		switch r.Status {
+		case RunRunning:
+			statusClass = "status-running"
+			conv.HasRunning = true
+		case RunError:
+			statusClass = "status-error"
+			conv.HasError = true
+		}
+		// Each run is one user turn + one agent turn. Emit both bubbles —
+		// previously we picked one of the two, which dropped the user input
+		// after reload (run_start ingest does not carry a user_input step).
+		userText := r.Input
+		if userText == "" {
+			for _, s := range r.Steps {
+				if s.Kind == StepKindUserInput {
+					userText = s.Content
+					break
+				}
+			}
+		}
+		if userText != "" {
+			conv.Messages = append(conv.Messages, ChatMessage{
+				Run: r, Association: ChatUser, Text: userText, StatusClass: statusClass,
+			})
+		}
+		// Agent reply: final Output if the run finished; otherwise accumulate
+		// streaming chunks (and any partial final_response step) so the
+		// bubble grows as the model emits tokens.
+		agentText := r.Output
+		if agentText == "" {
+			var sb strings.Builder
+			for _, s := range r.Steps {
+				switch s.Kind {
+				case StepKindStreamingChunk, StepKindFinal:
+					sb.WriteString(s.Content)
+				}
+			}
+			agentText = sb.String()
+		}
+		conv.Messages = append(conv.Messages, ChatMessage{
+			Run: r, Association: ChatAgent, Text: agentText, StatusClass: statusClass,
+		})
+		conv.TotalUSD += r.TotalUSD
+		if r.Project != "" && conv.Project == "" {
+			conv.Project = r.Project
+		}
+	}
+
+	conversations := make([]ChatConversation, 0, len(byID))
+	for _, c := range byID {
+		// SliceStable preserves the user-before-agent insertion order for
+		// messages that share the same Run.StartedAt.
+		sort.SliceStable(c.Messages, func(i, j int) bool {
+			return c.Messages[i].Run.StartedAt.Before(c.Messages[j].Run.StartedAt)
+		})
+		conversations = append(conversations, *c)
+	}
+	sort.Slice(conversations, func(i, j int) bool {
+		return latestTime(conversations[i]).After(latestTime(conversations[j]))
+	})
+
+	allN, run, done, errN := s.store.Counts()
+
+	var selected *RunRecord
+	if selectedID != "" {
+		selected = s.store.Find(selectedID)
+	}
+
+	return ChatSidebarData{
+		Conversations: conversations,
+		Selected:      selected,
+		Filter:        filter,
+		Query:         query,
+		CountAll:      allN,
+		CountRun:      run,
+		CountDone:     done,
+		CountError:    errN,
 	}
 }
 
@@ -445,6 +666,99 @@ func shortIDOf(id string) string {
 	return id
 }
 
-// Ensure unused imports are referenced when building skeleton without templ
-// components yet — keeps the build green during incremental development.
-var _ = fmt.Sprintf
+func readTimeRange(r *http.Request) TimeRange {
+	q := r.URL.Query()
+	return TimeRange{
+		Since: q.Get("since"),
+		From:  q.Get("from"),
+		To:    q.Get("to"),
+	}
+}
+
+func readSignalTimeRange(r *http.Request) TimeRange {
+	var sig struct {
+		Since string `json:"since"`
+		From  string `json:"from"`
+		To    string `json:"to"`
+	}
+	_ = datastar.ReadSignals(r, &sig)
+	if sig.Since == "" {
+		sig.Since = r.URL.Query().Get("since")
+	}
+	if sig.From == "" {
+		sig.From = r.URL.Query().Get("from")
+	}
+	if sig.To == "" {
+		sig.To = r.URL.Query().Get("to")
+	}
+	return TimeRange{Since: sig.Since, From: sig.From, To: sig.To}
+}
+
+func (s *Server) filterByTime(runs []*RunRecord, tr TimeRange) []*RunRecord {
+	if !tr.Active() {
+		return runs
+	}
+	if tr.Since == "custom" {
+		var fromTime, toTime time.Time
+		var err error
+		if tr.From != "" {
+			fromTime, err = time.Parse("2006-01-02T15:04", tr.From)
+			if err != nil {
+				fromTime, _ = time.Parse("2006-01-02T15:04:05", tr.From)
+			}
+		}
+		if tr.To != "" {
+			toTime, err = time.Parse("2006-01-02T15:04", tr.To)
+			if err != nil {
+				toTime, _ = time.Parse("2006-01-02T15:04:05", tr.To)
+			}
+		}
+		filtered := make([]*RunRecord, 0, len(runs))
+		for _, r := range runs {
+			if !fromTime.IsZero() && r.StartedAt.Before(fromTime) {
+				continue
+			}
+			if !toTime.IsZero() && r.StartedAt.After(toTime) {
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		return filtered
+	}
+	d, err := time.ParseDuration(tr.Since)
+	if err != nil {
+		return runs
+	}
+	cutoff := time.Now().Add(-d)
+	filtered := make([]*RunRecord, 0, len(runs))
+	for _, r := range runs {
+		if r.StartedAt.After(cutoff) {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
+}
+
+func latestTime(c ChatConversation) time.Time {
+	if len(c.Messages) == 0 {
+		return time.Time{}
+	}
+	t := c.Messages[len(c.Messages)-1].Run.StartedAt
+	for _, m := range c.Messages {
+		if !m.Run.EndedAt.IsZero() && m.Run.EndedAt.After(t) {
+			t = m.Run.EndedAt
+		}
+	}
+	if c.HasRunning {
+		return time.Now()
+	}
+	return t
+}
+
+func renderComponent(r *http.Request, comp templ.Component) string {
+	var buf bytes.Buffer
+	if err := comp.Render(r.Context(), &buf); err != nil {
+		return ""
+	}
+	return buf.String()
+}

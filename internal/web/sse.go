@@ -78,6 +78,9 @@ func (s *Server) sseSidebar(w http.ResponseWriter, r *http.Request) {
 		Q        string `json:"q"`
 		Status   string `json:"status"`
 		Selected string `json:"selected"`
+		Since    string `json:"since"`
+		From     string `json:"from"`
+		To       string `json:"to"`
 	}
 	_ = datastar.ReadSignals(r, &sig)
 	// Fall back to URL query if signals aren't populated yet (first paint).
@@ -90,9 +93,19 @@ func (s *Server) sseSidebar(w http.ResponseWriter, r *http.Request) {
 	if sig.Selected == "" {
 		sig.Selected = q.Get("selected")
 	}
+	if sig.Since == "" {
+		sig.Since = q.Get("since")
+	}
+	if sig.From == "" {
+		sig.From = q.Get("from")
+	}
+	if sig.To == "" {
+		sig.To = q.Get("to")
+	}
+	tr := TimeRange{Since: sig.Since, From: sig.From, To: sig.To}
 	s.stream(w, r, TopicSidebar, "#sidebar-body", func() templ.Component {
 		// Re-resolve on every push so filter/search stay live.
-		return SidebarBody(s.sidebarData(sig.Status, sig.Q, sig.Selected))
+		return SidebarBody(s.sidebarData(sig.Status, sig.Q, sig.Selected, tr))
 	})
 }
 
@@ -108,7 +121,67 @@ func (s *Server) sseDetailPane(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sseDashboard(w http.ResponseWriter, r *http.Request) {
+	tr := readSignalTimeRange(r)
 	s.stream(w, r, TopicSidebar, "#dashboard-body", func() templ.Component {
-		return DashboardBody(s.dashboardData())
+		return DashboardBody(s.dashboardData(tr))
+	})
+}
+
+func (s *Server) sseChatSidebar(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	var sig struct {
+		Q      string `json:"q"`
+		Status string `json:"status"`
+		Since  string `json:"since"`
+		From   string `json:"from"`
+		To     string `json:"to"`
+	}
+	_ = datastar.ReadSignals(r, &sig)
+	if sig.Q == "" {
+		sig.Q = q.Get("q")
+	}
+	if sig.Status == "" {
+		sig.Status = q.Get("status")
+	}
+	if sig.Since == "" {
+		sig.Since = q.Get("since")
+	}
+	if sig.From == "" {
+		sig.From = q.Get("from")
+	}
+	if sig.To == "" {
+		sig.To = q.Get("to")
+	}
+	tr := TimeRange{Since: sig.Since, From: sig.From, To: sig.To}
+	s.stream(w, r, TopicChats, "#chat-sidebar-body", func() templ.Component {
+		return ChatSidebarBody(s.chatSidebarData(sig.Status, sig.Q, "", tr))
+	})
+}
+
+func (s *Server) sseChatThread(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	var sig struct {
+		Q     string `json:"q"`
+		Conv  string `json:"conv"`
+		Since string `json:"since"`
+		From  string `json:"from"`
+		To    string `json:"to"`
+	}
+	_ = datastar.ReadSignals(r, &sig)
+	if sig.Q == "" {
+		sig.Q = q.Get("q")
+	}
+	if sig.Since == "" {
+		sig.Since = q.Get("since")
+	}
+	if sig.From == "" {
+		sig.From = q.Get("from")
+	}
+	if sig.To == "" {
+		sig.To = q.Get("to")
+	}
+	tr := TimeRange{Since: sig.Since, From: sig.From, To: sig.To}
+	s.stream(w, r, TopicChats, "#chat-messages", func() templ.Component {
+		return chatMessagesContent(s.chatSidebarData("", sig.Q, "", tr))
 	})
 }
