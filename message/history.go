@@ -127,6 +127,19 @@ func (h *History) InsertBefore(index int, msg Message) {
 }
 
 // Truncate keeps only the last maxMessages.
+//
+// The cut is then advanced forward so the retained window never starts
+// with a tool-call/tool-result pair split across the boundary:
+//
+//   - A leading [MessageTool] without a preceding assistant tool_calls is
+//     dropped. OpenAI and Anthropic both reject such orphans with a 400.
+//   - A leading [MessageAssistant] whose ToolCalls are not all matched by
+//     tool results within the kept window is also dropped, together with
+//     any partial trailing tool results.
+//
+// Worst case the window ends up smaller than maxMessages — that is the
+// intended trade-off. Returning a request that the provider will reject
+// is never the safer option.
 func (h *History) Truncate(maxMessages int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -134,9 +147,39 @@ func (h *History) Truncate(maxMessages int) {
 		h.messages = nil
 		return
 	}
-	if len(h.messages) > maxMessages {
-		h.messages = h.messages[len(h.messages)-maxMessages:]
+	total := len(h.messages)
+	if total <= maxMessages {
+		return
 	}
+	cut := total - maxMessages
+	for cut < total {
+		m := h.messages[cut]
+		if m.Type == MessageTool {
+			cut++
+			continue
+		}
+		if m.Type == MessageAssistant && len(m.ToolCalls) > 0 {
+			need := make(map[string]struct{}, len(m.ToolCalls))
+			for _, tc := range m.ToolCalls {
+				need[tc.ID] = struct{}{}
+			}
+			end := cut + 1
+			for end < total && h.messages[end].Type == MessageTool {
+				delete(need, h.messages[end].ToolID)
+				end++
+			}
+			if len(need) > 0 {
+				cut = end
+				continue
+			}
+		}
+		break
+	}
+	if cut >= total {
+		h.messages = nil
+		return
+	}
+	h.messages = append([]Message(nil), h.messages[cut:]...)
 }
 
 // TruncateByTurns keeps only the last maxUserTurns user-turn blocks and the
