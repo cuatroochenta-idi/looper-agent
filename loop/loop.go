@@ -438,8 +438,12 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 			}
 			toolResults = append(toolResults, cancelled...)
 			executed := l.executeToolCallsInternal(ctx, history, approved)
+			nameByID := make(map[string]string, len(approved))
+			for _, c := range approved {
+				nameByID[c.ID] = c.Name
+			}
 			for _, r := range executed {
-				history.AddToolResult(r.ToolCallID, "", r.Content, r.IsError)
+				history.AddToolResult(r.ToolCallID, nameByID[r.ToolCallID], r.Content, r.IsError)
 			}
 			toolResults = append(toolResults, executed...)
 		}
@@ -569,9 +573,15 @@ func (l *AgentLoop) executeToolCalls(ctx context.Context, history *message.Histo
 		results[sc.index] = result
 	}
 
-	// Add all results to history in original order
+	// Add all results to history in original order. Look up each call's name
+	// by ID — Google's API requires function_response.name, and Anthropic /
+	// OpenAI ignore it harmlessly.
+	nameByID := make(map[string]string, len(calls))
+	for _, c := range calls {
+		nameByID[c.ID] = c.Name
+	}
 	for _, r := range results {
-		history.AddToolResult(r.ToolCallID, "", r.Content, r.IsError)
+		history.AddToolResult(r.ToolCallID, nameByID[r.ToolCallID], r.Content, r.IsError)
 	}
 
 	return nil
@@ -1378,7 +1388,7 @@ func (l *AgentLoop) executeToolCallsStreaming(ctx context.Context, history *mess
 			ToolCallID: r.ToolCallID,
 			Turn:       turn,
 		}
-		history.AddToolResult(r.ToolCallID, "", r.Content, r.IsError)
+		history.AddToolResult(r.ToolCallID, nameByID[r.ToolCallID], r.Content, r.IsError)
 	}
 	// Return both hook-cancelled and freshly executed results so the
 	// validator snapshot sees every call's outcome.

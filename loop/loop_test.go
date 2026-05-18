@@ -318,3 +318,60 @@ func TestAgentLoopUnknownTool(t *testing.T) {
 type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
+
+// TestToolResultPreservesName guards a regression where executed tool results
+// were appended to history with an empty Name field. Google's Gemini API
+// requires function_response.name and rejected the request with
+// "Name cannot be empty"; Anthropic / OpenAI ignored Name and worked anyway.
+// Every MessageTool produced by the loop must carry the originating call's
+// tool name.
+func TestToolResultPreservesName(t *testing.T) {
+	prov := &mockProvider{
+		model: "mock",
+		responses: []*provider.LLMResponse{
+			{
+				ToolCalls: []message.ToolCall{
+					{ID: "tc1", Name: "add", Arguments: json.RawMessage(`{"a":1,"b":2}`)},
+					{ID: "tc2", Name: "add", Arguments: json.RawMessage(`{"a":3,"b":4}`)},
+				},
+				Usage: provider.Usage{InputTokens: 10, OutputTokens: 5},
+			},
+			{Content: "done", IsFinal: true, Usage: provider.Usage{InputTokens: 15, OutputTokens: 5}},
+		},
+	}
+
+	addTool := tool.MustNewTool(struct {
+		A int `json:"a" jsonschema:"required"`
+		B int `json:"b" jsonschema:"required"`
+	}{}, func(ctx context.Context, in struct {
+		A int `json:"a" jsonschema:"required"`
+		B int `json:"b" jsonschema:"required"`
+	}) (string, error) {
+		return "ok", nil
+	}, tool.ToolConfig{Name: "add", Description: "Adds", Parallel: true})
+
+	loop := NewAgentLoop(prov, func(ctx context.Context) string { return "math" }, []*tool.Tool{addTool})
+
+	result, err := loop.Run(context.Background(), "1+2 and 3+4")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var toolMsgs []message.Message
+	for _, m := range result.History.Messages() {
+		if m.Type == message.MessageTool {
+			toolMsgs = append(toolMsgs, m)
+		}
+	}
+	if len(toolMsgs) != 2 {
+		t.Fatalf("expected 2 tool result messages, got %d", len(toolMsgs))
+	}
+	for i, m := range toolMsgs {
+		if m.Name != "add" {
+			t.Errorf("tool result %d: Name = %q, want %q", i, m.Name, "add")
+		}
+		if m.ToolID == "" {
+			t.Errorf("tool result %d: ToolID empty", i)
+		}
+	}
+}
