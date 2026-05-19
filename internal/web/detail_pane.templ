@@ -489,7 +489,13 @@ templ ChatTraceBody(data DetailData) {
 					data-on:click="$selected = ''">×</button>
 			</div>
 		</div>
-		@DetailPaneBody(data)
+		// Wrap DetailPaneBody in the same #detail-pane selector the /runs
+		// page uses, so the SSE stream (/sse/runs/{id}) finds its target on
+		// the chats page too. Without this the live trace stops refreshing
+		// after the initial paint and datastar logs PatchElementsNoTargetsFound.
+		<div id="detail-pane">
+			@DetailPaneBody(data)
+		</div>
 	</div>
 }
 
