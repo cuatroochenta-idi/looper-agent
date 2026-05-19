@@ -3,7 +3,18 @@ package web
 import (
 	"log"
 	"net/http"
+	"time"
 )
+
+// stuckRunMaxIdle is the cap on how long a run may stay "running" with no
+// new step events before the sweeper auto-finalizes it as errored. Picked
+// to be longer than any reasonable LLM turn so legitimate slow calls
+// aren't killed, but short enough that a dead process clears within
+// minutes instead of hanging the panel forever.
+const stuckRunMaxIdle = 3 * time.Minute
+
+// stuckRunSweepInterval is how often the background sweeper runs.
+const stuckRunSweepInterval = 30 * time.Second
 
 // Server hosts the debug panel. Construct with NewServer, attach a RunFunc
 // with SetRunner, then mount Handler() on any HTTP listener.
@@ -29,7 +40,10 @@ func WithStoreDir(dir string) ServerOption {
 
 // NewServer returns a server ready to serve HTTP. If a store directory is
 // configured, it is created (if missing), gitignored, and any pre-existing
-// runs are hydrated into the in-memory store.
+// runs are hydrated into the in-memory store. A background sweeper is also
+// started that finalizes runs stuck in "running" past stuckRunMaxIdle so the
+// panel never displays a permanently "thinking…" bubble when an agent
+// process dies before emitting run_end.
 func NewServer(opts ...ServerOption) (*Server, error) {
 	s := &Server{store: NewStore(), hub: NewHub()}
 	for _, opt := range opts {
@@ -45,8 +59,38 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 		} else if n > 0 {
 			log.Printf("Loaded %d runs from %s", n, s.storeDir)
 		}
+		// Any run that came back from disk in "running" state belongs to a
+		// previous process that's now gone — finalize immediately instead of
+		// waiting for the first sweep tick.
+		_ = s.store.SweepStuckRuns(0, time.Now())
 	}
+	go s.runStuckRunSweeper()
 	return s, nil
+}
+
+// runStuckRunSweeper periodically calls SweepStuckRuns and publishes hub
+// notifications for any run that was finalized so the sidebar + detail
+// pane update in real time.
+func (s *Server) runStuckRunSweeper() {
+	ticker := time.NewTicker(stuckRunSweepInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		finalized := s.store.SweepStuckRuns(stuckRunMaxIdle, time.Now())
+		if len(finalized) == 0 {
+			continue
+		}
+		topics := make([]Topic, 0, len(finalized)+2)
+		topics = append(topics, TopicSidebar, TopicChats)
+		for _, id := range finalized {
+			topics = append(topics, TopicRun(id))
+			if s.storeDir != "" {
+				if r := s.store.Find(id); r != nil {
+					_ = writeRunFile(s.storeDir, r)
+				}
+			}
+		}
+		s.hub.Publish(topics...)
+	}
 }
 
 // SetRunner wires the agent runner used by POST /api/run. If unset, the

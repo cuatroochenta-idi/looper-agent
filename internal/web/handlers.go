@@ -479,13 +479,14 @@ func (s *Server) chatSidebarData(filter, query, selectedID string, tr TimeRange)
 			conv = &ChatConversation{ID: sid, ShortID: ShortID(sid), Project: r.Project}
 			byID[sid] = conv
 		}
-		statusClass := ""
+		// Status class aligns with the .msg-dot.s-*, .msg-row.s-* selectors
+		// in styles.templ. Earlier "status-error" / "status-running" values
+		// never matched the CSS — bubbles stayed neutral even on errors.
+		statusClass := "s-" + string(r.Status)
 		switch r.Status {
 		case RunRunning:
-			statusClass = "status-running"
 			conv.HasRunning = true
 		case RunError:
-			statusClass = "status-error"
 			conv.HasError = true
 		}
 		// Each run is one user turn + one agent turn. Emit both bubbles —
@@ -666,10 +667,20 @@ func shortIDOf(id string) string {
 	return id
 }
 
+// defaultSince is the time window applied when neither the URL query nor the
+// datastar signal supplies one. Showing only the last 15 minutes by default
+// keeps the panel manageable and matches the active pill the Base template
+// renders, so first-load state and post-interaction state agree.
+const defaultSince = "15m"
+
 func readTimeRange(r *http.Request) TimeRange {
 	q := r.URL.Query()
+	since := q.Get("since")
+	if since == "" {
+		since = defaultSince
+	}
 	return TimeRange{
-		Since: q.Get("since"),
+		Since: since,
 		From:  q.Get("from"),
 		To:    q.Get("to"),
 	}
@@ -690,6 +701,9 @@ func readSignalTimeRange(r *http.Request) TimeRange {
 	}
 	if sig.To == "" {
 		sig.To = r.URL.Query().Get("to")
+	}
+	if sig.Since == "" {
+		sig.Since = defaultSince
 	}
 	return TimeRange{Since: sig.Since, From: sig.From, To: sig.To}
 }

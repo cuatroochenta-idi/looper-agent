@@ -119,3 +119,21 @@ func (r *RunRecord) Duration() time.Duration {
 	}
 	return end.Sub(r.StartedAt)
 }
+
+// IsStuck returns true when the run is still "running" but no events have
+// landed in idleThreshold. The sweeper auto-finalizes after a longer
+// window; this lower threshold lets the chat bubble flag a probably-dead
+// run before the sweep tick fires so operators don't stare at a fake
+// "thinking…" spinner.
+func (r *RunRecord) IsStuck(idleThreshold time.Duration) bool {
+	if r.Status != RunRunning {
+		return false
+	}
+	last := r.StartedAt
+	if n := len(r.Steps); n > 0 {
+		if t := r.Steps[n-1].At; t.After(last) {
+			last = t
+		}
+	}
+	return time.Since(last) > idleThreshold
+}

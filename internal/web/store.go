@@ -1,6 +1,9 @@
 package web
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // Store is the thread-safe in-memory database of runs.
 type Store struct {
@@ -80,4 +83,37 @@ func (s *Store) Counts() (all, running, completed, errored int) {
 		}
 	}
 	return
+}
+
+// SweepStuckRuns marks every run that has been "running" for longer than
+// maxIdle without any new step as errored. This catches runs whose host
+// process died (or whose run_end event was lost) so the UI doesn't show
+// "thinking…" forever. Returns the IDs that were finalized.
+func (s *Store) SweepStuckRuns(maxIdle time.Duration, now time.Time) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var finalized []string
+	for _, r := range s.runs {
+		if r.Status != RunRunning {
+			continue
+		}
+		last := r.StartedAt
+		if n := len(r.Steps); n > 0 {
+			if t := r.Steps[n-1].At; t.After(last) {
+				last = t
+			}
+		}
+		if now.Sub(last) < maxIdle {
+			continue
+		}
+		r.Status = RunError
+		r.EndedAt = now
+		r.Steps = append(r.Steps, TimelineStep{
+			Kind: StepKindError,
+			Err:  "run timed out — no events received for " + maxIdle.String() + " (process killed or run_end lost)",
+			At:   now,
+		})
+		finalized = append(finalized, r.ID)
+	}
+	return finalized
 }

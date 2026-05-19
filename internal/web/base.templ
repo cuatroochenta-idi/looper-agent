@@ -3,7 +3,7 @@ package web
 templ Base(title, currentPath string, body templ.Component) {
 	<!DOCTYPE html>
 	<html lang="en" data-theme="dark"
-		data-signals="{theme:'dark', q:'', status:'', selected:'', tabs:{}, since:'all', from:'', to:''}"
+		data-signals="{theme:'dark', q:'', status:'', selected:'', tabs:{}, since:'15m', from:'', to:''}"
 		data-init="$theme = (document.documentElement.dataset.theme || 'dark')"
 		data-attr:data-theme="$theme"
 		data-effect="localStorage.setItem('theme', $theme)"
@@ -44,9 +44,6 @@ templ topbar(currentPath string) {
 			<div class="time-filter">
 				<span class="time-icon" aria-hidden="true">⏱</span>
 				<div class="time-pills" role="tablist" aria-label="Time range">
-					<button class="time-pill" type="button" role="tab"
-						data-class={ "{active: $since === '' || $since === 'all'}" }
-						data-on:click="$since = 'all'; $from = ''; $to = ''; @get('/partials/time-refresh/all')">all</button>
 					for _, opt := range SinceOptions() {
 						<button class="time-pill" type="button" role="tab" value={ opt.Value }
 							data-class={ "{active: $since === '" + opt.Value + "'}" }
@@ -54,6 +51,9 @@ templ topbar(currentPath string) {
 							{ opt.Label }
 						</button>
 					}
+					<button class="time-pill" type="button" role="tab"
+						data-class={ "{active: $since === 'all'}" }
+						data-on:click="$since = 'all'; $from = ''; $to = ''; @get('/partials/time-refresh/all')">all</button>
 				</div>
 				<div class="time-custom" data-show="$since === 'custom'">
 					<input type="datetime-local" class="time-date-input" aria-label="From"

@@ -17,6 +17,51 @@ type ToolCallNode struct {
 	Result *TimelineStep
 }
 
+// HasError reports whether this tool call carries a recognised error
+// signal: an explicit Err field on the result, a JSON envelope that the
+// agent commonly emits for failed tools (`{"ok":false,...}`, `{"error":...}`,
+// `{"status":"error"}`), or a leading "error:" / "Error:" prefix in the
+// result text. Tool results that look like an error highlight the node in
+// the danger palette so operators can scan a noisy trace and spot them.
+func (n ToolCallNode) HasError() bool {
+	if n.Result == nil {
+		return false
+	}
+	if n.Result.Err != "" {
+		return true
+	}
+	return looksLikeToolError(n.Result.Content)
+}
+
+// looksLikeToolError uses cheap heuristics — no full JSON parse — to flag
+// tool results that the model and the loop should treat as failures even
+// though the wire protocol doesn't surface a dedicated error channel.
+func looksLikeToolError(content string) bool {
+	t := strings.TrimSpace(content)
+	if t == "" {
+		return false
+	}
+	low := strings.ToLower(t)
+	switch {
+	case strings.HasPrefix(low, "error:"),
+		strings.HasPrefix(low, "error "),
+		strings.HasPrefix(low, "\"error\""),
+		strings.HasPrefix(low, "{\"error\""),
+		strings.HasPrefix(low, "fatal:"):
+		return true
+	}
+	if strings.HasPrefix(t, "{") {
+		// Cheap structural check — avoids unmarshalling every tool result.
+		if strings.Contains(low, "\"ok\":false") ||
+			strings.Contains(low, "\"status\":\"error\"") ||
+			strings.Contains(low, "\"status\":\"failed\"") ||
+			strings.Contains(low, "\"success\":false") {
+			return true
+		}
+	}
+	return false
+}
+
 // TurnNode aggregates everything that happened in one agentic turn.
 type TurnNode struct {
 	Index     int

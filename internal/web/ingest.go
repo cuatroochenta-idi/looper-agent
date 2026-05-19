@@ -84,13 +84,41 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 		if started.IsZero() {
 			started = ev.Ts
 		}
+		// Seed step list with the system prompt + the user input so the
+		// trace view can render them as the first nodes. Without this the
+		// timeline shows "Awaiting first step…" and operators have no way
+		// to see what the agent was actually asked.
+		initialSteps := make([]TimelineStep, 0, 2)
+		if d.SystemPrompt != "" {
+			initialSteps = append(initialSteps, TimelineStep{
+				Kind: StepKindSystemPrompt, Content: d.SystemPrompt, At: started,
+			})
+		}
+		if d.Input != "" {
+			initialSteps = append(initialSteps, TimelineStep{
+				Kind: StepKindUserInput, Content: d.Input, At: started,
+			})
+		}
 		// Idempotent: if a run with this ID already exists, refresh the
-		// header fields rather than duplicating.
+		// header fields. We also reset the timeline so a caller that reuses
+		// a runID (e.g. a chat keyed by app+time-bucket) gets a clean
+		// per-turn trace instead of an ever-growing one. Old steps are
+		// dropped here; the previous run is preserved on disk via the
+		// snapshot written at run_end.
 		if existing := s.store.Find(ev.RunID); existing != nil {
 			s.store.Update(ev.RunID, func(r *RunRecord) {
 				r.Input = d.Input
 				r.Status = RunRunning
 				r.StartedAt = started
+				r.EndedAt = time.Time{}
+				r.Output = ""
+				r.Turns = 0
+				r.TotalUSD = 0
+				r.Tokens = 0
+				r.InputTokens = 0
+				r.OutputTokens = 0
+				r.CachedTokens = 0
+				r.Steps = initialSteps
 				if ev.SessionID != "" {
 					r.SessionID = ev.SessionID
 				}
@@ -111,6 +139,7 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 				Input:            d.Input,
 				Status:           RunRunning,
 				StartedAt:        started,
+				Steps:            initialSteps,
 			})
 		}
 		topics = append(topics, TopicSidebar)

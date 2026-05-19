@@ -123,18 +123,26 @@ type traceWriter struct {
 // the parent tool-call ID (for sub-agents spawned from a specific tool call),
 // auto-stamped by Agent.Iterate and AgentLoop.executeSingleTool respectively.
 // Callers should always be nil-safe on the returned value.
-func newTraceWriterFromEnv(ctx context.Context) *traceWriter {
+//
+// sessionOverride takes precedence over LOOPER_SESSION_ID when non-empty so
+// the per-Run WithSessionID option can group traces independently of the
+// process-wide env var.
+func newTraceWriterFromEnv(ctx context.Context, sessionOverride string) *traceWriter {
 	ep := strings.TrimSpace(os.Getenv(EnvTraceEndpoint))
 	if ep == "" {
 		return nil
 	}
+	sid := strings.TrimSpace(sessionOverride)
+	if sid == "" {
+		sid = strings.TrimSpace(os.Getenv(EnvSessionID))
+	}
 	tw := &traceWriter{
 		endpoint:         ep,
-		sessionID:        strings.TrimSpace(os.Getenv(EnvSessionID)),
+		sessionID:        sid,
 		parentRunID:      ParentRunIDFromContext(ctx),
 		parentToolCallID: loop.ParentToolCallIDFromContext(ctx),
 		client:           &http.Client{Timeout: 5 * time.Second},
-		queue:            make(chan TraceEvent, 64),
+		queue:            make(chan TraceEvent, 1024),
 		done:             make(chan struct{}),
 	}
 	go tw.run()
@@ -161,7 +169,10 @@ func (tw *traceWriter) run() {
 }
 
 // send enqueues an event. Drops silently if the queue is full (back-pressure
-// must never block the agent loop).
+// must never block the agent loop). run_start and run_end events are critical
+// for the panel's run-state machine (without them runs get stuck "running"
+// forever) — for those we block briefly to give the worker a chance to drain,
+// then post inline as a last resort.
 func (tw *traceWriter) send(t TraceEventType, runID string, data any) {
 	if tw == nil {
 		return
@@ -173,8 +184,7 @@ func (tw *traceWriter) send(t TraceEventType, runID string, data any) {
 			raw = b
 		}
 	}
-	select {
-	case tw.queue <- TraceEvent{
+	ev := TraceEvent{
 		Type:             t,
 		RunID:            runID,
 		ParentRunID:      tw.parentRunID,
@@ -183,9 +193,42 @@ func (tw *traceWriter) send(t TraceEventType, runID string, data any) {
 		Ts:               time.Now(),
 		Project:          projectName(),
 		Data:             raw,
-	}:
+	}
+	critical := t == TraceRunStart || t == TraceRunEnd
+	select {
+	case tw.queue <- ev:
+		return
 	default:
-		// queue full — drop
+	}
+	if !critical {
+		// step-level event under back-pressure: drop silently so the
+		// host program never stalls on observability.
+		return
+	}
+	// Critical event: give the queue a short window, then post inline
+	// rather than losing the lifecycle marker.
+	select {
+	case tw.queue <- ev:
+	case <-time.After(50 * time.Millisecond):
+		tw.postInline(ev)
+	}
+}
+
+// postInline issues a one-off HTTP POST for an event that couldn't be
+// enqueued. Best-effort and bounded by the client's existing 5s timeout.
+func (tw *traceWriter) postInline(ev TraceEvent) {
+	body, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequest("POST", tw.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := tw.client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
 	}
 }
 

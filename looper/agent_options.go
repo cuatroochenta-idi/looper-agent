@@ -16,11 +16,12 @@ import (
 
 // runConfig holds the resolved options for a single agent run.
 type runConfig struct {
-	history   *message.History
-	maxTurns  int
+	history    *message.History
+	maxTurns   int
 	maxRetries int
-	metadata  map[string]any
-	runID     string
+	metadata   map[string]any
+	runID      string
+	sessionID  string
 }
 
 // RunOption configures a single call to agent.Run().
@@ -60,6 +61,18 @@ func WithMetadata(m map[string]any) RunOption {
 func WithRunID(id string) RunOption {
 	return func(rc *runConfig) {
 		rc.runID = id
+	}
+}
+
+// WithSessionID groups this run with other runs that share the same id in
+// the debug panel. Equivalent to setting LOOPER_SESSION_ID on the process,
+// but scoped to a single Run / Iterate call — useful when one process
+// serves multiple user-facing chat sessions and each one needs its own
+// grouping (e.g. lanbu's per-app chat). An empty value is ignored and the
+// env var (if set) still applies.
+func WithSessionID(id string) RunOption {
+	return func(rc *runConfig) {
+		rc.sessionID = id
 	}
 }
 

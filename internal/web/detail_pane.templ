@@ -272,16 +272,27 @@ templ toolNode(tn ToolCallNode, tl RunTimeline, children []*RunRecord) {
 		if tn.Result != nil {
 			defaultTab = "result"
 		}
+		hasErr := tn.HasError()
 	}}
-	<details class={ "node", "depth-1", templ.KV("tn-active", tn.Result == nil) }>
+	<details class={ "node", "depth-1", templ.KV("tn-active", tn.Result == nil), templ.KV("tn-tool-error", hasErr) } open?={ hasErr }>
 		<summary>
 			<span class="caret">▸</span>
-			<span class="node-kind k-tool">tool</span>
+			<span class={ "node-kind", templ.KV("k-tool", !hasErr), templ.KV("k-tool-error", hasErr) }>
+				if hasErr {
+					tool · error
+				} else {
+					tool
+				}
+			</span>
 			<span class="tool-name">{ tn.Call.ToolName }</span>
 			<span class="node-title">
 				<span class="preview">({ ArgsPreview(tn.Call.ToolArgs) })</span>
 				if tn.Result != nil {
-					<span class="preview preview-success">→ { Truncate(tn.Result.Content, 140) }</span>
+					if hasErr {
+						<span class="preview preview-error">→ { Truncate(tn.Result.Content, 140) }</span>
+					} else {
+						<span class="preview preview-success">→ { Truncate(tn.Result.Content, 140) }</span>
+					}
 				}
 			</span>
 			<span class="node-meta">

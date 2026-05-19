@@ -23,6 +23,9 @@ templ SidebarBody(data SidebarData) {
 			data-bind:q
 			data-on:input__debounce.250ms="@get('/partials/sidebar')"
 		/>
+		<button class="aside-search-clear" type="button" title="Clear filter"
+			data-show="$q !== ''"
+			data-on:click="$q = ''; @get('/partials/sidebar')">×</button>
 	</div>
 	@filterPills(data)
 	<div class="aside-list">

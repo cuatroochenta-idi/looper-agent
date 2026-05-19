@@ -278,7 +278,7 @@ func (a *Agent) Iterate(ctx context.Context, input string, opts ...RunOption) *l
 		runID = newRunID()
 	}
 
-	tw := newTraceWriterFromEnv(ctx)
+	tw := newTraceWriterFromEnv(ctx, cfg.sessionID)
 
 	// Stamp our runID on ctx so that any tool function executed by this run
 	// can spawn a sub-agent and have that sub-agent record us as its parent.

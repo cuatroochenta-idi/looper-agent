@@ -64,17 +64,22 @@ nav.tabs .nav-link.active { background: var(--bg-elevated); color: var(--text); 
 
 /* Sidebar */
 .aside-header { padding: 14px 16px 10px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
-.aside-search { display: flex; align-items: center; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; padding: 0 10px; transition: border-color 100ms ease; }
+.aside-search { display: flex; align-items: center; gap: 4px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; padding: 0 6px 0 10px; transition: border-color 100ms ease; margin: 8px 8px 6px; }
 .aside-search:focus-within { border-color: var(--accent); }
-.aside-search input { flex: 1; background: transparent; border: none; outline: none; color: var(--text); padding: 8px 4px; font: inherit; font-size: 12px; }
+.aside-search input { flex: 1; min-width: 0; background: transparent; border: none; outline: none; color: var(--text); padding: 7px 2px; font: inherit; font-size: 12px; }
 .aside-search input::placeholder { color: var(--text-faint); }
 .aside-search .ico { color: var(--text-faint); font-size: 13px; }
-.filter-pills { display: flex; gap: 4px; flex-wrap: wrap; }
-.filter-pills .fp { background: transparent; border: 1px solid var(--border); color: var(--text-muted); font: inherit; font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: 999px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: all 100ms ease; text-decoration: none; }
+.aside-search-clear { background: transparent; border: none; color: var(--text-faint); cursor: pointer; padding: 0 4px; font-size: 14px; line-height: 1; border-radius: 4px; }
+.aside-search-clear:hover { color: var(--text); background: var(--bg-hover); }
+/* Compact filter pills — single horizontal row, no wrap. Was 4 chunky pills
+   that wrapped to two rows on narrow chat sidebars and dominated the chrome. */
+.filter-pills { display: flex; gap: 3px; flex-wrap: nowrap; padding: 0 8px 8px; overflow-x: auto; scrollbar-width: none; }
+.filter-pills::-webkit-scrollbar { display: none; }
+.filter-pills .fp { background: transparent; border: 1px solid var(--border); color: var(--text-muted); font: inherit; font-size: 10.5px; font-weight: 500; padding: 2px 8px; border-radius: 999px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; transition: all 100ms ease; text-decoration: none; flex: 0 0 auto; }
 .filter-pills .fp:hover { color: var(--text); background: var(--bg-hover); }
 .filter-pills .fp.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-.filter-pills .fp .cnt { font-size: 10px; color: var(--text-faint); }
-.filter-pills .fp.active .cnt { color: inherit; opacity: 0.8; }
+.filter-pills .fp .cnt { font-size: 9.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.filter-pills .fp.active .cnt { color: inherit; opacity: 0.85; }
 .aside-list { flex: 1; overflow-y: auto; padding: 6px 8px 16px; scrollbar-width: thin; }
 .aside-list::-webkit-scrollbar { width: 8px; }
 .aside-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
@@ -233,6 +238,15 @@ nav.tabs .nav-link.active { background: var(--bg-elevated); color: var(--text); 
 .k-tool { color: var(--warning); background: var(--warning-soft); border-color: var(--warning); }
 .k-final{ color: var(--success); background: var(--success-soft); border-color: var(--success); }
 .k-error{ color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }
+/* Tool node that returned an error result. Distinct from .k-tool (warning
+   palette) and .k-error (lifecycle/exception error) — uses the warning
+   palette but with a thicker danger border so it stands out without being
+   mistaken for a hard exception. */
+.k-tool-error { color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }
+.node.tn-tool-error { border-left-color: var(--danger); }
+.node.tn-tool-error > summary { background: color-mix(in srgb, var(--danger-soft) 50%, transparent); }
+.node.tn-tool-error > summary:hover { background: color-mix(in srgb, var(--danger-soft) 80%, transparent); }
+.node-title .preview-error { color: var(--danger); font-weight: 500; }
 .k-reasoning { color: var(--text-muted); background: var(--bg-input); border-style: dashed; }
 .k-system { color: var(--text-faint); }
 .reasoning-node > summary { font-style: italic; }
@@ -435,6 +449,11 @@ nav.tabs .nav-link.active { background: var(--bg-elevated); color: var(--text); 
 	width: 6px; height: 6px; border-radius: 50%; background: var(--info);
 	margin-left: auto; box-shadow: 0 0 5px var(--info); animation: pulse 1.4s ease-in-out infinite;
 }
+.conv-error-dot {
+	width: 6px; height: 6px; border-radius: 50%; background: var(--danger);
+	margin-left: auto; box-shadow: 0 0 5px var(--danger);
+}
+.conv-error-dot + .conv-live-dot { margin-left: 4px; }
 .conv-item-meta {
 	font-size: 10px; color: var(--text-muted); font-variant-numeric: tabular-nums;
 	display: flex; gap: 4px;
@@ -515,6 +534,11 @@ nav.tabs .nav-link.active { background: var(--bg-elevated); color: var(--text); 
 }
 .msg-live .spin-ring { width: 7px; height: 7px; border-width: 1.2px; }
 .msg-row.s-running .msg-bubble { border-color: color-mix(in srgb, var(--info) 40%, var(--border)); }
+.msg-row.s-error .msg-bubble { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: color-mix(in srgb, var(--danger-soft) 60%, var(--bg-card)); }
+.is-user.msg-row.s-error .msg-bubble { background: color-mix(in srgb, var(--danger-soft) 50%, var(--accent-soft)); }
+.msg-row.s-running .msg-role,
+.msg-row.s-error .msg-role { color: currentColor; }
+.msg-stuck-hint { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 1px 6px; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; border-radius: 4px; background: var(--warning-soft); color: var(--warning); border: 1px solid color-mix(in srgb, var(--warning) 50%, var(--border)); }
 
 /* User input node in trace */
 .k-user { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
