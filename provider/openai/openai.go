@@ -195,10 +195,13 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	if tc := buildToolChoiceParams(req.ToolChoice); tc != nil && len(req.Tools) > 0 {
 		params.ToolChoice = *tc
 	}
-	if rf, err := buildResponseFormatParams(req.ResponseSchema, req.ResponseSchemaName); err != nil {
+	if rf, err := buildResponseFormatParams(req.ResponseSchema, req.ResponseSchemaName, req.ResponseFormatMode); err != nil {
 		return nil, fmt.Errorf("openai response_format: %w", err)
 	} else if rf != nil {
 		params.ResponseFormat = *rf
+	}
+	if len(req.ExtraParams) > 0 {
+		params.SetExtraFields(req.ExtraParams)
 	}
 
 	chat, err := p.client.Chat.Completions.New(ctx, params)
@@ -263,10 +266,13 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 	if tc := buildToolChoiceParams(req.ToolChoice); tc != nil && len(req.Tools) > 0 {
 		params.ToolChoice = *tc
 	}
-	if rf, err := buildResponseFormatParams(req.ResponseSchema, req.ResponseSchemaName); err != nil {
+	if rf, err := buildResponseFormatParams(req.ResponseSchema, req.ResponseSchemaName, req.ResponseFormatMode); err != nil {
 		return nil, fmt.Errorf("openai response_format: %w", err)
 	} else if rf != nil {
 		params.ResponseFormat = *rf
+	}
+	if len(req.ExtraParams) > 0 {
+		params.SetExtraFields(req.ExtraParams)
 	}
 	// Request token usage in the streaming response — OpenAI omits it by default.
 	params.StreamOptions = openai.ChatCompletionStreamOptionsParam{

@@ -61,7 +61,65 @@ type LLMRequest struct {
 	// alongside the schema (OpenAI's response_format.json_schema.name).
 	// Defaults to "result" when empty.
 	ResponseSchemaName string
+
+	// ResponseFormatMode lets callers pick how the OpenAI-compat provider
+	// expresses structured-output intent. The zero value preserves
+	// historical behavior (json_schema, non-strict). Useful when routing
+	// through OpenRouter or talking to providers like DeepSeek that reject
+	// json_schema entirely with "This response_format type is unavailable now"
+	// and only accept the looser json_object mode.
+	//
+	// See ResponseFormatMode* constants. Callers that don't care should
+	// leave this empty.
+	ResponseFormatMode ResponseFormatMode
+
+	// ExtraParams is an escape hatch for provider-specific request fields
+	// that the universal LLMRequest doesn't (yet) model. The OpenAI-compat
+	// provider serializes these alongside the standard fields via the
+	// underlying SDK's SetExtraFields hook.
+	//
+	// The canonical use case is OpenRouter routing knobs, e.g.:
+	//
+	//   ExtraParams: map[string]any{
+	//       "provider": map[string]any{"require_parameters": true},
+	//   }
+	//
+	// Providers other than openai currently ignore this field. Keep it
+	// scoped to truly provider-specific fields; promote common ones to
+	// proper LLMRequest fields when they recur across providers.
+	ExtraParams map[string]any
 }
+
+// ResponseFormatMode tells the OpenAI-compat provider how to wrap
+// ResponseSchema into the OpenAI response_format union. The zero value
+// (ResponseFormatAuto) reproduces the SDK's historical behavior.
+type ResponseFormatMode string
+
+const (
+	// ResponseFormatAuto preserves the SDK's default: when ResponseSchema is
+	// set, send response_format=json_schema (strict=false). Compatible with
+	// OpenAI, Gemini, and any OpenRouter provider that advertises
+	// require_parameters support for structured outputs.
+	ResponseFormatAuto ResponseFormatMode = ""
+
+	// ResponseFormatJSONSchema explicitly requests strict-style structured
+	// output (response_format=json_schema). Same wire shape as Auto today;
+	// kept as a distinct enum value so future strict-mode toggles have a
+	// place to land without breaking callers that asked for it explicitly.
+	ResponseFormatJSONSchema ResponseFormatMode = "json_schema"
+
+	// ResponseFormatJSONObject downgrades to OpenAI's looser json_object
+	// mode: the model is asked to emit valid JSON but the SDK does NOT pass
+	// the schema body. Pair this with schema-in-prompt + client-side
+	// validation when talking to providers like DeepSeek and Qwen, which
+	// reject json_schema.
+	ResponseFormatJSONObject ResponseFormatMode = "json_object"
+
+	// ResponseFormatNone suppresses response_format entirely even when
+	// ResponseSchema is set. Useful when probing a brand-new model whose
+	// support for either mode is unknown.
+	ResponseFormatNone ResponseFormatMode = "none"
+)
 
 // ReasoningEffort is a provider-neutral level of reasoning effort. Each
 // provider maps it to its native scale: OpenAI reasoning_effort, Anthropic
