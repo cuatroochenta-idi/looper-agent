@@ -431,7 +431,22 @@ func (t *Translator) buildRequest(systemPrompt string, messages []message.Messag
 			}
 		}
 		if content != nil {
-			contents = append(contents, content)
+			// Merge into the previous Content when roles match. Gemini
+			// rejects requests where two Contents share a role back to
+			// back ("function call turn comes immediately after a user
+			// turn or after a function response turn") whereas OpenAI
+			// and Anthropic tolerate the shape. Common triggers:
+			//   - assistant text followed by assistant tool calls
+			//     persisted as two messages,
+			//   - several MessageTool results in a row (one per call in
+			//     a parallel-tool turn), each emitting a "user" Content.
+			// Both forms are semantically a single turn and Gemini is
+			// happy with one Content carrying mixed Parts.
+			if n := len(contents); n > 0 && contents[n-1].Role == content.Role {
+				contents[n-1].Parts = append(contents[n-1].Parts, content.Parts...)
+			} else {
+				contents = append(contents, content)
+			}
 		}
 	}
 
