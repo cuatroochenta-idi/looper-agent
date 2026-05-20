@@ -336,6 +336,11 @@ func processStream(seq iter.Seq2[*genai.GenerateContentResponse, error], ch chan
 						ID:        part.FunctionCall.ID,
 						Name:      part.FunctionCall.Name,
 						Arguments: argsJSON,
+						// Gemini 3.x emits a thought signature alongside each
+						// function call and rejects follow-up requests whose
+						// history doesn't echo it; persist alongside the call
+						// so ToNative can replay it.
+						Signature: part.ThoughtSignature,
 					})
 				}
 			}
@@ -395,13 +400,17 @@ func (t *Translator) buildRequest(systemPrompt string, messages []message.Messag
 				parts = append(parts, &genai.Part{Text: msg.Content})
 			}
 			for _, tc := range msg.ToolCalls {
-				// Tool calls from assistant → FunctionCall parts
+				// Tool calls from assistant → FunctionCall parts. The
+				// ThoughtSignature carries Gemini 3.x's opaque per-call
+				// blob — required on echo or the API rejects the request
+				// with INVALID_ARGUMENT. Empty for earlier Gemini families.
 				parts = append(parts, &genai.Part{
 					FunctionCall: &genai.FunctionCall{
 						ID:   tc.ID,
 						Name: tc.Name,
 						Args: parseJSONToMap(tc.Arguments),
 					},
+					ThoughtSignature: tc.Signature,
 				})
 			}
 			content = &genai.Content{
@@ -498,6 +507,10 @@ func (t *Translator) FromNative(response any) (*provider.LLMResponse, error) {
 				ID:        part.FunctionCall.ID,
 				Name:      part.FunctionCall.Name,
 				Arguments: argsJSON,
+				// Gemini 3.x emits a thought signature alongside each function
+				// call and rejects follow-up requests whose history doesn't
+				// echo it; persist so ToNative can replay it.
+				Signature: part.ThoughtSignature,
 			})
 		}
 	}

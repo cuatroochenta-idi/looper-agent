@@ -154,6 +154,15 @@ type ToolCall struct {
 
 	// Arguments is the JSON-encoded input to the tool.
 	Arguments json.RawMessage `json:"arguments"`
+
+	// Signature carries an opaque, provider-issued blob that must be
+	// echoed back when the conversation history is replayed. Currently
+	// populated by Google's Gemini 3.x family: the API returns a
+	// `thoughtSignature` next to each function call and rejects follow-up
+	// requests whose history omits it. Providers that don't use opaque
+	// signatures leave this empty; consumers must round-trip the bytes
+	// unchanged.
+	Signature []byte `json:"signature,omitempty"`
 }
 
 // ToolResult represents the output of a tool execution.
