@@ -557,53 +557,6 @@ func parseJSONToMap(raw json.RawMessage) map[string]any {
 	return m
 }
 
-// convertSchema converts our internal JSON schema (map[string]any) to
-// the GenAI Schema type for function declaration parameters.
-func convertSchema(m map[string]any) *genai.Schema {
-	if m == nil {
-		return nil
-	}
-
-	s := &genai.Schema{}
-
-	if t, ok := m["type"].(string); ok {
-		s.Type = genai.Type(t)
-	}
-	if d, ok := m["description"].(string); ok {
-		s.Description = d
-	}
-	if e, ok := m["enum"]; ok {
-		switch enumVals := e.(type) {
-		case []interface{}:
-			for _, v := range enumVals {
-				if str, ok := v.(string); ok {
-					s.Enum = append(s.Enum, str)
-				}
-			}
-		case []string:
-			s.Enum = enumVals
-		}
-	}
-	if req, ok := m["required"]; ok {
-		switch r := req.(type) {
-		case []interface{}:
-			for _, v := range r {
-				if str, ok := v.(string); ok {
-					s.Required = append(s.Required, str)
-				}
-			}
-		case []string:
-			s.Required = r
-		}
-	}
-	if props, ok := m["properties"].(map[string]any); ok {
-		s.Properties = make(map[string]*genai.Schema)
-		for name, propVal := range props {
-			if propMap, ok := propVal.(map[string]any); ok {
-				s.Properties[name] = convertSchema(propMap)
-			}
-		}
-	}
-
-	return s
-}
+// convertSchema lives in schema.go. It turns an invopop JSON Schema
+// (with $ref/$defs, possibly recursive) into a Gemini-compatible
+// *genai.Schema by inlining refs and breaking cycles.
