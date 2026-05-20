@@ -296,6 +296,7 @@ func processStream(seq iter.Seq2[*genai.GenerateContentResponse, error], ch chan
 		contentBuilder string
 		toolCalls      []message.ToolCall
 		usage          *provider.Usage
+		finishErr      error
 	)
 
 	for resp, err := range seq {
@@ -344,8 +345,17 @@ func processStream(seq iter.Seq2[*genai.GenerateContentResponse, error], ch chan
 					})
 				}
 			}
+			// Warn once per response if any Parts carried payload kinds the
+			// universal format cannot surface. Done after the text/tool
+			// loop so the warning includes everything in the response, and
+			// inside the Content guard so we don't log on empty turns.
+			logDroppedParts(candidate.Content.Parts)
 		}
 		if candidate.FinishReason != "" {
+			// Map terminal reasons to a typed error so the caller sees
+			// the actual cause (MISSING_THOUGHT_SIGNATURE, safety, etc.)
+			// instead of an empty turn. nil for STOP and MAX_TOKENS.
+			finishErr = finishReasonError(candidate.FinishReason)
 			break
 		}
 	}
@@ -355,6 +365,7 @@ func processStream(seq iter.Seq2[*genai.GenerateContentResponse, error], ch chan
 		ToolCalls: toolCalls,
 		Usage:     usage,
 		IsFinal:   true,
+		Error:     finishErr,
 	}
 }
 
@@ -532,8 +543,23 @@ func (t *Translator) FromNative(response any) (*provider.LLMResponse, error) {
 
 	result.Content = content
 
+	// Visibility for unrepresentable Parts (image bytes, file refs,
+	// code-execution payloads); see diagnostics.go. The text/toolcall
+	// payload is still returned — we just announce what we dropped.
+	logDroppedParts(candidate.Content.Parts)
+
 	if candidate.FinishReason == genai.FinishReasonStop && len(result.ToolCalls) == 0 {
 		result.IsFinal = true
+	}
+
+	// Map terminal finish reasons that imply an incomplete or invalid
+	// response to a typed error so callers can react. STOP and
+	// MAX_TOKENS are not errors — STOP is the happy path and
+	// MAX_TOKENS still yields a usable (truncated) string the caller
+	// may decide to retry. Returning the partial result alongside the
+	// error preserves anything already generated.
+	if err := finishReasonError(candidate.FinishReason); err != nil {
+		return result, err
 	}
 
 	return result, nil
