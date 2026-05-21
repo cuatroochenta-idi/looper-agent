@@ -130,6 +130,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /sse/dashboard", s.sseDashboard)
 	mux.HandleFunc("GET /sse/chat-sidebar", s.sseChatSidebar)
 	mux.HandleFunc("GET /sse/chat-thread", s.sseChatThread)
+	mux.HandleFunc("GET /sse/chat-trace/{id}", s.sseChatTrace)
 
 	// ── JSON / control ───────────────────────────────────────────────────────
 	mux.HandleFunc("POST /api/run", s.apiRun)

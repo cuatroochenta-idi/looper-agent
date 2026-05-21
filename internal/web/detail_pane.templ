@@ -27,12 +27,24 @@ func tabIsExpr(callID, tab, defaultTab string) string {
 	return "($tabs['" + jsLit(callID) + "'] || '" + defaultTab + "') === '" + tab + "'"
 }
 
+// DetailPaneBody is the body of the /runs detail pane. The data-init wrapper
+// opens the per-run SSE stream that keeps the trace tree live as new steps
+// arrive. The chats page wraps detailPaneInner instead, since its enclosing
+// /sse/chat-trace stream is what drives live updates there.
 templ DetailPaneBody(data DetailData) {
 	{{ streamURL := "@get('/sse/runs/" + data.Run.ID + "')" }}
 	<div class={ "fade-in", templ.KV("is-live", data.Live) } data-init={ streamURL }>
-		@detailHeader(data)
-		@TraceTree(data.Timeline, data.Live, data.SpawnedByToolCall)
+		@detailPaneInner(data)
 	</div>
+}
+
+// detailPaneInner renders the same content as DetailPaneBody without opening
+// a /sse/runs/{id} stream. Use it whenever the parent context already owns
+// the SSE subscription that keeps this fragment live — otherwise you end up
+// with duplicate streams racing on the same selector.
+templ detailPaneInner(data DetailData) {
+	@detailHeader(data)
+	@TraceTree(data.Timeline, data.Live, data.SpawnedByToolCall)
 }
 
 templ detailHeader(data DetailData) {
@@ -471,6 +483,11 @@ func pluralS(n int) string {
 	return "s"
 }
 
+// ChatTraceBody is patched into #chat-trace by the /sse/chat-trace/{id}
+// stream. The stream re-renders this whole fragment every time a step lands
+// on the run, so we render detailPaneInner directly: there is no nested
+// data-init that would open a second /sse/runs/{id} subscription competing
+// for the same DOM (which is what kept the trace stale before).
 templ ChatTraceBody(data DetailData) {
 	<div class="chat-trace-inner fade-in">
 		<div class="chat-trace-bar">
@@ -489,12 +506,8 @@ templ ChatTraceBody(data DetailData) {
 					data-on:click="$selected = ''">×</button>
 			</div>
 		</div>
-		// Wrap DetailPaneBody in the same #detail-pane selector the /runs
-		// page uses, so the SSE stream (/sse/runs/{id}) finds its target on
-		// the chats page too. Without this the live trace stops refreshing
-		// after the initial paint and datastar logs PatchElementsNoTargetsFound.
 		<div id="detail-pane">
-			@DetailPaneBody(data)
+			@detailPaneInner(data)
 		</div>
 	</div>
 }

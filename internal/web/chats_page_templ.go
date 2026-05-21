@@ -741,9 +741,9 @@ func chatMsgBubble(msg ChatMessage) templ.Component {
 		}
 		var templ_7745c5c3_Var32 string
 		templ_7745c5c3_Var32, templ_7745c5c3_Err = templ.ResolveAttributeValue("$selected = '" + msg.Run.ID + "'; " +
-			"@get('/partials/chat-trace/" + msg.Run.ID + "')")
+			"@get('/sse/chat-trace/" + msg.Run.ID + "')")
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/chats_page.templ`, Line: 201, Col: 52}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/chats_page.templ`, Line: 201, Col: 47}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var32)
 		if templ_7745c5c3_Err != nil {

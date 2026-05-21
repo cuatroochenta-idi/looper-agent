@@ -158,6 +158,22 @@ func (s *Server) sseChatSidebar(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// sseChatTrace streams the chat-trace panel for a single run. Re-rendering
+// the entire ChatTraceBody on every TopicRun(id) tick keeps the trace tab
+// in sync with new tool calls without relying on a nested data-init inside
+// the patched fragment — which used to silently fail to start, leaving the
+// trace stuck on the first paint.
+func (s *Server) sseChatTrace(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.stream(w, r, TopicRun(id), "#chat-trace", func() templ.Component {
+		run := s.store.Find(id)
+		if run == nil {
+			return emptyDetail()
+		}
+		return ChatTraceBody(s.detailData(run))
+	})
+}
+
 func (s *Server) sseChatThread(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var sig struct {

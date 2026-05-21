@@ -198,7 +198,7 @@ templ chatMsgBubble(msg ChatMessage) {
 		data-class={ "{highlight: $selected === '" + msg.Run.ID + "'}" }
 		data-on:click={
 			"$selected = '" + msg.Run.ID + "'; " +
-			"@get('/partials/chat-trace/" + msg.Run.ID + "')" }>
+			"@get('/sse/chat-trace/" + msg.Run.ID + "')" }>
 		<div class="msg-bubble">
 			<div class="msg-head">
 				<span class="msg-role">
