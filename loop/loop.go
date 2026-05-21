@@ -466,9 +466,14 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 			// Halt detection: if any tool result signals Halt, stop the run
 			// cleanly after recording all results. All tool results are
 			// already in history; the LLM is not called again.
+			//
+			// pickHaltFinalText lets a halting tool override Output with
+			// the text it registered via tool.SetFinalResponse — needed
+			// when the model emitted no streaming content and the
+			// canonical close lives inside the tool call args.
 			if anyHalted(toolResults) {
 				return &RunResult{
-					Output:  lastAttemptedOutput,
+					Output:  pickHaltFinalText(lastAttemptedOutput, toolResults),
 					History: history,
 					Cost:    l.calculateCost(llmResp.Usage, totalInputTokens, totalOutputTokens, totalCachedTokens),
 					Usage:   Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
@@ -632,6 +637,15 @@ func (l *AgentLoop) executeSingleTool(ctx context.Context, tt *tool.Tool, tc mes
 	// to request a clean termination of the run after this turn.
 	ctx, isHalted := tool.WithHaltSignal(ctx)
 
+	// Attach a final-response signal so the tool body can call
+	// tool.SetFinalResponse(ctx, text) to register the canonical
+	// user-facing wrap-up — surfaced on StepFinalResponse.Content when
+	// the run halts. Needed for providers (Gemini thinking-mode) that
+	// emit the answer inside a tool call's arguments instead of as
+	// streaming chunks; without this, StepFinalResponse.Content would
+	// carry the empty streamed string and consumers render blank.
+	ctx, finalResponseText := tool.WithFinalResponse(ctx)
+
 	// Execute the tool
 	output, err := tt.Execute(ctx, tc.Arguments)
 	if err != nil {
@@ -643,10 +657,11 @@ func (l *AgentLoop) executeSingleTool(ctx context.Context, tt *tool.Tool, tc mes
 	}
 
 	return message.ToolResult{
-		ToolCallID: tc.ID,
-		Content:    output,
-		IsError:    false,
-		Halt:       isHalted(),
+		ToolCallID:    tc.ID,
+		Content:       output,
+		IsError:       false,
+		Halt:          isHalted(),
+		FinalResponse: finalResponseText(),
 	}
 }
 
@@ -786,6 +801,28 @@ func anyHalted(results []message.ToolResult) bool {
 		}
 	}
 	return false
+}
+
+// pickHaltFinalText picks the canonical final-response text for a turn
+// that halted via a tool. Precedence:
+//
+//  1. The first tool result whose body called tool.SetFinalResponse
+//     wins — for the canonical "tool whose argument IS the wrap-up"
+//     pattern (e.g. a final_response tool on Gemini thinking-mode,
+//     which emits zero streaming chunks and puts the entire visible
+//     answer inside the tool call args).
+//  2. Otherwise the streamed assistant text — the legacy behaviour
+//     when no tool opted in.
+//
+// Keeping precedence explicit (first non-empty wins, same as Halt
+// semantics) so multiple halting tools in one turn behave predictably.
+func pickHaltFinalText(streamed string, results []message.ToolResult) string {
+	for _, r := range results {
+		if r.Halt && r.FinalResponse != "" {
+			return r.FinalResponse
+		}
+	}
+	return streamed
 }
 
 // HookManager returns the loop's hook manager.
@@ -1197,9 +1234,16 @@ func (it *Iterator) run(ctx context.Context) {
 						// Halt detection: if any tool called tool.SetHalt(ctx),
 						// stop the run cleanly. All results are already in
 						// history; no further LLM call is issued.
+						//
+						// pickHaltFinalText lets a halting tool override
+						// the streamed content via tool.SetFinalResponse —
+						// needed for providers that emit zero streaming
+						// chunks (Gemini thinking-mode) and put the visible
+						// answer inside the tool call args.
 						if anyHalted(results) {
-							it.recordFinal(final, turn, "halted_by_tool")
-							it.steps <- Step{Type: StepFinalResponse, Content: final, Turn: turn, Usage: chunk.Usage}
+							finalText := pickHaltFinalText(final, results)
+							it.recordFinal(finalText, turn, "halted_by_tool")
+							it.steps <- Step{Type: StepFinalResponse, Content: finalText, Turn: turn, Usage: chunk.Usage}
 							return
 						}
 						_, abort, out := it.loop.validateTurn(ctx, TurnSnapshot{
@@ -1309,8 +1353,9 @@ func (it *Iterator) run(ctx context.Context) {
 				results := it.loop.executeToolCallsStreaming(ctx, history, llmResp.ToolCalls, it.steps, turn)
 				// Halt detection (non-streaming fallback path).
 				if anyHalted(results) {
-					it.recordFinal(llmResp.Content, turn, "halted_by_tool")
-					it.steps <- Step{Type: StepFinalResponse, Content: llmResp.Content, Turn: turn, Usage: &usagePtr}
+					finalText := pickHaltFinalText(llmResp.Content, results)
+					it.recordFinal(finalText, turn, "halted_by_tool")
+					it.steps <- Step{Type: StepFinalResponse, Content: finalText, Turn: turn, Usage: &usagePtr}
 					return
 				}
 				_, abort, out := it.loop.validateTurn(ctx, TurnSnapshot{

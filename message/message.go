@@ -192,4 +192,23 @@ type ToolResult struct {
 	// still records all results in history before stopping, so no output
 	// is silently dropped. The first halting result determines the status.
 	Halt bool `json:"halt,omitempty"`
+
+	// FinalResponse is the canonical user-facing wrap-up that the tool
+	// wants surfaced as the turn's StepFinalResponse.Content. Populated
+	// when the tool body called tool.SetFinalResponse(ctx, text).
+	//
+	// Why this exists: providers like Gemini in thinking mode may emit
+	// zero streaming text and put the entire user-facing answer inside
+	// a tool call's arguments (the canonical example: a `final_response`
+	// tool whose `message` argument is the wrap-up). Without this field
+	// the loop has no way to recover that text — StepFinalResponse
+	// carries the empty streamed string and consumers render a blank
+	// turn. With this field, halting tools register the text once and
+	// the loop surfaces it through the same channel as streamed final
+	// text, so callers don't need provider-specific glue.
+	//
+	// When multiple tools register FinalResponse in the same turn, the
+	// FIRST non-empty value wins (matches the Halt semantics — first
+	// halting result determines the run status).
+	FinalResponse string `json:"final_response,omitempty"`
 }
