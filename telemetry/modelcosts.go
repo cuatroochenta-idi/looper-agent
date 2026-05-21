@@ -158,6 +158,13 @@ func defaultCosts() map[string]map[string]CostConfig {
 				OutputCostPer1MTokens: 0.60,
 				CachedCostPer1MTokens: 0.0375,
 			},
+			// gemini-3.5-flash — released May 2026; agent-tuned Flash priced
+			// well above prior Flash tiers (10x input, 15x output).
+			"gemini-3.5-flash": {
+				InputCostPer1MTokens:  1.50,
+				OutputCostPer1MTokens: 9.00,
+				CachedCostPer1MTokens: 0.15,
+			},
 		},
 	}
 }
