@@ -42,7 +42,7 @@ func RunsPage(data RunsViewData) templ.Component {
 			"', selected:'" + jsLit(selectedID(data.Sidebar.Selected)) + "'}",
 		)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/runs_page.templ`, Line: 12, Col: 2}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `runs_page.templ`, Line: 12, Col: 2}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var2)
 		if templ_7745c5c3_Err != nil {

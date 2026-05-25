@@ -250,6 +250,23 @@ nav.tabs .nav-link.active { background: var(--bg-elevated); color: var(--text); 
 .node.tn-tool-error > summary { background: color-mix(in srgb, var(--danger-soft) 50%, transparent); }
 .node.tn-tool-error > summary:hover { background: color-mix(in srgb, var(--danger-soft) 80%, transparent); }
 .node-title .preview-error { color: var(--danger); font-weight: 500; }
+
+/* Multiprovider chain markers (HU #666). The fallback badge appears
+   next to llm_call when a turn was answered via FailoverProvider's
+   non-primary branch. The turn-provider chip surfaces the answering
+   (provider, model) inline so a long trace can be scanned at a glance.
+   .val.warn / .metric.warn highlight the run-level fallback counter. */
+.fallback-badge { display: inline-flex; align-items: center; font-size: 9.5px; font-weight: 700; padding: 2px 7px; border-radius: 4px; color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning); margin-left: 4px; font-family: 'JetBrains Mono', monospace; }
+.turn-provider { display: inline-flex; align-items: center; font-size: 10px; padding: 2px 6px; border-radius: 4px; color: var(--text-muted); background: var(--bg-input); border: 1px solid var(--border); margin-left: 4px; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.2px; }
+.metric .val.warn { color: var(--warning); }
+.provider-breakdown { margin-top: 8px; }
+.provider-breakdown .section-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 4px; }
+.providers-table { width: 100%; font-size: 11.5px; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; }
+.providers-table th, .providers-table td { padding: 3px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+.providers-table th { font-weight: 600; color: var(--text-muted); text-transform: uppercase; font-size: 9.5px; letter-spacing: 0.5px; }
+.providers-table td { color: var(--text); }
+.providers-table td:nth-child(3), .providers-table td:nth-child(4), .providers-table td:nth-child(5) { text-align: right; }
+.providers-table td:last-child { text-align: right; color: var(--success); }
 .k-reasoning { color: var(--text-muted); background: var(--bg-input); border-style: dashed; }
 .k-system { color: var(--text-faint); }
 .reasoning-node > summary { font-style: italic; }

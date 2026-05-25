@@ -89,6 +89,32 @@ type StepData struct {
 	InputTokens  int    `json:"input_tokens,omitempty"`
 	OutputTokens int    `json:"output_tokens,omitempty"`
 	CachedTokens int    `json:"cached_tokens,omitempty"`
+
+	// Provider / Model: provenance for usage-bearing steps so trace
+	// consumers can attribute each turn to the right (provider, model).
+	// Empty on non-LLM steps.
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+
+	// Fallback is set when the LLM call backing this step came via a
+	// non-primary FailoverProvider inner.
+	Fallback bool `json:"fallback,omitempty"`
+}
+
+// ProviderStatsData mirrors loop.ProviderStats for wire transport.
+type ProviderStatsData struct {
+	Provider      string  `json:"provider"`
+	Model         string  `json:"model"`
+	Calls         int     `json:"calls"`
+	FallbackCalls int     `json:"fallback_calls,omitempty"`
+	InputTokens   int     `json:"input_tokens,omitempty"`
+	OutputTokens  int     `json:"output_tokens,omitempty"`
+	CachedTokens  int     `json:"cached_tokens,omitempty"`
+	TotalUSD      float64 `json:"total_usd,omitempty"`
+	InputUSD      float64 `json:"input_usd,omitempty"`
+	OutputUSD     float64 `json:"output_usd,omitempty"`
+	CachedUSD     float64 `json:"cached_usd,omitempty"`
+	SavingsUSD    float64 `json:"savings_usd,omitempty"`
 }
 
 // RunEndData is the payload of a run_end event.
@@ -102,6 +128,14 @@ type RunEndData struct {
 	CachedTokens int     `json:"cached_tokens,omitempty"`
 	EndedAt      string  `json:"ended_at"`
 	Err          string  `json:"err,omitempty"`
+
+	// Providers is the per-(provider, model) breakdown when the run
+	// used a multiprovider chain. Empty when single-provider.
+	Providers []ProviderStatsData `json:"providers,omitempty"`
+
+	// FallbackCalls is the total number of LLM calls that hit the
+	// failover path during this run.
+	FallbackCalls int `json:"fallback_calls,omitempty"`
 }
 
 // traceWriter posts events one-by-one to the endpoint. Failures are silent —
@@ -265,6 +299,9 @@ func stepDataFrom(s loop.Step) StepData {
 		ToolName:   s.ToolName,
 		ToolArgs:   s.ToolArgs,
 		ToolCallID: s.ToolCallID,
+		Provider:   s.ProviderID,
+		Model:      s.ModelID,
+		Fallback:   s.Fallback,
 	}
 	if s.Error != nil {
 		out.Err = s.Error.Error()
@@ -273,6 +310,32 @@ func stepDataFrom(s loop.Step) StepData {
 		out.InputTokens = s.Usage.InputTokens
 		out.OutputTokens = s.Usage.OutputTokens
 		out.CachedTokens = s.Usage.CachedTokens
+	}
+	return out
+}
+
+// providersFromLoop converts the loop's per-(provider, model) breakdown
+// to the wire-format payload.
+func providersFromLoop(in []loop.ProviderStats) []ProviderStatsData {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ProviderStatsData, len(in))
+	for i, p := range in {
+		out[i] = ProviderStatsData{
+			Provider:      p.Provider,
+			Model:         p.Model,
+			Calls:         p.Calls,
+			FallbackCalls: p.FallbackCalls,
+			InputTokens:   p.Usage.InputTokens,
+			OutputTokens:  p.Usage.OutputTokens,
+			CachedTokens:  p.Usage.CachedTokens,
+			TotalUSD:      p.Cost.TotalUSD,
+			InputUSD:      p.Cost.InputUSD,
+			OutputUSD:     p.Cost.OutputUSD,
+			CachedUSD:     p.Cost.CachedUSD,
+			SavingsUSD:    p.Cost.SavingsUSD,
+		}
 	}
 	return out
 }

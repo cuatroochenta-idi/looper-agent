@@ -220,6 +220,8 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 			resp.Reasoning = r
 		}
 	}
+	resp.ProviderID = "openai"
+	resp.ModelID = model
 	return resp, nil
 }
 
@@ -370,6 +372,10 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		if err := stream.Err(); err != nil {
 			final.Error = fmt.Errorf("openai stream: %w", err)
 		}
+		// Provenance lives on the final chunk — same place Usage is set,
+		// which is where the loop attributes cost.
+		final.ProviderID = "openai"
+		final.ModelID = model
 		ch <- final
 	}()
 

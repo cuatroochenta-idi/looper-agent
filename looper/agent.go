@@ -226,12 +226,14 @@ func (a *Agent) Run(ctx context.Context, input string, opts ...RunOption) (*RunR
 	res := iter.Result()
 
 	return &RunResult{
-		Output:  res.Output,
-		History: res.History,
-		Cost:    costBreakdownFromLoop(res.Cost),
-		Usage:   usageFromLoop(res.Usage),
-		Turns:   res.Turns,
-		Status:  res.Status,
+		Output:        res.Output,
+		History:       res.History,
+		Cost:          costBreakdownFromLoop(res.Cost),
+		Usage:         usageFromLoop(res.Usage),
+		Turns:         res.Turns,
+		Status:        res.Status,
+		Providers:     res.Providers,
+		FallbackCalls: res.FallbackCalls,
 	}, nil
 }
 
@@ -304,14 +306,16 @@ func (a *Agent) Iterate(ctx context.Context, input string, opts ...RunOption) *l
 	}, func() {
 		res := inner.Result()
 		tw.send(TraceRunEnd, runID, RunEndData{
-			Output:       res.Output,
-			Status:       res.Status,
-			Turns:        res.Turns,
-			TotalUSD:     res.Cost.TotalUSD,
-			InputTokens:  res.Usage.InputTokens,
-			OutputTokens: res.Usage.OutputTokens,
-			CachedTokens: res.Usage.CachedTokens,
-			EndedAt:      time.Now().Format(time.RFC3339Nano),
+			Output:        res.Output,
+			Status:        res.Status,
+			Turns:         res.Turns,
+			TotalUSD:      res.Cost.TotalUSD,
+			InputTokens:   res.Usage.InputTokens,
+			OutputTokens:  res.Usage.OutputTokens,
+			CachedTokens:  res.Usage.CachedTokens,
+			EndedAt:       time.Now().Format(time.RFC3339Nano),
+			Providers:     providersFromLoop(res.Providers),
+			FallbackCalls: res.FallbackCalls,
 		})
 		tw.close()
 	})

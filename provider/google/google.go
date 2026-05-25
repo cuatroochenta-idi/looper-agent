@@ -206,6 +206,8 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	if p.shouldIncludeReasoning(req.Reasoning) {
 		out.Reasoning = extractThoughts(resp)
 	}
+	out.ProviderID = "google"
+	out.ModelID = req.Model
 	return out, nil
 }
 
@@ -257,14 +259,30 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 
 	includeReasoning := p.shouldIncludeReasoning(req.Reasoning)
 	seq := p.client.Models.GenerateContentStream(ctx, model, contents, config)
-	ch := make(chan provider.StreamChunk, 64)
+	inner := make(chan provider.StreamChunk, 64)
+	out := make(chan provider.StreamChunk, 64)
 
 	go func() {
-		defer close(ch)
-		processStream(seq, ch, includeReasoning)
+		defer close(inner)
+		processStream(seq, inner, includeReasoning)
+	}()
+	// Forward chunks and stamp provenance on the final chunk only.
+	// processStream emits chunks WITHOUT provider/model identity (it has
+	// no access to the resolved model name); decorating here keeps the
+	// inner loop simple and concentrates the wiring at the boundary
+	// where model is in scope.
+	go func() {
+		defer close(out)
+		for chunk := range inner {
+			if chunk.IsFinal {
+				chunk.ProviderID = "google"
+				chunk.ModelID = model
+			}
+			out <- chunk
+		}
 	}()
 
-	return ch, nil
+	return out, nil
 }
 
 // Translator returns the Google message translator.

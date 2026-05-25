@@ -76,6 +76,15 @@ type TurnNode struct {
 	InTokens      int
 	OutTokens     int
 	CachedToks    int
+
+	// Provider / Model / Fallback summarise the LLM call that drove
+	// this turn. Populated from the StepKindLLMResponse event the
+	// framework emits after every call (or from any other usage-bearing
+	// step that carries the same fields). Empty on legacy traces that
+	// pre-date the multiprovider chain.
+	Provider string
+	Model    string
+	Fallback bool
 }
 
 // EndAt returns the timestamp when the turn finished — either the Final step,
@@ -188,10 +197,28 @@ func BuildTimeline(steps []TimelineStep) RunTimeline {
 				t.CachedToks = s.CachedTokens
 			}
 		}
+		// Provenance lifts from any step that carries it (most often
+		// StepKindLLMResponse). Later usage-bearing steps in the same
+		// turn carry the same identity; first-non-empty wins so we
+		// don't flip a populated value on a subsequent zero.
+		if t.Provider == "" && s.Provider != "" {
+			t.Provider = s.Provider
+		}
+		if t.Model == "" && s.Model != "" {
+			t.Model = s.Model
+		}
+		if s.Fallback {
+			t.Fallback = true
+		}
 		switch s.Kind {
 		case StepKindLLMCall:
 			marker := s
 			t.LLMCall = &marker
+		case StepKindLLMResponse:
+			// The post-call provenance event. We already lifted its
+			// Provider / Model / Fallback above; nothing else to
+			// attach — it doesn't take a slot in the trace tree, the
+			// LLMCall marker is the visible row.
 		case StepKindToolCall:
 			t.ToolNodes = append(t.ToolNodes, ToolCallNode{Call: s})
 		case StepKindToolResult:

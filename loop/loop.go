@@ -28,6 +28,14 @@ type StepType string
 const (
 	StepSystemPrompt   StepType = "system_prompt"
 	StepLLMCall        StepType = "llm_call"
+	// StepLLMResponse fires after the LLM call returns (or the streaming
+	// final chunk arrives) and carries the turn's provenance —
+	// ProviderID, ModelID, Fallback, Usage. Trace consumers use it to
+	// attribute the turn to the (provider, model) bucket without
+	// scanning every later step for the same data. Emitted once per
+	// turn, in addition to (not in place of) the existing StepLLMCall
+	// marker that fires BEFORE the call.
+	StepLLMResponse    StepType = "llm_response"
 	StepStreamingChunk StepType = "streaming_chunk"
 	// StepReasoningChunk carries an extended-thinking / reasoning delta
 	// from the model on its own channel, so consumers can render it apart
@@ -67,6 +75,21 @@ type Step struct {
 	// Usage is populated on the final chunk of an LLM call (one per turn).
 	// Nil on tool / system / intermediate streaming chunk steps.
 	Usage *provider.Usage
+
+	// ProviderID / ModelID identify which provider+model actually answered
+	// the LLM call this step belongs to. Populated on usage-carrying
+	// steps (StepStreamingChunk's final / StepToolCall / StepFinalResponse)
+	// so trace consumers can attribute each turn to the right cost-table
+	// entry. Empty on non-LLM steps and on legacy providers that don't
+	// set the provenance on LLMResponse / StreamChunk.
+	ProviderID string
+	ModelID    string
+
+	// Fallback is true when the LLM call backing this step was answered
+	// by a non-primary inner of a FailoverProvider (i.e. the chain
+	// switched away from the primary). Always false when the primary
+	// answered or when no failover is wired.
+	Fallback bool
 }
 
 // RunResult contains the outcome of an agent run.
@@ -77,6 +100,22 @@ type RunResult struct {
 	Usage   Usage
 	Turns   int
 	Status  string
+
+	// Providers reports the per-(Provider, Model) breakdown. One entry
+	// per distinct (provider, model) that answered any LLM call in the
+	// run, in first-seen order. Single-provider runs emit one entry;
+	// multiprovider chains (FailoverProvider with several inners, or
+	// chains that mix models) emit several. Cost on each entry uses
+	// that (provider, model)'s rate, so the totals reconcile with Cost
+	// even when the run was served by several providers.
+	Providers []ProviderStats
+
+	// FallbackCalls is the total count of LLM calls in the run that
+	// were answered by a non-primary inner of a FailoverProvider (or
+	// any provider that set LLMResponse.Fallback / StreamChunk.Fallback).
+	// Zero when the chain ran on the primary the entire time. Cheap
+	// "did this run hit the fallback path?" signal for telemetry.
+	FallbackCalls int
 }
 
 // CostBreakdown reports cost information for a run.
@@ -334,7 +373,18 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 		outputRetriesUsed        int
 		lastAttemptedOutput      string
 		lastStructuredCandidate  string
+		// stats tracks per-(provider, model) usage so RunResult.Cost is
+		// correct when a FailoverProvider or any multi-provider chain
+		// answers calls in a single run. Populated alongside the legacy
+		// total* counters for backward compatibility.
+		stats = newRunStats()
 	)
+	// finalizeBreakdown builds the (cost, providers, fallbackCalls)
+	// triple that every return site below needs. Closure capture keeps
+	// each RunResult literal short.
+	finalizeBreakdown := func() (CostBreakdown, []ProviderStats, int) {
+		return l.finalizeRun(stats)
+	}
 
 	for turn := 0; turn < l.maxTurns; turn++ {
 		// Trigger BeforeCall hooks
@@ -384,6 +434,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 		totalInputTokens += llmResp.Usage.InputTokens
 		totalOutputTokens += llmResp.Usage.OutputTokens
 		totalCachedTokens += llmResp.Usage.CachedTokens
+		stats.add(llmResp, providerLabel(l.provider), l.model)
 
 		// Add assistant message
 		history.AddAssistantMessage(llmResp.Content, llmResp.ToolCalls)
@@ -391,15 +442,18 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 
 		// Usage / cost limits — evaluated after every LLM call so the
 		// FIRST cap to trip wins and no further requests are issued.
-		breakdown := l.calculateCost(llmResp.Usage, totalInputTokens, totalOutputTokens, totalCachedTokens)
+		breakdown, _, _ := finalizeBreakdown()
 		if exceeded, _ := l.usageLimits.exceeds(turn+1, totalInputTokens+totalOutputTokens, breakdown.TotalUSD); exceeded {
+			cost, providers, fc := finalizeBreakdown()
 			return &RunResult{
-				Output:  lastAttemptedOutput,
-				History: history,
-				Cost:    breakdown,
-				Usage:   Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
-				Turns:   turn + 1,
-				Status:  "usage_exceeded",
+				Output:        lastAttemptedOutput,
+				History:       history,
+				Cost:          cost,
+				Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+				Turns:         turn + 1,
+				Status:        "usage_exceeded",
+				Providers:     providers,
+				FallbackCalls: fc,
 			}, nil
 		}
 
@@ -420,22 +474,28 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 						outputRetriesUsed++
 						continue
 					}
+					cost, providers, fc := finalizeBreakdown()
 					return &RunResult{
-						Output:  lastStructuredCandidate,
-						History: history,
-						Cost:    l.calculateCost(llmResp.Usage, totalInputTokens, totalOutputTokens, totalCachedTokens),
-						Usage:   Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
-						Turns:   turn + 1,
-						Status:  "output_validation_exhausted",
+						Output:        lastStructuredCandidate,
+						History:       history,
+						Cost:          cost,
+						Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+						Turns:         turn + 1,
+						Status:        "output_validation_exhausted",
+						Providers:     providers,
+						FallbackCalls: fc,
 					}, nil
 				}
+				cost, providers, fc := finalizeBreakdown()
 				return &RunResult{
-					Output:  out,
-					History: history,
-					Cost:    l.calculateCost(llmResp.Usage, totalInputTokens, totalOutputTokens, totalCachedTokens),
-					Usage:   Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
-					Turns:   turn + 1,
-					Status:  status,
+					Output:        out,
+					History:       history,
+					Cost:          cost,
+					Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+					Turns:         turn + 1,
+					Status:        status,
+					Providers:     providers,
+					FallbackCalls: fc,
 				}, nil
 			}
 		}
@@ -472,13 +532,16 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 			// when the model emitted no streaming content and the
 			// canonical close lives inside the tool call args.
 			if anyHalted(toolResults) {
+				cost, providers, fc := finalizeBreakdown()
 				return &RunResult{
-					Output:  pickHaltFinalText(lastAttemptedOutput, toolResults),
-					History: history,
-					Cost:    l.calculateCost(llmResp.Usage, totalInputTokens, totalOutputTokens, totalCachedTokens),
-					Usage:   Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
-					Turns:   turn + 1,
-					Status:  "halted_by_tool",
+					Output:        pickHaltFinalText(lastAttemptedOutput, toolResults),
+					History:       history,
+					Cost:          cost,
+					Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+					Turns:         turn + 1,
+					Status:        "halted_by_tool",
+					Providers:     providers,
+					FallbackCalls: fc,
 				}, nil
 			}
 		}
@@ -507,13 +570,16 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 		if abort {
 			// Retries exhausted — surface the last attempted output and
 			// stop so observers can still see what the model produced.
+			cost, providers, fc := finalizeBreakdown()
 			return &RunResult{
-				Output:  lastAttemptedOutput,
-				History: history,
-				Cost:    l.calculateCost(llmResp.Usage, totalInputTokens, totalOutputTokens, totalCachedTokens),
-				Usage:   Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
-				Turns:   turn + 1,
-				Status:  "validation_exhausted",
+				Output:        lastAttemptedOutput,
+				History:       history,
+				Cost:          cost,
+				Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+				Turns:         turn + 1,
+				Status:        "validation_exhausted",
+				Providers:     providers,
+				FallbackCalls: fc,
 			}, nil
 		}
 
@@ -525,13 +591,16 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 			if !proceed {
 				continue
 			}
+			cost, providers, fc := finalizeBreakdown()
 			return &RunResult{
-				Output:  llmResp.Content,
-				History: history,
-				Cost:    l.calculateCost(llmResp.Usage, totalInputTokens, totalOutputTokens, totalCachedTokens),
-				Usage:   Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
-				Turns:   turn + 1,
-				Status:  status,
+				Output:        llmResp.Content,
+				History:       history,
+				Cost:          cost,
+				Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+				Turns:         turn + 1,
+				Status:        status,
+				Providers:     providers,
+				FallbackCalls: fc,
 			}, nil
 		}
 	}
@@ -735,6 +804,12 @@ func (l *AgentLoop) resolveRunConfig(opts []RunOption) *runConfig {
 // calculateCost converts accumulated token counts into a full USD breakdown
 // via the configured cost model. If no model is set (legacy callers), only
 // the token counts are reported.
+//
+// This is the legacy single-bucket path: it bills the entire token total
+// against the loop's static (provider, model) and is only correct in the
+// single-provider case. Multi-provider chains must use finalizeRun
+// instead — it iterates the runStats accumulator and bills each
+// (provider, model) entry at its own rate before summing.
 func (l *AgentLoop) calculateCost(_ provider.Usage, totalInput, totalOutput, totalCached int) CostBreakdown {
 	tokens := CostBreakdown{
 		InputTokens:  totalInput,
@@ -766,6 +841,36 @@ func (l *AgentLoop) calculateCost(_ provider.Usage, totalInput, totalOutput, tot
 		OutputTokens: totalOutput,
 		CachedTokens: totalCached,
 	}
+}
+
+// finalizeRun summarises the per-call accumulator into the public shape:
+// the aggregated CostBreakdown across every (provider, model) entry, the
+// per-entry ProviderStats slice in first-seen order, and the count of
+// LLM calls that hit a FailoverProvider fallback target.
+//
+// fallbackProvider / fallbackModel are used by stats.snapshot when an
+// entry doesn't carry provenance (legacy provider that doesn't set
+// LLMResponse.ProviderID). Pass providerLabel(l.provider) and l.model so
+// single-provider deployments still get a properly-labelled bucket.
+func (l *AgentLoop) finalizeRun(stats *runStats) (CostBreakdown, []ProviderStats, int) {
+	if stats == nil {
+		return CostBreakdown{}, nil, 0
+	}
+	providers := stats.snapshot(func(p, m string, u provider.Usage) CostBreakdown {
+		return providerCostFor(l.costModel, p, m, u)
+	})
+	var total CostBreakdown
+	for _, ps := range providers {
+		total.InputUSD += ps.Cost.InputUSD
+		total.OutputUSD += ps.Cost.OutputUSD
+		total.CachedUSD += ps.Cost.CachedUSD
+		total.SavingsUSD += ps.Cost.SavingsUSD
+		total.TotalUSD += ps.Cost.TotalUSD
+		total.InputTokens += ps.Usage.InputTokens
+		total.OutputTokens += ps.Usage.OutputTokens
+		total.CachedTokens += ps.Usage.CachedTokens
+	}
+	return total, providers, stats.fallbackCount()
 }
 
 // providerLabel classifies the LLMProvider for cost-table lookups. Matches
@@ -909,6 +1014,7 @@ func (l *AgentLoop) Iterate(ctx context.Context, input string, opts ...RunOption
 		loop:  l,
 		input: input,
 		opts:  opts,
+		stats: newRunStats(),
 	}
 
 	go it.run(ctx)
@@ -936,6 +1042,12 @@ type Iterator struct {
 	outputTokens int
 	cachedTokens int
 	history      *message.History
+
+	// stats is the per-(provider, model) accumulator. Populated alongside
+	// inputTokens / outputTokens / cachedTokens on every LLM response or
+	// final stream chunk. Result() reads it to fill RunResult.Providers
+	// and RunResult.FallbackCalls. Goroutine-safe via runStats.mu.
+	stats *runStats
 
 	// proxy points to a wrapped underlying iterator when this one is a
 	// transparent middleware (see WrapIterator). Result() delegates to it.
@@ -996,12 +1108,42 @@ func WrapIterator(inner *Iterator, onStep func(Step), onDone func()) *Iterator {
 
 
 // recordUsage adds a single LLM response's usage to the running totals.
+// Kept for backward compatibility; new code paths use recordResponse /
+// recordChunk so the per-provider stats accumulator stays in sync.
 func (it *Iterator) recordUsage(u provider.Usage) {
 	it.resMu.Lock()
 	defer it.resMu.Unlock()
 	it.inputTokens += u.InputTokens
 	it.outputTokens += u.OutputTokens
 	it.cachedTokens += u.CachedTokens
+}
+
+// recordResponse adds a non-streaming LLM response to both the legacy
+// totals and the per-(provider, model) accumulator. Empty ProviderID /
+// ModelID fall back to the loop's static labels so single-provider
+// deployments still see a properly-labelled bucket.
+func (it *Iterator) recordResponse(resp *provider.LLMResponse) {
+	if resp == nil {
+		return
+	}
+	it.recordUsage(resp.Usage)
+	if it.stats != nil {
+		it.stats.add(resp, providerLabel(it.loop.provider), it.loop.model)
+	}
+}
+
+// recordChunk adds the FINAL chunk of a streaming response to both the
+// legacy totals and the per-(provider, model) accumulator. Non-final
+// chunks (or chunks without Usage) are ignored — only the wire-final
+// chunk carries the usage and provenance signals.
+func (it *Iterator) recordChunk(c provider.StreamChunk) {
+	if !c.IsFinal || c.Usage == nil {
+		return
+	}
+	it.recordUsage(*c.Usage)
+	if it.stats != nil {
+		it.stats.addChunk(c, providerLabel(it.loop.provider), it.loop.model)
+	}
 }
 
 // recordFinal stores the final output and turn count.
@@ -1063,7 +1205,18 @@ func (it *Iterator) Result() RunResult {
 	if status == "" {
 		status = "completed"
 	}
-	cost := it.loop.calculateCost(provider.Usage{}, it.inputTokens, it.outputTokens, it.cachedTokens)
+	// Multi-provider runs need per-(provider, model) cost attribution.
+	// finalizeRun delegates to runStats which iterates each bucket; the
+	// legacy single-bucket calculateCost path stays only as a fallback
+	// when no stats accumulator was wired (older callers / tests).
+	var cost CostBreakdown
+	var providers []ProviderStats
+	var fallbackCalls int
+	if it.stats != nil {
+		cost, providers, fallbackCalls = it.loop.finalizeRun(it.stats)
+	} else {
+		cost = it.loop.calculateCost(provider.Usage{}, it.inputTokens, it.outputTokens, it.cachedTokens)
+	}
 	return RunResult{
 		Output:  it.output,
 		History: it.history,
@@ -1073,8 +1226,10 @@ func (it *Iterator) Result() RunResult {
 			OutputTokens: it.outputTokens,
 			CachedTokens: it.cachedTokens,
 		},
-		Turns:  it.turns,
-		Status: status,
+		Turns:         it.turns,
+		Status:        status,
+		Providers:     providers,
+		FallbackCalls: fallbackCalls,
 	}
 }
 
@@ -1182,8 +1337,18 @@ func (it *Iterator) run(ctx context.Context) {
 					it.steps <- Step{Type: StepReasoningChunk, Content: chunk.Reasoning, Turn: turn}
 				}
 				if chunk.IsFinal {
-					if chunk.Usage != nil {
-						it.recordUsage(*chunk.Usage)
+					it.recordChunk(chunk)
+					// Per-turn provenance signal for trace consumers.
+					// Emitted before the per-tool / per-final steps so
+					// the web UI can stamp the turn's (provider, model,
+					// fallback) before rendering any nested children.
+					it.steps <- Step{
+						Type:       StepLLMResponse,
+						Turn:       turn,
+						Usage:      chunk.Usage,
+						ProviderID: chunk.ProviderID,
+						ModelID:    chunk.ModelID,
+						Fallback:   chunk.Fallback,
 					}
 					final := chunk.Content
 					if final == "" {
@@ -1307,8 +1472,19 @@ func (it *Iterator) run(ctx context.Context) {
 				return
 			}
 
-			it.recordUsage(llmResp.Usage)
+			it.recordResponse(llmResp)
 			usagePtr := llmResp.Usage
+			// Per-turn provenance for the non-streaming fallback path.
+			// Same shape as the streaming branch's emission so trace
+			// consumers see a consistent StepLLMResponse for every turn.
+			it.steps <- Step{
+				Type:       StepLLMResponse,
+				Turn:       turn,
+				Usage:      &usagePtr,
+				ProviderID: llmResp.ProviderID,
+				ModelID:    llmResp.ModelID,
+				Fallback:   llmResp.Fallback,
+			}
 
 			if it.tripUsageLimitIfExceeded(llmResp.Content, turn, &usagePtr) {
 				return

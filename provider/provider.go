@@ -172,6 +172,28 @@ type LLMResponse struct {
 
 	// IsFinal indicates this is a final response (not a tool call).
 	IsFinal bool
+
+	// ProviderID identifies which provider type actually answered this
+	// call ("openai" | "anthropic" | "google"). Base providers set it
+	// before returning; multi-provider wrappers (FailoverProvider,
+	// KeyRotationProvider) propagate the inner's value transparently.
+	// Used by the loop to attribute Usage to the correct cost-table
+	// entry — critical when a single run is served by several providers.
+	// Empty when the response came from a legacy provider that hasn't
+	// been updated to set the field.
+	ProviderID string
+
+	// ModelID identifies the model that produced this response (the
+	// effective model after request-level overrides, not the provider's
+	// default). Same propagation rules as ProviderID. Useful when a
+	// chain mixes several models within one run.
+	ModelID string
+
+	// Fallback is set by FailoverProvider when this response came from a
+	// non-primary inner (i.e. the chain switched away from inner[0]).
+	// Always false when the primary answered. Surfaces "did this turn
+	// hit the fallback path?" without callers parsing logs.
+	Fallback bool
 }
 
 // Usage reports token consumption for an LLM call.
@@ -204,6 +226,16 @@ type StreamChunk struct {
 
 	// Error is set if the stream encountered an error.
 	Error error
+
+	// ProviderID / ModelID / Fallback carry the same provenance signals as
+	// LLMResponse. Base providers set them on every chunk; FailoverProvider
+	// flips Fallback to true on every chunk of the inner it picked when
+	// that inner was not the primary. The loop reads them off the final
+	// chunk (where Usage lives) to attribute the call's tokens to the
+	// correct (provider, model) bucket.
+	ProviderID string
+	ModelID    string
+	Fallback   bool
 }
 
 // LLMProvider abstracts any LLM API under a unified interface.

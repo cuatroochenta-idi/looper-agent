@@ -108,6 +108,12 @@ func (f *FailoverProvider) SupportsResponseFormat() bool {
 // Chat tries each inner in declared order. Context cancellation is
 // honoured before every attempt and short-circuits the iteration — we
 // don't try the next inner once the caller has given up.
+//
+// When inner[N] (N > 0) answers successfully, Fallback=true is stamped
+// on the response so downstream consumers (loop telemetry, web UI) can
+// tell apart "this call hit the primary" from "this call hit the
+// failover path". ProviderID/ModelID propagate transparently from
+// whichever inner answered.
 func (f *FailoverProvider) Chat(ctx context.Context, req LLMRequest) (*LLMResponse, error) {
 	var lastErr error
 	for i, p := range f.inners {
@@ -121,6 +127,9 @@ func (f *FailoverProvider) Chat(ctx context.Context, req LLMRequest) (*LLMRespon
 					slog.String("provider", f.names[i]),
 					slog.Int("attempt", i+1),
 				)
+				if resp != nil {
+					resp.Fallback = true
+				}
 			}
 			return resp, nil
 		}
@@ -147,6 +156,11 @@ func (f *FailoverProvider) Chat(ctx context.Context, req LLMRequest) (*LLMRespon
 // stream opens. Once the channel is being drained, mid-stream errors
 // bubble up — restarting on a different inner would duplicate already-
 // emitted tokens.
+//
+// When inner[N] (N > 0) opens successfully, the returned channel is
+// wrapped so Fallback=true is stamped on every chunk. Same purpose as
+// the non-streaming path: downstream consumers can attribute the call
+// to the failover branch without inspecting logs.
 func (f *FailoverProvider) ChatStream(ctx context.Context, req LLMRequest) (<-chan StreamChunk, error) {
 	var lastErr error
 	for i, p := range f.inners {
@@ -161,6 +175,7 @@ func (f *FailoverProvider) ChatStream(ctx context.Context, req LLMRequest) (<-ch
 					slog.Int("attempt", i+1),
 					slog.Bool("stream", true),
 				)
+				return stampFallback(ch), nil
 			}
 			return ch, nil
 		}
@@ -183,4 +198,20 @@ func (f *FailoverProvider) ChatStream(ctx context.Context, req LLMRequest) (<-ch
 		slog.Bool("stream", true),
 	)
 	return nil, fmt.Errorf("%w: %w", ErrAllProvidersFailed, lastErr)
+}
+
+// stampFallback wraps a stream channel so every chunk carries
+// Fallback=true. Used when a non-primary inner answers — the loop sees
+// fallback provenance on the final chunk (where Usage lives) and can
+// attribute tokens / mark the trace correctly.
+func stampFallback(inner <-chan StreamChunk) <-chan StreamChunk {
+	out := make(chan StreamChunk, cap(inner))
+	go func() {
+		defer close(out)
+		for c := range inner {
+			c.Fallback = true
+			out <- c
+		}
+	}()
+	return out
 }

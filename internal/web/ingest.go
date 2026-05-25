@@ -41,19 +41,40 @@ type stepPayload struct {
 	InputTokens  int    `json:"input_tokens,omitempty"`
 	OutputTokens int    `json:"output_tokens,omitempty"`
 	CachedTokens int    `json:"cached_tokens,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Fallback     bool   `json:"fallback,omitempty"`
+}
+
+// providerStatsPayload mirrors looper.ProviderStatsData.
+type providerStatsPayload struct {
+	Provider      string  `json:"provider"`
+	Model         string  `json:"model"`
+	Calls         int     `json:"calls"`
+	FallbackCalls int     `json:"fallback_calls,omitempty"`
+	InputTokens   int     `json:"input_tokens,omitempty"`
+	OutputTokens  int     `json:"output_tokens,omitempty"`
+	CachedTokens  int     `json:"cached_tokens,omitempty"`
+	TotalUSD      float64 `json:"total_usd,omitempty"`
+	InputUSD      float64 `json:"input_usd,omitempty"`
+	OutputUSD     float64 `json:"output_usd,omitempty"`
+	CachedUSD     float64 `json:"cached_usd,omitempty"`
+	SavingsUSD    float64 `json:"savings_usd,omitempty"`
 }
 
 // runEndPayload mirrors looper.RunEndData.
 type runEndPayload struct {
-	Output       string  `json:"output,omitempty"`
-	Status       string  `json:"status"`
-	Turns        int     `json:"turns"`
-	TotalUSD     float64 `json:"total_usd,omitempty"`
-	InputTokens  int     `json:"input_tokens,omitempty"`
-	OutputTokens int     `json:"output_tokens,omitempty"`
-	CachedTokens int     `json:"cached_tokens,omitempty"`
-	EndedAt      string  `json:"ended_at"`
-	Err          string  `json:"err,omitempty"`
+	Output        string                 `json:"output,omitempty"`
+	Status        string                 `json:"status"`
+	Turns         int                    `json:"turns"`
+	TotalUSD      float64                `json:"total_usd,omitempty"`
+	InputTokens   int                    `json:"input_tokens,omitempty"`
+	OutputTokens  int                    `json:"output_tokens,omitempty"`
+	CachedTokens  int                    `json:"cached_tokens,omitempty"`
+	EndedAt       string                 `json:"ended_at"`
+	Err           string                 `json:"err,omitempty"`
+	Providers     []providerStatsPayload `json:"providers,omitempty"`
+	FallbackCalls int                    `json:"fallback_calls,omitempty"`
 }
 
 // apiIngest accepts a single TraceEvent per POST. The agent runtime sends
@@ -159,6 +180,9 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 			InputTokens:  d.InputTokens,
 			OutputTokens: d.OutputTokens,
 			CachedTokens: d.CachedTokens,
+			Provider:     d.Provider,
+			Model:        d.Model,
+			Fallback:     d.Fallback,
 		})
 
 	case "run_end":
@@ -176,6 +200,19 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 				status = RunCompleted
 			}
 		}
+		providers := make([]ProviderStat, 0, len(d.Providers))
+		for _, p := range d.Providers {
+			providers = append(providers, ProviderStat{
+				Provider:      p.Provider,
+				Model:         p.Model,
+				Calls:         p.Calls,
+				FallbackCalls: p.FallbackCalls,
+				InputTokens:   p.InputTokens,
+				OutputTokens:  p.OutputTokens,
+				CachedTokens:  p.CachedTokens,
+				TotalUSD:      p.TotalUSD,
+			})
+		}
 		s.store.Update(ev.RunID, func(r *RunRecord) {
 			r.Status = status
 			r.Output = d.Output
@@ -186,6 +223,8 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 			r.CachedTokens = d.CachedTokens
 			r.Tokens = d.InputTokens + d.OutputTokens
 			r.EndedAt = ended
+			r.Providers = providers
+			r.FallbackCalls = d.FallbackCalls
 		})
 		// Snapshot to disk now that the run is final.
 		if run := s.store.Find(ev.RunID); run != nil {

@@ -1,6 +1,7 @@
 package looper
 
 import (
+	"github.com/cuatroochenta-idi/looper-agent/loop"
 	"github.com/cuatroochenta-idi/looper-agent/message"
 	"github.com/cuatroochenta-idi/looper-agent/tool"
 )
@@ -25,7 +26,23 @@ type RunResult struct {
 
 	// Status indicates how the run ended: "completed", "error", "cancelled", "paused".
 	Status string
+
+	// Providers is the per-(Provider, Model) breakdown when the run used
+	// a multiprovider chain (FailoverProvider / KeyRotationProvider /
+	// any chain that mixes models). One entry per distinct (provider,
+	// model) that answered, in first-seen order. Single-provider runs
+	// emit one entry.
+	Providers []ProviderStats
+
+	// FallbackCalls reports how many LLM calls in this run came via a
+	// non-primary inner of a FailoverProvider. Zero when no fallback
+	// occurred.
+	FallbackCalls int
 }
+
+// ProviderStats is the per-(Provider, Model) breakdown of a run. Re-
+// exported from loop so callers don't need to import the inner package.
+type ProviderStats = loop.ProviderStats
 
 // CostBreakdown provides detailed cost information for a run.
 type CostBreakdown struct {

@@ -33,6 +33,10 @@ const (
 	// model actually said — including the "thought" text emitted alongside a
 	// tool call.
 	StepKindStreamingChunk StepKind = "streaming_chunk"
+	// StepKindLLMResponse fires after each LLM call returns and carries
+	// the turn's provenance — provider, model, fallback flag, usage.
+	// Distinct from llm_call (which is the pre-call marker / spinner).
+	StepKindLLMResponse StepKind = "llm_response"
 )
 
 // StepEvent is the per-step record the web UI consumes from a runner.
@@ -88,6 +92,28 @@ type TimelineStep struct {
 	InputTokens  int
 	OutputTokens int
 	CachedTokens int
+
+	// Provider / Model / Fallback are populated on usage-bearing steps
+	// (StepKindLLMResponse, StepKindToolCall, StepKindFinal) so the
+	// turn aggregator can stamp the (provider, model) bucket and flag
+	// fallback calls in the trace UI. Empty on non-LLM steps.
+	Provider string
+	Model    string
+	Fallback bool
+}
+
+// ProviderStat is the per-(Provider, Model) breakdown shown in the run
+// header. Mirrors looper.ProviderStatsData but lives in the UI layer
+// so the templ files don't import the framework's wire types directly.
+type ProviderStat struct {
+	Provider      string  `json:"provider"`
+	Model         string  `json:"model"`
+	Calls         int     `json:"calls"`
+	FallbackCalls int     `json:"fallback_calls,omitempty"`
+	InputTokens   int     `json:"input_tokens,omitempty"`
+	OutputTokens  int     `json:"output_tokens,omitempty"`
+	CachedTokens  int     `json:"cached_tokens,omitempty"`
+	TotalUSD      float64 `json:"total_usd,omitempty"`
 }
 
 // RunRecord is the in-memory snapshot of an agent run.
@@ -109,6 +135,14 @@ type RunRecord struct {
 	StartedAt    time.Time      `json:"started_at"`
 	EndedAt      time.Time      `json:"ended_at,omitzero"`
 	Steps        []TimelineStep `json:"steps,omitempty"`
+
+	// Providers is the per-(Provider, Model) breakdown when the run
+	// used a multiprovider chain. Empty when single-provider.
+	Providers []ProviderStat `json:"providers,omitempty"`
+
+	// FallbackCalls is the total number of LLM calls that hit the
+	// failover path during this run.
+	FallbackCalls int `json:"fallback_calls,omitempty"`
 }
 
 // Duration returns the wall-clock time the run has been or was running.

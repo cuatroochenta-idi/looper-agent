@@ -212,6 +212,8 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	if p.shouldIncludeReasoning(req.Reasoning) {
 		out.Reasoning = extractThinking(resp)
 	}
+	out.ProviderID = "anthropic"
+	out.ModelID = string(params.Model)
 	return out, nil
 }
 
@@ -297,16 +299,20 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 					}
 				}
 				ch <- provider.StreamChunk{
-					Content:   contentBuilder,
-					ToolCalls: tcs,
-					IsFinal:   true,
+					Content:    contentBuilder,
+					ToolCalls:  tcs,
+					IsFinal:    true,
+					ProviderID: "anthropic",
+					ModelID:    string(params.Model),
 				}
 				return
 			}
 		}
 		ch <- provider.StreamChunk{
-			Content: contentBuilder,
-			IsFinal: true,
+			Content:    contentBuilder,
+			IsFinal:    true,
+			ProviderID: "anthropic",
+			ModelID:    string(params.Model),
 		}
 	}()
 

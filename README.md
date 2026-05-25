@@ -621,6 +621,58 @@ to the agent loop. `ProviderQueue` is still the right tool when you
 need a caller-driven dispatch (e.g. running the same prompt against
 every provider for comparison).
 
+### Per-provider cost & fallback telemetry
+
+When a run is served by several providers (FailoverProvider switch, a
+multi-model chain, or any wrapper that mixes `LLMResponse.ProviderID`),
+the framework attributes tokens to the right cost-table entry instead
+of billing the whole run against a single rate. The `RunResult` carries:
+
+```go
+type RunResult struct {
+    // ... existing fields (Output, History, Cost, Usage, Turns, Status)
+
+    // Per-(Provider, Model) breakdown in first-seen order.
+    Providers []ProviderStats
+
+    // Count of LLM calls that hit the FailoverProvider fallback branch.
+    FallbackCalls int
+}
+
+type ProviderStats struct {
+    Provider      string
+    Model         string
+    Calls         int
+    FallbackCalls int
+    Usage         Usage
+    Cost          CostBreakdown
+}
+```
+
+`Cost.TotalUSD` is the sum across entries so the existing field stays
+the canonical "what did this run cost?" answer. `Providers` lets you
+break it down for telemetry / billing / per-tenant attribution.
+
+Wire shape (when `LOOPER_TRACE_ENDPOINT` is set):
+
+- Every LLM call emits a `step` event of `kind=llm_response` carrying
+  `provider`, `model`, `fallback`, and the call's `Usage`. The existing
+  `kind=llm_call` event still fires BEFORE the call (it's the
+  "thinking…" spinner anchor); `llm_response` fires AFTER and carries
+  the provenance.
+- `run_end` events grow a `providers` array with the per-entry
+  breakdown and a `fallback_calls` counter.
+
+The bundled debug panel (`looper serve`) reads these and renders:
+
+- A `fallback` metric in the run header when `FallbackCalls > 0`.
+- A "providers" table under the metrics row when the run used more than
+  one (provider, model), or when a single-provider run hit fallback.
+- A `↪ fallback` badge next to `llm_call` on every turn served via the
+  failover branch, plus a `provider/model` chip on every turn.
+
+All additive — pre-multiprovider traces still render identically.
+
 ### Typed deps (Pydantic-AI's `RunContext[Deps]` equivalent)
 
 ```go
