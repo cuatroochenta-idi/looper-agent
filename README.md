@@ -555,6 +555,72 @@ failover.
 The wrapper transparently propagates `SupportsResponseFormat` so it
 composes with structured output without losing the native path.
 
+### Multi-provider chains (failover + key rotation)
+
+Two LLMProvider middlewares for redundancy. Both implement `LLMProvider`
+so they slot directly into `looper.NewAgent` — no wrapper-driven dispatch
+loop, no caller-side fan-out.
+
+**`FailoverProvider`** — tries inner providers in declared order, switching
+on any non-context error. Use it across provider types (OpenAI ↔ Gemini ↔
+Anthropic) so the agent stays up when one upstream returns 5xx / 429.
+
+```go
+openai := openai.NewProvider(openaiKey)
+google := google.NewProvider(googleKey)
+
+chain, _ := provider.NewFailover(
+    []provider.LLMProvider{openai, google},
+    provider.WithFailoverNames([]string{"openai", "google"}),
+)
+agent := looper.MustNewAgent(chain, sysPrompt)
+```
+
+When every inner fails, the call returns an error satisfying
+`errors.Is(err, provider.ErrAllProvidersFailed)` — surface that to end
+users as "service unavailable" instead of a raw API error.
+`Context.Canceled` / `DeadlineExceeded` from any inner short-circuits the
+iteration; we don't fire the next request after the caller has given up.
+
+**`KeyRotationProvider`** — tries inner providers (same SDK, different
+API keys) sequentially with a configurable delay between attempts. Use
+it inside a single provider type to spread quota across keys or dodge
+per-key 429s.
+
+```go
+geminiInners := []provider.LLMProvider{
+    google.NewProvider(geminiKey1),
+    google.NewProvider(geminiKey2),
+    google.NewProvider(geminiKey3),
+}
+geminiPool, _ := provider.NewKeyRotation(
+    geminiInners,
+    750*time.Millisecond,
+    provider.WithKeyRotationLabel("gemini-pool"),
+)
+```
+
+Compose them naturally — `KeyRotationProvider` inside each slot of a
+`FailoverProvider`:
+
+```go
+chain, _ := provider.NewFailover(
+    []provider.LLMProvider{openaiPool, geminiPool},
+    provider.WithFailoverNames([]string{"openai", "gemini"}),
+)
+```
+
+Streaming follows the same rule as `RetryProvider`: failover only
+happens before the stream opens. Once the channel is being drained,
+mid-stream errors bubble up — restarting on a different inner would
+duplicate already-emitted tokens.
+
+Compared to `ProviderQueue` (the older `Execute(ctx, fn)` primitive):
+`FailoverProvider` is what you want when failover should be invisible
+to the agent loop. `ProviderQueue` is still the right tool when you
+need a caller-driven dispatch (e.g. running the same prompt against
+every provider for comparison).
+
 ### Typed deps (Pydantic-AI's `RunContext[Deps]` equivalent)
 
 ```go
