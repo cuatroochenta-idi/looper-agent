@@ -94,6 +94,67 @@ func TestKeyRotation_ContextCancelInterruptsDelay(t *testing.T) {
 	}
 }
 
+func TestKeyRotation_RotationDelayLegacy(t *testing.T) {
+	// With no WithKeyRotationMaxDelay option, the wait before every key
+	// is the same retryDelay — the pre-existing fixed-interval behavior.
+	inners := []LLMProvider{
+		&stubFailoverProvider{name: "k1", chatErr: errors.New("err")},
+		&stubFailoverProvider{name: "k2", chatErr: errors.New("err")},
+		&stubFailoverProvider{name: "k3", chatErr: errors.New("err")},
+	}
+	k, _ := NewKeyRotation(inners, 200*time.Millisecond)
+	if d := k.rotationDelay(0); d != 0 {
+		t.Errorf("rotationDelay(0) = %s, want 0", d)
+	}
+	for i := 1; i <= 3; i++ {
+		if d := k.rotationDelay(i); d != 200*time.Millisecond {
+			t.Errorf("rotationDelay(%d) = %s, want fixed 200ms", i, d)
+		}
+	}
+}
+
+func TestKeyRotation_RotationDelayGeometric(t *testing.T) {
+	// With a max delay, each successive key wait doubles up to the cap.
+	// Sequence for initial=1s, max=10s: 1s, 2s, 4s, 8s, 10s, 10s, …
+	inners := []LLMProvider{
+		&stubFailoverProvider{name: "k1"},
+		&stubFailoverProvider{name: "k2"},
+		&stubFailoverProvider{name: "k3"},
+		&stubFailoverProvider{name: "k4"},
+		&stubFailoverProvider{name: "k5"},
+		&stubFailoverProvider{name: "k6"},
+	}
+	k, _ := NewKeyRotation(inners, time.Second, WithKeyRotationMaxDelay(10*time.Second))
+	want := []time.Duration{
+		0, // i=0 → no wait
+		time.Second,
+		2 * time.Second,
+		4 * time.Second,
+		8 * time.Second,
+		10 * time.Second, // would be 16s, capped at 10s
+	}
+	for i, w := range want {
+		if d := k.rotationDelay(i); d != w {
+			t.Errorf("rotationDelay(%d) = %s, want %s", i, d, w)
+		}
+	}
+}
+
+func TestKeyRotation_MaxDelayBelowInitialIsLegacy(t *testing.T) {
+	// max <= initial degrades to the fixed-interval behavior so callers
+	// that misconfigure WithKeyRotationMaxDelay (e.g. typo with smaller
+	// duration) don't silently get unexpected backoff.
+	inners := []LLMProvider{
+		&stubFailoverProvider{name: "k1"},
+		&stubFailoverProvider{name: "k2"},
+		&stubFailoverProvider{name: "k3"},
+	}
+	k, _ := NewKeyRotation(inners, 500*time.Millisecond, WithKeyRotationMaxDelay(100*time.Millisecond))
+	if d := k.rotationDelay(2); d != 500*time.Millisecond {
+		t.Errorf("rotationDelay(2) with bad max = %s, want fixed 500ms", d)
+	}
+}
+
 func TestKeyRotation_LabelOverrideAppearsInError(t *testing.T) {
 	p := &stubFailoverProvider{name: "k1", chatErr: errors.New("503")}
 	k, _ := NewKeyRotation([]LLMProvider{p}, 0, WithKeyRotationLabel("gemini-pool"))

@@ -37,6 +37,14 @@ type KeyRotationProvider struct {
 	inners     []LLMProvider
 	label      string
 	retryDelay time.Duration
+	// maxDelay caps the geometric backoff between consecutive key
+	// attempts. When zero (or <= retryDelay) the rotator uses the
+	// fixed-retryDelay legacy behavior. When > retryDelay, the wait
+	// before key[i] grows as min(retryDelay * 2^(i-1), maxDelay),
+	// giving a rate-limited provider meaningfully longer windows to
+	// free a slot as the chain progresses through its keys, instead
+	// of burning every key in retryDelay × len(keys) seconds.
+	maxDelay time.Duration
 }
 
 // KeyRotationOption mutates a KeyRotationProvider during construction.
@@ -48,6 +56,25 @@ type KeyRotationOption func(*KeyRotationProvider)
 func WithKeyRotationLabel(label string) KeyRotationOption {
 	return func(k *KeyRotationProvider) {
 		k.label = label
+	}
+}
+
+// WithKeyRotationMaxDelay enables geometric backoff between consecutive
+// key attempts: the wait before the i-th key (i >= 1) grows as
+// min(retryDelay * 2^(i-1), max). max <= retryDelay falls back to the
+// legacy fixed-interval behavior (no escalation).
+//
+// Without this option a rotator with N keys exhausts every key in
+// roughly retryDelay × N — too tight for rate-limited providers
+// (Google Gemini's per-key 60 RPM, OpenAI's 429 windows) where the
+// API needs seconds to free a slot. Pinning the ceiling at 10s
+// stretches the rotation envelope to ~30s for 8 keys, which
+// historically recovered without entering full failover.
+func WithKeyRotationMaxDelay(max time.Duration) KeyRotationOption {
+	return func(k *KeyRotationProvider) {
+		if max > 0 {
+			k.maxDelay = max
+		}
 	}
 }
 
@@ -76,6 +103,28 @@ func NewKeyRotation(inners []LLMProvider, retryDelay time.Duration, opts ...KeyR
 	return k, nil
 }
 
+// rotationDelay returns the wait BEFORE trying key[i] (i >= 1). With
+// no maxDelay it returns the constant retryDelay (legacy). With a
+// maxDelay set above retryDelay, it grows as retryDelay * 2^(i-1)
+// capped at maxDelay — so the gap between successive key attempts
+// scales with the depth of the rotation, not the wall-clock budget.
+func (k *KeyRotationProvider) rotationDelay(i int) time.Duration {
+	if i <= 0 || k.retryDelay <= 0 {
+		return 0
+	}
+	if k.maxDelay <= k.retryDelay {
+		return k.retryDelay
+	}
+	d := k.retryDelay
+	for j := 1; j < i; j++ {
+		d *= 2
+		if d >= k.maxDelay {
+			return k.maxDelay
+		}
+	}
+	return d
+}
+
 // Model returns the first inner's model identifier. Every inner in a
 // rotation pool shares the same model — only the API key varies — so
 // the first is representative.
@@ -99,7 +148,7 @@ func (k *KeyRotationProvider) Chat(ctx context.Context, req LLMRequest) (*LLMRes
 	var lastErr error
 	for i, p := range k.inners {
 		if i > 0 {
-			if err := waitOrCancel(ctx, k.retryDelay); err != nil {
+			if err := waitOrCancel(ctx, k.rotationDelay(i)); err != nil {
 				return nil, err
 			}
 		}
@@ -144,7 +193,7 @@ func (k *KeyRotationProvider) ChatStream(ctx context.Context, req LLMRequest) (<
 	var lastErr error
 	for i, p := range k.inners {
 		if i > 0 {
-			if err := waitOrCancel(ctx, k.retryDelay); err != nil {
+			if err := waitOrCancel(ctx, k.rotationDelay(i)); err != nil {
 				return nil, err
 			}
 		}
