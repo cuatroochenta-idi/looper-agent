@@ -85,6 +85,31 @@ type TurnNode struct {
 	Provider string
 	Model    string
 	Fallback bool
+
+	// APIKeySuffix is the "****xxxx" surface of the key that served the
+	// dominant chunk of this turn — propagated from StepKindLLMResponse
+	// or, when present, from any individual chunk that carries it.
+	// Empty for keyless providers and legacy traces.
+	APIKeySuffix string
+
+	// ChunkAttribution captures the per-fragment (Provider, Model, Key)
+	// breakdown when more than one (provider, model, key) tuple
+	// contributed chunks to this turn — used by the trace UI to surface
+	// multi-source streaming. Empty when every chunk in the turn shares
+	// the turn-level provenance (the common case).
+	ChunkAttribution []ChunkSource
+}
+
+// ChunkSource counts how many streaming_chunk steps in a turn came from
+// one (provider, model, key) tuple. Surfaced by the trace UI only when
+// a single turn drew chunks from multiple tuples — otherwise the
+// turn-level Provider / Model / APIKeySuffix already tells the story.
+type ChunkSource struct {
+	Provider     string
+	Model        string
+	APIKeySuffix string
+	Fallback     bool
+	Count        int
 }
 
 // EndAt returns the timestamp when the turn finished — either the Final step,
@@ -207,6 +232,9 @@ func BuildTimeline(steps []TimelineStep) RunTimeline {
 		if t.Model == "" && s.Model != "" {
 			t.Model = s.Model
 		}
+		if t.APIKeySuffix == "" && s.APIKeySuffix != "" {
+			t.APIKeySuffix = s.APIKeySuffix
+		}
 		if s.Fallback {
 			t.Fallback = true
 		}
@@ -216,9 +244,14 @@ func BuildTimeline(steps []TimelineStep) RunTimeline {
 			t.LLMCall = &marker
 		case StepKindLLMResponse:
 			// The post-call provenance event. We already lifted its
-			// Provider / Model / Fallback above; nothing else to
-			// attach — it doesn't take a slot in the trace tree, the
-			// LLMCall marker is the visible row.
+			// Provider / Model / Fallback / APIKeySuffix above. The
+			// Content field carries the full assistant text for the
+			// turn — use it as the AssistantText fallback when
+			// individual streaming_chunk steps have been stripped
+			// (loaded-from-disk runs).
+			if t.AssistantText == "" && s.Content != "" {
+				t.AssistantText = s.Content
+			}
 		case StepKindToolCall:
 			t.ToolNodes = append(t.ToolNodes, ToolCallNode{Call: s})
 		case StepKindToolResult:
@@ -254,12 +287,43 @@ func BuildTimeline(steps []TimelineStep) RunTimeline {
 			t.Reasoning += s.Content
 		case StepKindStreamingChunk:
 			t.AssistantText += s.Content
+			recordChunkSource(t, s)
 		}
 	}
 	for _, idx := range turnOrder {
-		tl.Turns = append(tl.Turns, *byTurn[idx])
+		turn := byTurn[idx]
+		// Collapse the per-chunk attribution map when every fragment
+		// shared the same provenance: a single-source turn doesn't need
+		// the multi-source breakdown surfaced in the UI.
+		if len(turn.ChunkAttribution) <= 1 {
+			turn.ChunkAttribution = nil
+		}
+		tl.Turns = append(tl.Turns, *turn)
 	}
 	return tl
+}
+
+// recordChunkSource bumps the per-(provider, model, key) counter on the
+// turn when a streaming_chunk carries identity. No-op for legacy chunks
+// without provenance fields. Buckets are keyed by the tuple itself so
+// repeated chunks from one source collapse to one entry.
+func recordChunkSource(t *TurnNode, s TimelineStep) {
+	if s.Provider == "" && s.Model == "" && s.APIKeySuffix == "" {
+		return
+	}
+	for i, src := range t.ChunkAttribution {
+		if src.Provider == s.Provider && src.Model == s.Model && src.APIKeySuffix == s.APIKeySuffix && src.Fallback == s.Fallback {
+			t.ChunkAttribution[i].Count++
+			return
+		}
+	}
+	t.ChunkAttribution = append(t.ChunkAttribution, ChunkSource{
+		Provider:     s.Provider,
+		Model:        s.Model,
+		APIKeySuffix: s.APIKeySuffix,
+		Fallback:     s.Fallback,
+		Count:        1,
+	})
 }
 
 // ─── View-model types used by templ components ───────────────────────────────

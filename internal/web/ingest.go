@@ -44,6 +44,7 @@ type stepPayload struct {
 	Provider     string `json:"provider,omitempty"`
 	Model        string `json:"model,omitempty"`
 	Fallback     bool   `json:"fallback,omitempty"`
+	APIKeySuffix string `json:"api_key_suffix,omitempty"`
 }
 
 // providerStatsPayload mirrors looper.ProviderStatsData.
@@ -168,6 +169,15 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 	case "step":
 		var d stepPayload
 		_ = json.Unmarshal(ev.Data, &d)
+		// Defensive filter: the framework's tracer already drops
+		// streaming_chunk events before they hit the wire, but older
+		// agent binaries (pre-v0.3.5) still emit them. ACK with 204
+		// (no-op success) so the agent doesn't retry, but never
+		// persist the noise.
+		if d.Kind == string(StepKindStreamingChunk) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		s.store.AppendStep(ev.RunID, TimelineStep{
 			Kind:         StepKind(d.Kind),
 			Turn:         d.Turn,
@@ -183,6 +193,7 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 			Provider:     d.Provider,
 			Model:        d.Model,
 			Fallback:     d.Fallback,
+			APIKeySuffix: d.APIKeySuffix,
 		})
 
 	case "run_end":

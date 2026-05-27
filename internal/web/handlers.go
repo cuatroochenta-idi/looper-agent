@@ -270,6 +270,10 @@ func (s *Server) executeRun(runID, input string) {
 			InputTokens:  step.InputTokens,
 			OutputTokens: step.OutputTokens,
 			CachedTokens: step.CachedTokens,
+			Provider:     step.Provider,
+			Model:        step.Model,
+			Fallback:     step.Fallback,
+			APIKeySuffix: step.APIKeySuffix,
 		})
 		// Per-step: detail pane + chat thread re-render. Sidebar stays put
 		// so the user's card selection isn't clobbered by churn.

@@ -51,6 +51,15 @@ type StepEvent struct {
 	InputTokens  int
 	OutputTokens int
 	CachedTokens int
+
+	// Provider / Model / Fallback / APIKeySuffix mirror the loop.Step
+	// provenance fields. Populated on usage-bearing steps and on every
+	// streaming chunk so the trace UI can attribute each fragment to the
+	// (provider, model, key) that produced it.
+	Provider     string
+	Model        string
+	Fallback     bool
+	APIKeySuffix string
 }
 
 // RunSummary is the final aggregate returned once a run finishes.
@@ -97,9 +106,15 @@ type TimelineStep struct {
 	// (StepKindLLMResponse, StepKindToolCall, StepKindFinal) so the
 	// turn aggregator can stamp the (provider, model) bucket and flag
 	// fallback calls in the trace UI. Empty on non-LLM steps.
-	Provider string
-	Model    string
-	Fallback bool
+	Provider string `json:",omitempty"`
+	Model    string `json:",omitempty"`
+	Fallback bool   `json:",omitempty"`
+
+	// APIKeySuffix is the "****xxxx" surface of the API key that served
+	// this step. Populated on StepKindLLMResponse and (when present in
+	// the live stream) on StepKindStreamingChunk. Empty for keyless
+	// providers and non-LLM steps.
+	APIKeySuffix string `json:",omitempty"`
 }
 
 // ProviderStat is the per-(Provider, Model) breakdown shown in the run

@@ -90,6 +90,15 @@ type Step struct {
 	// switched away from the primary). Always false when the primary
 	// answered or when no failover is wired.
 	Fallback bool
+
+	// APIKeySuffix mirrors provider.StreamChunk.APIKeySuffix /
+	// provider.LLMResponse.APIKeySuffix — the "****xxxx" surface of the
+	// API key that actually served the call. Stamped on every
+	// StepStreamingChunk and on StepLLMResponse so the trace UI can show
+	// per-fragment attribution when a KeyRotationProvider or
+	// FailoverProvider chain mixes keys across one run. Empty for
+	// keyless providers (LM Studio, Ollama) and on non-LLM steps.
+	APIKeySuffix string
 }
 
 // RunResult contains the outcome of an agent run.
@@ -1328,31 +1337,54 @@ func (it *Iterator) run(ctx context.Context) {
 				// deltas — re-adding the final's Content would double it.
 				if !chunk.IsFinal && chunk.Content != "" {
 					fullContent += chunk.Content
-					it.steps <- Step{Type: StepStreamingChunk, Content: chunk.Content, Turn: turn}
+					it.steps <- Step{
+						Type:         StepStreamingChunk,
+						Content:      chunk.Content,
+						Turn:         turn,
+						ProviderID:   chunk.ProviderID,
+						ModelID:      chunk.ModelID,
+						Fallback:     chunk.Fallback,
+						APIKeySuffix: chunk.APIKeySuffix,
+					}
 				}
 				// Reasoning deltas travel on a separate channel so the
 				// UI can render them differently (collapsed / faint /
 				// behind a toggle). They are NOT folded into fullContent.
 				if !chunk.IsFinal && chunk.Reasoning != "" {
-					it.steps <- Step{Type: StepReasoningChunk, Content: chunk.Reasoning, Turn: turn}
+					it.steps <- Step{
+						Type:         StepReasoningChunk,
+						Content:      chunk.Reasoning,
+						Turn:         turn,
+						ProviderID:   chunk.ProviderID,
+						ModelID:      chunk.ModelID,
+						Fallback:     chunk.Fallback,
+						APIKeySuffix: chunk.APIKeySuffix,
+					}
 				}
 				if chunk.IsFinal {
 					it.recordChunk(chunk)
-					// Per-turn provenance signal for trace consumers.
-					// Emitted before the per-tool / per-final steps so
-					// the web UI can stamp the turn's (provider, model,
-					// fallback) before rendering any nested children.
-					it.steps <- Step{
-						Type:       StepLLMResponse,
-						Turn:       turn,
-						Usage:      chunk.Usage,
-						ProviderID: chunk.ProviderID,
-						ModelID:    chunk.ModelID,
-						Fallback:   chunk.Fallback,
-					}
+					// Resolve the assistant text BEFORE emitting
+					// StepLLMResponse so we can carry it on the step.
+					// Persistence layers (tracer, JSON store) strip
+					// individual StepStreamingChunk events as noise; the
+					// turn's full text survives via this single event.
 					final := chunk.Content
 					if final == "" {
 						final = fullContent
+					}
+					// Per-turn provenance signal for trace consumers.
+					// Emitted before the per-tool / per-final steps so
+					// the web UI can stamp the turn's (provider, model,
+					// fallback, key) before rendering any nested children.
+					it.steps <- Step{
+						Type:         StepLLMResponse,
+						Turn:         turn,
+						Content:      final,
+						Usage:        chunk.Usage,
+						ProviderID:   chunk.ProviderID,
+						ModelID:      chunk.ModelID,
+						Fallback:     chunk.Fallback,
+						APIKeySuffix: chunk.APIKeySuffix,
 					}
 					if it.tripUsageLimitIfExceeded(final, turn, chunk.Usage) {
 						return

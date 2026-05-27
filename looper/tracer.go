@@ -99,6 +99,12 @@ type StepData struct {
 	// Fallback is set when the LLM call backing this step came via a
 	// non-primary FailoverProvider inner.
 	Fallback bool `json:"fallback,omitempty"`
+
+	// APIKeySuffix is the "****xxxx" surface of the API key that served
+	// this step's LLM call. Surfaces on the trace UI so operators can
+	// tell apart which of several rotating / chained keys answered.
+	// Empty for keyless providers and on non-LLM steps.
+	APIKeySuffix string `json:"api_key_suffix,omitempty"`
 }
 
 // ProviderStatsData mirrors loop.ProviderStats for wire transport.
@@ -293,15 +299,16 @@ func projectName() string {
 // stepDataFrom converts a loop.Step into the wire-format payload.
 func stepDataFrom(s loop.Step) StepData {
 	out := StepData{
-		Kind:       string(s.Type),
-		Turn:       s.Turn,
-		Content:    s.Content,
-		ToolName:   s.ToolName,
-		ToolArgs:   s.ToolArgs,
-		ToolCallID: s.ToolCallID,
-		Provider:   s.ProviderID,
-		Model:      s.ModelID,
-		Fallback:   s.Fallback,
+		Kind:         string(s.Type),
+		Turn:         s.Turn,
+		Content:      s.Content,
+		ToolName:     s.ToolName,
+		ToolArgs:     s.ToolArgs,
+		ToolCallID:   s.ToolCallID,
+		Provider:     s.ProviderID,
+		Model:        s.ModelID,
+		Fallback:     s.Fallback,
+		APIKeySuffix: s.APIKeySuffix,
 	}
 	if s.Error != nil {
 		out.Err = s.Error.Error()

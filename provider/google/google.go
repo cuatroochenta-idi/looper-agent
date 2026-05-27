@@ -27,6 +27,17 @@ type Provider struct {
 	maxTokens   int
 	temperature float64
 
+	// providerID is the label stamped on every LLMResponse / StreamChunk.
+	// Defaults to "google"; override via WithProviderID when proxying
+	// Gemini through Vertex AI or a corporate gateway so the trace UI
+	// shows the routing layer instead of collapsing to "google".
+	providerID string
+
+	// keySuffix is "****xxxx" for the API key passed to NewProvider —
+	// stamped on responses / chunks for trace attribution. The raw key
+	// is consumed once by the SDK client and never stored.
+	keySuffix string
+
 	// Default thinking config. budget=0 means "disable thinking by
 	// default"; -1 means "model-default thinking budget" (Gemini accepts
 	// a missing field as auto on supported models, so we leave it out
@@ -90,6 +101,18 @@ func WithIncludeReasoning(b bool) Option {
 	return func(p *Provider) { p.includeReasoning = b }
 }
 
+// WithProviderID overrides the provider-id label stamped on every response
+// and chunk. The default is "google". Useful when fronting Gemini with
+// Vertex AI or a corporate proxy and you want telemetry to attribute the
+// call to the gateway rather than to "google".
+func WithProviderID(id string) Option {
+	return func(p *Provider) {
+		if id != "" {
+			p.providerID = id
+		}
+	}
+}
+
 // effortToBudget maps a tiered effort to a Gemini token budget. Numbers
 // chosen to roughly match Anthropic's tiers — exact values don't matter
 // for portability since each provider scales them differently anyway.
@@ -134,8 +157,9 @@ func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
 // NewProvider creates a Google GenAI provider.
 func NewProvider(apiKey string, opts ...Option) *Provider {
 	p := &Provider{
-		model:  "gemini-2.5-pro",
-		config: &provider.CacheConfig{Strategy: provider.CacheAuto},
+		model:      "gemini-2.5-pro",
+		providerID: "google",
+		config:     &provider.CacheConfig{Strategy: provider.CacheAuto},
 		// No explicit cap by default — google.go skips MaxOutputTokens
 		// when n <= 0, so Gemini's per-model completion ceiling applies.
 		// Callers that need a tighter budget use WithMaxTokens.
@@ -153,6 +177,7 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 		panic(fmt.Sprintf("google genai client: %v", err))
 	}
 	p.client = client
+	p.keySuffix = provider.APIKeySuffix(apiKey)
 
 	p.translator = &Translator{
 		model:       p.model,
@@ -206,8 +231,9 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	if p.shouldIncludeReasoning(req.Reasoning) {
 		out.Reasoning = extractThoughts(resp)
 	}
-	out.ProviderID = "google"
+	out.ProviderID = p.providerID
 	out.ModelID = req.Model
+	out.APIKeySuffix = p.keySuffix
 	return out, nil
 }
 
@@ -266,18 +292,18 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		defer close(inner)
 		processStream(seq, inner, includeReasoning)
 	}()
-	// Forward chunks and stamp provenance on the final chunk only.
-	// processStream emits chunks WITHOUT provider/model identity (it has
-	// no access to the resolved model name); decorating here keeps the
-	// inner loop simple and concentrates the wiring at the boundary
-	// where model is in scope.
+	// Stamp provenance on every chunk (not just IsFinal). processStream
+	// emits raw deltas without identity because it has no access to the
+	// resolved model name / key surface; we decorate at this boundary so
+	// per-chunk attribution survives in the trace UI when chains rotate
+	// keys or fall back between providers.
+	providerID, keySuffix := p.providerID, p.keySuffix
 	go func() {
 		defer close(out)
 		for chunk := range inner {
-			if chunk.IsFinal {
-				chunk.ProviderID = "google"
-				chunk.ModelID = model
-			}
+			chunk.ProviderID = providerID
+			chunk.ModelID = model
+			chunk.APIKeySuffix = keySuffix
 			out <- chunk
 		}
 	}()

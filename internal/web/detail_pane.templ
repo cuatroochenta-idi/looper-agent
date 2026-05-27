@@ -279,7 +279,13 @@ templ llmCallNode(s TimelineStep, turn TurnNode, inFlight bool) {
 					if turn.Model != "" {
 						/{ turn.Model }
 					}
+					if turn.APIKeySuffix != "" {
+						<span class="turn-key" title="API key suffix that served this turn">&nbsp;· { turn.APIKeySuffix }</span>
+					}
 				</span>
+			}
+			if len(turn.ChunkAttribution) > 1 {
+				<span class="turn-multikey" title="this turn's stream interleaved fragments from multiple (provider, model, key) sources — see body for the breakdown">multi-source ({ fmt.Sprintf("%d", len(turn.ChunkAttribution)) })</span>
 			}
 			<span class="node-title">
 				<span class="preview">{ preview }</span>
@@ -532,8 +538,9 @@ func pluralS(n int) string {
 
 // turnProviderTitle composes a hover tooltip for the provider badge shown
 // next to llm_call. Surfaces the same info the per-step trace already
-// stores but in a format readable at a glance — "openai · gpt-x · fallback"
-// when applicable. Empty when the turn has no provenance (legacy trace).
+// stores but in a format readable at a glance — "openai · gpt-x · ****a2Fn ·
+// fallback" when applicable. Empty when the turn has no provenance
+// (legacy trace).
 func turnProviderTitle(t TurnNode) string {
 	if t.Provider == "" {
 		return ""
@@ -541,6 +548,9 @@ func turnProviderTitle(t TurnNode) string {
 	out := t.Provider
 	if t.Model != "" {
 		out += " · " + t.Model
+	}
+	if t.APIKeySuffix != "" {
+		out += " · " + t.APIKeySuffix
 	}
 	if t.Fallback {
 		out += " · fallback"

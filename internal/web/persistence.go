@@ -85,6 +85,13 @@ func runFileName(startedAt time.Time, id string) string {
 }
 
 // writeRunFile serializes a single run snapshot to disk. Atomic via tmp+rename.
+//
+// streaming_chunk and reasoning_chunk steps are stripped from the persisted
+// step list: a single turn produces dozens-to-hundreds of deltas which bloat
+// the JSON, dominate diffs, and add no information that StepLLMResponse
+// (one event per turn, with the accumulated assistant text) doesn't already
+// carry. The in-memory store keeps them for the live stream — only the
+// disk snapshot is denoised.
 func writeRunFile(dir string, r *RunRecord) error {
 	if dir == "" {
 		return nil
@@ -96,13 +103,16 @@ func writeRunFile(dir string, r *RunRecord) error {
 	final := filepath.Join(dir, name)
 	tmp := final + ".tmp"
 
+	snapshot := *r
+	snapshot.Steps = stripChunkSteps(r.Steps)
+
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(r); err != nil {
+	if err := enc.Encode(&snapshot); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
 		return err
@@ -111,6 +121,31 @@ func writeRunFile(dir string, r *RunRecord) error {
 		return err
 	}
 	return os.Rename(tmp, final)
+}
+
+// stripChunkSteps returns a copy of steps with every streaming_chunk and
+// reasoning_chunk dropped. Returns the input slice as-is when no chunks
+// are present (cheap path: in-process runs with mid-stream deltas hit the
+// allocation, ingest-only runs already arrive denoised and skip it).
+func stripChunkSteps(steps []TimelineStep) []TimelineStep {
+	keep := 0
+	for _, s := range steps {
+		if s.Kind == StepKindStreamingChunk || s.Kind == StepKindReasoning {
+			continue
+		}
+		keep++
+	}
+	if keep == len(steps) {
+		return steps
+	}
+	out := make([]TimelineStep, 0, keep)
+	for _, s := range steps {
+		if s.Kind == StepKindStreamingChunk || s.Kind == StepKindReasoning {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // loadRunsFromDisk hydrates every run found in dir into store. Returns the

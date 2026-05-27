@@ -323,11 +323,15 @@ func buildRunner() web.RunFunc {
 
 func toWebStep(s loop.Step) web.StepEvent {
 	out := web.StepEvent{
-		Turn:       s.Turn,
-		Content:    s.Content,
-		ToolName:   s.ToolName,
-		ToolArgs:   s.ToolArgs,
-		ToolCallID: s.ToolCallID,
+		Turn:         s.Turn,
+		Content:      s.Content,
+		ToolName:     s.ToolName,
+		ToolArgs:     s.ToolArgs,
+		ToolCallID:   s.ToolCallID,
+		Provider:     s.ProviderID,
+		Model:        s.ModelID,
+		Fallback:     s.Fallback,
+		APIKeySuffix: s.APIKeySuffix,
 	}
 	if s.Error != nil {
 		out.Err = s.Error.Error()

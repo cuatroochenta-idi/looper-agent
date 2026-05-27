@@ -32,6 +32,13 @@ type Provider struct {
 	maxTokens   int
 	temperature float64
 
+	// providerID is the label stamped on every LLMResponse / StreamChunk
+	// so the trace UI and cost tables can attribute the call. Defaults to
+	// "openai"; override with WithProviderID when this provider points at
+	// an OpenAI-compatible endpoint (LM Studio, OpenRouter, Ollama, vLLM)
+	// and the user wants to distinguish those backends in telemetry.
+	providerID string
+
 	// apiKeys holds multiple keys for rotation.
 	apiKeys  []string
 	keyIndex int
@@ -106,6 +113,19 @@ func WithIncludeReasoning(b bool) Option {
 	return func(p *Provider) { p.includeReasoning = b }
 }
 
+// WithProviderID overrides the provider-id label stamped on every response
+// and chunk. The default is "openai". Set this to distinguish backends
+// when the provider points at an OpenAI-compatible endpoint (e.g.
+// "openrouter", "lmstudio", "ollama", "vllm") so the trace UI and cost
+// tables don't collapse them into one bucket.
+func WithProviderID(id string) Option {
+	return func(p *Provider) {
+		if id != "" {
+			p.providerID = id
+		}
+	}
+}
+
 // toSDKEffort maps our provider-neutral enum onto the openai-go SDK's
 // shared.ReasoningEffort. Unknown values become the zero value (omitted).
 // "minimal" is gpt-5 only — we send it through; older models will 400.
@@ -127,8 +147,9 @@ func toSDKEffort(e provider.ReasoningEffort) shared.ReasoningEffort {
 func NewProvider(apiKey string, opts ...Option) *Provider {
 	cfg := provider.DefaultCacheConfig()
 	p := &Provider{
-		model:  "gpt-4o",
-		config: &cfg,
+		model:      "gpt-4o",
+		providerID: "openai",
+		config:     &cfg,
 		// No explicit cap by default. applyMaxTokens skips the param
 		// entirely when n <= 0, so OpenAI's per-model completion
 		// ceiling applies (e.g. 128k for gpt-5-mini). Callers that
@@ -220,8 +241,9 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 			resp.Reasoning = r
 		}
 	}
-	resp.ProviderID = "openai"
+	resp.ProviderID = p.providerID
 	resp.ModelID = model
+	resp.APIKeySuffix = provider.APIKeySuffix(p.apiKeys[0])
 	return resp, nil
 }
 
@@ -285,6 +307,10 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 	harmony := newHarmonyFilter(includeReasoning)
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 	ch := make(chan provider.StreamChunk, 64)
+	// Precomputed once per stream — every chunk emission stamps it so the
+	// trace UI can render per-chunk attribution without re-deriving the
+	// key surface on every delta.
+	keySuffix := provider.APIKeySuffix(p.apiKeys[0])
 
 	go func() {
 		defer close(ch)
@@ -307,7 +333,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 				// raw JSON since the SDK schema doesn't expose it.
 				if r := extractReasoningField(delta.RawJSON()); r != "" {
 					if includeReasoning {
-						ch <- provider.StreamChunk{Reasoning: r}
+						ch <- provider.StreamChunk{Reasoning: r, ProviderID: p.providerID, ModelID: model, APIKeySuffix: keySuffix}
 					}
 					// Either way: skip the content-arm — many local
 					// models repeat the same text in both fields.
@@ -320,10 +346,10 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 					cText, rText := harmony.feed(delta.Content)
 					if cText != "" {
 						contentBuilder += cText
-						ch <- provider.StreamChunk{Content: cText}
+						ch <- provider.StreamChunk{Content: cText, ProviderID: p.providerID, ModelID: model, APIKeySuffix: keySuffix}
 					}
 					if rText != "" && includeReasoning {
-						ch <- provider.StreamChunk{Reasoning: rText}
+						ch <- provider.StreamChunk{Reasoning: rText, ProviderID: p.providerID, ModelID: model, APIKeySuffix: keySuffix}
 					}
 				}
 
@@ -374,8 +400,9 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		}
 		// Provenance lives on the final chunk — same place Usage is set,
 		// which is where the loop attributes cost.
-		final.ProviderID = "openai"
+		final.ProviderID = p.providerID
 		final.ModelID = model
+		final.APIKeySuffix = keySuffix
 		ch <- final
 	}()
 

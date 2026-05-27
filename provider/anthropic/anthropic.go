@@ -28,6 +28,12 @@ type Provider struct {
 	maxTokens   int
 	temperature float64
 
+	// providerID is the label stamped on every LLMResponse / StreamChunk.
+	// Defaults to "anthropic"; override with WithProviderID to distinguish
+	// e.g. a Bedrock-fronted Claude or an AWS-proxied endpoint from the
+	// public api.anthropic.com one in the trace UI / cost tables.
+	providerID string
+
 	// Default thinking config. Applied when LLMRequest.Reasoning is nil.
 	// budgetTokens=0 means "no extended thinking by default".
 	defaultBudgetTokens int
@@ -36,6 +42,13 @@ type Provider struct {
 	// cacheBreakpoints is the set of named places to insert ephemeral
 	// cache_control markers. Empty map = no caching (legacy default).
 	cacheBreakpoints map[string]bool
+
+	// keySuffix is the "****xxxx" surface of the API key passed to
+	// NewProvider, cached so Chat / ChatStream can stamp it on every
+	// response and chunk without rederiving it per call. The raw key
+	// is intentionally NOT stored — the SDK already owns it and we
+	// only need the safe suffix for the trace UI.
+	keySuffix string
 }
 
 // Option configures an Anthropic Provider.
@@ -109,6 +122,19 @@ func WithIncludeReasoning(b bool) Option {
 	return func(p *Provider) { p.includeReasoning = b }
 }
 
+// WithProviderID overrides the provider-id label stamped on every response
+// and chunk. The default is "anthropic". Useful when proxying Claude via
+// AWS Bedrock, GCP Vertex, or an in-house gateway and you want telemetry
+// to attribute the call to the gateway rather than collapsing everything
+// into "anthropic".
+func WithProviderID(id string) Option {
+	return func(p *Provider) {
+		if id != "" {
+			p.providerID = id
+		}
+	}
+}
+
 // effortToBudget translates a tiered effort into an Anthropic budget.
 // Numbers are conservative defaults; the user can always override with
 // BudgetTokens directly.
@@ -149,8 +175,9 @@ func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
 // NewProvider creates an Anthropic provider.
 func NewProvider(apiKey string, opts ...Option) *Provider {
 	p := &Provider{
-		model:  anthropic.ModelClaudeSonnet4_20250514,
-		config: &provider.CacheConfig{Strategy: provider.CacheAuto},
+		model:      anthropic.ModelClaudeSonnet4_20250514,
+		providerID: "anthropic",
+		config:     &provider.CacheConfig{Strategy: provider.CacheAuto},
 		// Anthropic REQUIRES max_tokens on every request — omitting it
 		// returns a 400 from the API — so we cannot default to 0 like
 		// the OpenAI provider does. 16384 is the historical Anthropic
@@ -166,6 +193,7 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 		opt(p)
 	}
 	p.client = anthropic.NewClient(option.WithAPIKey(apiKey))
+	p.keySuffix = provider.APIKeySuffix(apiKey)
 	p.translator = &Translator{
 		model:            p.model,
 		maxTokens:        p.maxTokens,
@@ -212,8 +240,9 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	if p.shouldIncludeReasoning(req.Reasoning) {
 		out.Reasoning = extractThinking(resp)
 	}
-	out.ProviderID = "anthropic"
+	out.ProviderID = p.providerID
 	out.ModelID = string(params.Model)
+	out.APIKeySuffix = p.keySuffix
 	return out, nil
 }
 
@@ -277,10 +306,10 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 				switch d := e.Delta.AsAny().(type) {
 				case anthropic.TextDelta:
 					contentBuilder += d.Text
-					ch <- provider.StreamChunk{Content: d.Text}
+					ch <- provider.StreamChunk{Content: d.Text, ProviderID: p.providerID, ModelID: string(params.Model), APIKeySuffix: p.keySuffix}
 				case anthropic.ThinkingDelta:
 					if includeReasoning {
-						ch <- provider.StreamChunk{Reasoning: d.Thinking}
+						ch <- provider.StreamChunk{Reasoning: d.Thinking, ProviderID: p.providerID, ModelID: string(params.Model), APIKeySuffix: p.keySuffix}
 					}
 				case anthropic.InputJSONDelta:
 					if acc, ok := toolUseMap[e.Index]; ok {
@@ -299,20 +328,22 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 					}
 				}
 				ch <- provider.StreamChunk{
-					Content:    contentBuilder,
-					ToolCalls:  tcs,
-					IsFinal:    true,
-					ProviderID: "anthropic",
-					ModelID:    string(params.Model),
+					Content:      contentBuilder,
+					ToolCalls:    tcs,
+					IsFinal:      true,
+					ProviderID:   p.providerID,
+					ModelID:      string(params.Model),
+					APIKeySuffix: p.keySuffix,
 				}
 				return
 			}
 		}
 		ch <- provider.StreamChunk{
-			Content:    contentBuilder,
-			IsFinal:    true,
-			ProviderID: "anthropic",
-			ModelID:    string(params.Model),
+			Content:      contentBuilder,
+			IsFinal:      true,
+			ProviderID:   p.providerID,
+			ModelID:      string(params.Model),
+			APIKeySuffix: p.keySuffix,
 		}
 	}()
 

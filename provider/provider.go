@@ -194,6 +194,15 @@ type LLMResponse struct {
 	// Always false when the primary answered. Surfaces "did this turn
 	// hit the fallback path?" without callers parsing logs.
 	Fallback bool
+
+	// APIKeySuffix is the last 4 characters of the API key that actually
+	// served this call, prefixed with "****" (e.g. "****a2Fn"). Empty for
+	// local / keyless providers (LM Studio, Ollama) and for legacy
+	// providers that don't expose the key surface. Surfaced on the trace
+	// UI so operators can tell apart which of several rotating keys
+	// (KeyRotationProvider) or which of several Failover inners answered.
+	// Multi-provider chains propagate the inner's value transparently.
+	APIKeySuffix string
 }
 
 // Usage reports token consumption for an LLM call.
@@ -236,6 +245,13 @@ type StreamChunk struct {
 	ProviderID string
 	ModelID    string
 	Fallback   bool
+
+	// APIKeySuffix is the "****xxxx" suffix of the key that opened this
+	// stream. Set on every chunk (not just the final) so per-chunk
+	// attribution survives in the trace UI when a KeyRotationProvider
+	// or FailoverProvider chain interleaves keys. Empty for keyless
+	// providers (LM Studio, Ollama).
+	APIKeySuffix string
 }
 
 // LLMProvider abstracts any LLM API under a unified interface.
