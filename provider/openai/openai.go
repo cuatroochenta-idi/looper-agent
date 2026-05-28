@@ -306,6 +306,28 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 	includeReasoning := p.shouldIncludeReasoning(req.Reasoning)
 	harmony := newHarmonyFilter(includeReasoning)
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
+
+	// Synchronous first-chunk probe. The openai-go SDK defers the
+	// underlying HTTP request to the first stream.Next() call, so without
+	// this probe a pre-content failure (e.g. OpenRouter "No endpoints
+	// found for X" 404, auth 401, malformed request 400) gets buried in
+	// the final-chunk's Error field after we've already returned
+	// (channel, nil) to the caller. Both FailoverProvider.ChatStream
+	// (failover.go) and RetryProvider.ChatStream (retry.go) gate their
+	// recovery on the function-return error and therefore stay
+	// committed to the broken inner — exactly the silent-failover bug
+	// this probe prevents. Probing here moves no latency: the framework
+	// loop blocks on the first chunk anyway, so the wait shifts but
+	// the total time is unchanged. Cancellation also wins here because
+	// stream.Next() respects ctx.
+	var pendingChunk *openai.ChatCompletionChunk
+	if stream.Next() {
+		c := stream.Current()
+		pendingChunk = &c
+	} else if err := stream.Err(); err != nil {
+		return nil, fmt.Errorf("openai stream: %w", err)
+	}
+
 	ch := make(chan provider.StreamChunk, 64)
 	// Precomputed once per stream — every chunk emission stamps it so the
 	// trace UI can render per-chunk attribution without re-deriving the
@@ -322,9 +344,10 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		// it, rather than returning at finish_reason.
 		var finalChunk *openai.ChatCompletionChunk
 
-		for stream.Next() {
-			chunk := stream.Current()
-
+		// Per-chunk handler. Factored out as a closure so the probed first
+		// chunk (above) and the rest of the stream go through the exact
+		// same branches — no risk of the two paths drifting.
+		handleChunk := func(chunk openai.ChatCompletionChunk) {
 			if len(chunk.Choices) > 0 {
 				delta := chunk.Choices[0].Delta
 
@@ -391,10 +414,20 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 			}
 		}
 
+		if pendingChunk != nil {
+			handleChunk(*pendingChunk)
+		}
+		for stream.Next() {
+			handleChunk(stream.Current())
+		}
+
 		final := buildFinalChunk(contentBuilder, toolCallMap, finalChunk)
 		// Surface stream errors so callers see HTTP 4xx/5xx, malformed SSE,
 		// connection drops, etc. Without this the agent silently sees an
-		// empty final chunk and looks "successful but mute."
+		// empty final chunk and looks "successful but mute." The pre-
+		// content failure path is now handled by the synchronous probe
+		// above; this branch covers mid-stream errors (after at least
+		// one chunk has been emitted).
 		if err := stream.Err(); err != nil {
 			final.Error = fmt.Errorf("openai stream: %w", err)
 		}
