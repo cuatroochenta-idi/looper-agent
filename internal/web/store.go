@@ -68,7 +68,7 @@ func (s *Store) AppendStep(id string, step TimelineStep) {
 }
 
 // Counts returns counters for the sidebar filter pills.
-func (s *Store) Counts() (all, running, completed, errored int) {
+func (s *Store) Counts() (all, running, completed, errored, unknown int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	all = len(s.runs)
@@ -80,15 +80,19 @@ func (s *Store) Counts() (all, running, completed, errored int) {
 			completed++
 		case RunError:
 			errored++
+		case RunUnknown:
+			unknown++
 		}
 	}
 	return
 }
 
 // SweepStuckRuns marks every run that has been "running" for longer than
-// maxIdle without any new step as errored. This catches runs whose host
+// maxIdle without any new step as "unknown". This catches runs whose host
 // process died (or whose run_end event was lost) so the UI doesn't show
-// "thinking…" forever. Returns the IDs that were finalized.
+// "thinking…" forever. The outcome is genuinely unknown — not a failure —
+// so it gets its own neutral status rather than being lumped in with errors.
+// Returns the IDs that were finalized.
 func (s *Store) SweepStuckRuns(maxIdle time.Duration, now time.Time) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -106,11 +110,11 @@ func (s *Store) SweepStuckRuns(maxIdle time.Duration, now time.Time) []string {
 		if now.Sub(last) < maxIdle {
 			continue
 		}
-		r.Status = RunError
+		r.Status = RunUnknown
 		r.EndedAt = now
 		r.Steps = append(r.Steps, TimelineStep{
 			Kind: StepKindError,
-			Err:  "run timed out — no events received for " + maxIdle.String() + " (process killed or run_end lost)",
+			Err:  "no events received for " + maxIdle.String() + " — marked unknown (process likely died or run_end lost)",
 			At:   now,
 		})
 		finalized = append(finalized, r.ID)

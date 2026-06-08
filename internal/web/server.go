@@ -7,11 +7,11 @@ import (
 )
 
 // stuckRunMaxIdle is the cap on how long a run may stay "running" with no
-// new step events before the sweeper auto-finalizes it as errored. Picked
-// to be longer than any reasonable LLM turn so legitimate slow calls
-// aren't killed, but short enough that a dead process clears within
-// minutes instead of hanging the panel forever.
-const stuckRunMaxIdle = 3 * time.Minute
+// new step events before the sweeper finalizes it as "unknown". Picked to be
+// comfortably longer than any reasonable LLM turn (incl. slow tool calls and
+// long sub-agent fan-outs) so legitimate work isn't discarded, while still
+// clearing a dead process out of the "running" filter within minutes.
+const stuckRunMaxIdle = 10 * time.Minute
 
 // stuckRunSweepInterval is how often the background sweeper runs.
 const stuckRunSweepInterval = 30 * time.Second

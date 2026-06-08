@@ -86,6 +86,11 @@ const (
 	RunRunning   RunStatus = "running"
 	RunCompleted RunStatus = "completed"
 	RunError     RunStatus = "error"
+	// RunUnknown marks a run the sweeper gave up on: it stayed "running"
+	// with no events past the idle cap, so its outcome is genuinely
+	// unknown (process died or run_end was lost) — distinct from a run
+	// that actively failed. Rendered neutral grey, not red.
+	RunUnknown RunStatus = "unknown"
 )
 
 // TimelineStep is a single step persisted on a run for the detail view.

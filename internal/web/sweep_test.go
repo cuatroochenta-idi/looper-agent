@@ -33,8 +33,8 @@ func TestSweepStuckRuns_finalizesIdleRunning(t *testing.T) {
 	}
 
 	a := store.Find("a")
-	if a.Status != RunError {
-		t.Fatalf("run a should be RunError, got %s", a.Status)
+	if a.Status != RunUnknown {
+		t.Fatalf("run a should be RunUnknown, got %s", a.Status)
 	}
 	if a.EndedAt != now {
 		t.Fatalf("run a should be ended at sweep time")

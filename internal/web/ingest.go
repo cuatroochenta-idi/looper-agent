@@ -248,6 +248,21 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fan out to the ancestor run topics. A parent's detail/chat-trace pane now
+	// renders its sub-agents' traces inline, but its SSE stream only listens on
+	// TopicRun(its own id) — so without this a child's steps would never
+	// refresh the parent view. Walk the ParentRunID chain (cycle-guarded).
+	seen := map[string]bool{ev.RunID: true}
+	for cur := ev.RunID; ; {
+		r := s.store.Find(cur)
+		if r == nil || r.ParentRunID == "" || seen[r.ParentRunID] {
+			break
+		}
+		topics = append(topics, TopicRun(r.ParentRunID))
+		seen[r.ParentRunID] = true
+		cur = r.ParentRunID
+	}
+
 	s.hub.Publish(topics...)
 	w.WriteHeader(http.StatusNoContent)
 }

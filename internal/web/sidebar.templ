@@ -45,14 +45,14 @@ templ SidebarBody(data SidebarData) {
 			</div>
 		} else {
 			for _, g := range data.Groups {
-				@sessionGroup(g, data.Selected)
+				@sessionGroup(g, data.Selected, data.Rollups)
 			}
 			if len(data.Loose) > 0 {
 				if len(data.Groups) > 0 {
 					<div class="loose-divider">unsessioned</div>
 				}
 				for _, r := range data.Loose {
-					@sidebarCard(r, 0)
+					@sidebarCard(r, 0, data.Rollups)
 				}
 			}
 		}
@@ -65,6 +65,9 @@ templ filterPills(data SidebarData) {
 		@filterPill("running", "running", data.CountRun)
 		@filterPill("completed", "done", data.CountDone)
 		@filterPill("error", "failed", data.CountError)
+		if data.CountUnknown > 0 {
+			@filterPill("unknown", "unknown", data.CountUnknown)
+		}
 	</div>
 }
 
@@ -78,7 +81,7 @@ templ filterPill(status, label string, count int) {
 
 // sessionGroup renders a <details> wrapper around runs that share the same
 // LOOPER_SESSION_ID. Opens by default if the selected run belongs to it.
-templ sessionGroup(g SessionGroup, selected *RunRecord) {
+templ sessionGroup(g SessionGroup, selected *RunRecord, rollups map[string]CostRollup) {
 	{{ open := selected != nil && g.Contains(selected.ID) }}
 	<details class={ "sess", templ.KV("has-running", g.HasRunning), templ.KV("has-error", g.HasError) } open?={ open }>
 		<summary>
@@ -102,7 +105,7 @@ templ sessionGroup(g SessionGroup, selected *RunRecord) {
 		</summary>
 		<div class="sess-body">
 			for _, root := range g.Roots {
-				@sidebarRunTree(root, 0)
+				@sidebarRunTree(root, 0, rollups)
 			}
 		</div>
 	</details>
@@ -112,10 +115,10 @@ templ sessionGroup(g SessionGroup, selected *RunRecord) {
 // controls the left indent so a parent agent and its sub-agents form a
 // readable tree in the sidebar — agents spawned from tools sit one notch
 // inside their caller.
-templ sidebarRunTree(node *RunNode, depth int) {
-	@sidebarCard(node.Run, depth)
+templ sidebarRunTree(node *RunNode, depth int, rollups map[string]CostRollup) {
+	@sidebarCard(node.Run, depth, rollups)
 	for _, child := range node.Children {
-		@sidebarRunTree(child, depth+1)
+		@sidebarRunTree(child, depth+1, rollups)
 	}
 }
 
@@ -127,7 +130,9 @@ templ sidebarRunTree(node *RunNode, depth int) {
 //
 // The `depth` parameter sets a CSS custom property so the card is indented
 // proportionally to its place in the parent/child tree.
-templ sidebarCard(run *RunRecord, depth int) {
+templ sidebarCard(run *RunRecord, depth int, rollups map[string]CostRollup) {
+	{{ rollup := rollups[run.ID] }}
+	{{ model := RunModelLabel(run) }}
 	<a id={ "card-" + run.ID }
 		class={ "card-x", "s-" + string(run.Status), templ.KV("nested", depth > 0) }
 		style={ depthVar(depth) }
@@ -141,6 +146,9 @@ templ sidebarCard(run *RunRecord, depth int) {
 				<span class={ "cx-status", "s-" + string(run.Status) }>
 					<span class="dot"></span>{ string(run.Status) }
 				</span>
+				if model != "" {
+					<span class="turn-model cx-model">{ model }</span>
+				}
 				<span class="cx-id">{ ShortID(run.ID) }</span>
 				if run.Status == RunRunning {
 					<span class="cx-spin" aria-label="running" title="in flight"></span>
@@ -150,9 +158,13 @@ templ sidebarCard(run *RunRecord, depth int) {
 			<div class="cx-row3">
 				<span><b>{ fmt.Sprintf("%d", run.Turns) }</b>&thinsp;turns</span>
 				<span class="sep">·</span>
-				<span><b>${ fmt.Sprintf("%.4f", run.TotalUSD) }</b></span>
+				<span title={ rollupTitle(rollup) }><b>${ fmt.Sprintf("%.4f", rollup.TotalUSD()) }</b>
+					if rollup.HasSubs() {
+						<span class="rollup-mini">+sub</span>
+					}
+				</span>
 				<span class="sep">·</span>
-				<span><b>{ fmt.Sprintf("%d", run.Tokens) }</b>&thinsp;tk</span>
+				<span><b>{ fmt.Sprintf("%d", rollup.TotalTokens()) }</b>&thinsp;tk</span>
 				<span class="sep">·</span>
 				<span class="mono">{ run.StartedAt.Format("15:04:05") }</span>
 			</div>
