@@ -96,15 +96,39 @@ func (s *Store) Counts() (all, running, completed, errored, unknown int) {
 func (s *Store) SweepStuckRuns(maxIdle time.Duration, now time.Time) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Index children so a run can be kept alive while any of its descendants
+	// is still running — liveness is scoped to the whole run tree, not the
+	// individual run. A long-running sub-agent must not let its parent (the
+	// main run) look stuck.
+	childIdx := map[string][]*RunRecord{}
+	for _, r := range s.runs {
+		if r.ParentRunID != "" {
+			childIdx[r.ParentRunID] = append(childIdx[r.ParentRunID], r)
+		}
+	}
+
 	var finalized []string
 	for _, r := range s.runs {
 		if r.Status != RunRunning {
 			continue
 		}
-		last := r.StartedAt
-		if n := len(r.Steps); n > 0 {
-			if t := r.Steps[n-1].At; t.After(last) {
-				last = t
+		// A run with a still-running descendant is not stuck — its sub-agent
+		// is doing real work. Skipped only when maxIdle > 0; the startup purge
+		// (maxIdle == 0) finalizes every orphaned "running" run regardless.
+		if maxIdle > 0 && hasRunningDescendant(r.ID, childIdx, map[string]bool{}) {
+			continue
+		}
+		// LastSeenAt reflects the most recent event anywhere in this run's
+		// subtree (propagated on ingest). Fall back to StartedAt / last step
+		// for runs persisted before LastSeenAt existed.
+		last := r.LastSeenAt
+		if last.IsZero() {
+			last = r.StartedAt
+			if n := len(r.Steps); n > 0 {
+				if t := r.Steps[n-1].At; t.After(last) {
+					last = t
+				}
 			}
 		}
 		if now.Sub(last) < maxIdle {
@@ -120,4 +144,22 @@ func (s *Store) SweepStuckRuns(maxIdle time.Duration, now time.Time) []string {
 		finalized = append(finalized, r.ID)
 	}
 	return finalized
+}
+
+// hasRunningDescendant reports whether any transitive child of id is still in
+// the running state. Cycle-guarded via visited.
+func hasRunningDescendant(id string, childIdx map[string][]*RunRecord, visited map[string]bool) bool {
+	for _, c := range childIdx[id] {
+		if visited[c.ID] {
+			continue
+		}
+		visited[c.ID] = true
+		if c.Status == RunRunning {
+			return true
+		}
+		if hasRunningDescendant(c.ID, childIdx, visited) {
+			return true
+		}
+	}
+	return false
 }

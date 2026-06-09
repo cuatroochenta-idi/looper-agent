@@ -132,6 +132,7 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 				r.Input = d.Input
 				r.Status = RunRunning
 				r.StartedAt = started
+				r.LastSeenAt = started
 				r.EndedAt = time.Time{}
 				r.Output = ""
 				r.Turns = 0
@@ -161,6 +162,7 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 				Input:            d.Input,
 				Status:           RunRunning,
 				StartedAt:        started,
+				LastSeenAt:       started,
 				Steps:            initialSteps,
 			})
 		}
@@ -248,19 +250,39 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fan out to the ancestor run topics. A parent's detail/chat-trace pane now
-	// renders its sub-agents' traces inline, but its SSE stream only listens on
-	// TopicRun(its own id) — so without this a child's steps would never
-	// refresh the parent view. Walk the ParentRunID chain (cycle-guarded).
-	seen := map[string]bool{ev.RunID: true}
-	for cur := ev.RunID; ; {
-		r := s.store.Find(cur)
-		if r == nil || r.ParentRunID == "" || seen[r.ParentRunID] {
+	// Propagate liveness up the run tree, then fan out to ancestor topics.
+	// Every event refreshes LastSeenAt on the emitting run AND all its
+	// ancestors, so the stuck-run sweeper treats a busy sub-agent as keeping
+	// its whole parent chain alive — a long-running child no longer makes the
+	// main run look stuck/failed. A parent's detail/chat-trace pane renders its
+	// sub-agents' traces inline but only listens on TopicRun(its own id), so we
+	// also publish each ancestor topic to re-render those panes. Cycle-guarded.
+	liveAt := ev.Ts
+	if liveAt.IsZero() {
+		liveAt = time.Now()
+	}
+	seen := map[string]bool{}
+	for cur := ev.RunID; cur != ""; {
+		if seen[cur] {
 			break
 		}
-		topics = append(topics, TopicRun(r.ParentRunID))
-		seen[r.ParentRunID] = true
-		cur = r.ParentRunID
+		seen[cur] = true
+		parent := ""
+		found := false
+		s.store.Update(cur, func(r *RunRecord) {
+			found = true
+			if liveAt.After(r.LastSeenAt) {
+				r.LastSeenAt = liveAt
+			}
+			parent = r.ParentRunID
+		})
+		if !found {
+			break
+		}
+		if cur != ev.RunID {
+			topics = append(topics, TopicRun(cur))
+		}
+		cur = parent
 	}
 
 	s.hub.Publish(topics...)

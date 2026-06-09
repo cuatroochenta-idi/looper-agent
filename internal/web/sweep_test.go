@@ -53,6 +53,94 @@ func TestSweepStuckRuns_finalizesIdleRunning(t *testing.T) {
 	}
 }
 
+func TestSweepStuckRuns_busyChildKeepsParentAlive(t *testing.T) {
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	store := NewStore()
+	// Parent's own last activity is 20 min ago (well past the cap)...
+	store.Add(&RunRecord{
+		ID:         "parent",
+		Status:     RunRunning,
+		StartedAt:  now.Add(-30 * time.Minute),
+		LastSeenAt: now.Add(-20 * time.Minute),
+	})
+	// ...but a sub-agent is still running and emitted 1s ago.
+	store.Add(&RunRecord{
+		ID:          "child",
+		ParentRunID: "parent",
+		Status:      RunRunning,
+		StartedAt:   now.Add(-25 * time.Minute),
+		LastSeenAt:  now.Add(-1 * time.Second),
+	})
+
+	finalized := store.SweepStuckRuns(10*time.Minute, now)
+	if len(finalized) != 0 {
+		t.Fatalf("a parent with a busy running child must not be swept, got %v", finalized)
+	}
+	if store.Find("parent").Status != RunRunning {
+		t.Fatalf("parent should stay running while its sub-agent works")
+	}
+	if store.Find("child").Status != RunRunning {
+		t.Fatalf("a recently-active child should stay running")
+	}
+}
+
+func TestSweepStuckRuns_sweepsSilentLeafButNotParent(t *testing.T) {
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	store := NewStore()
+	store.Add(&RunRecord{
+		ID:         "parent",
+		Status:     RunRunning,
+		StartedAt:  now.Add(-30 * time.Minute),
+		LastSeenAt: now.Add(-20 * time.Minute),
+	})
+	// Child is still "running" but has gone silent past the cap.
+	store.Add(&RunRecord{
+		ID:          "child",
+		ParentRunID: "parent",
+		Status:      RunRunning,
+		StartedAt:   now.Add(-25 * time.Minute),
+		LastSeenAt:  now.Add(-15 * time.Minute),
+	})
+
+	finalized := store.SweepStuckRuns(10*time.Minute, now)
+	if len(finalized) != 1 || finalized[0] != "child" {
+		t.Fatalf("only the silent leaf child should be swept, got %v", finalized)
+	}
+	if store.Find("parent").Status != RunRunning {
+		t.Fatalf("parent must be kept alive while it has a running descendant")
+	}
+	if store.Find("child").Status != RunUnknown {
+		t.Fatalf("silent running leaf should be marked unknown, got %s", store.Find("child").Status)
+	}
+}
+
+func TestSweepStuckRuns_sweepsFullyIdleTree(t *testing.T) {
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	store := NewStore()
+	store.Add(&RunRecord{
+		ID:         "parent",
+		Status:     RunRunning,
+		StartedAt:  now.Add(-30 * time.Minute),
+		LastSeenAt: now.Add(-20 * time.Minute),
+	})
+	// Child already finished — no running descendant keeps the parent alive.
+	store.Add(&RunRecord{
+		ID:          "child",
+		ParentRunID: "parent",
+		Status:      RunCompleted,
+		StartedAt:   now.Add(-25 * time.Minute),
+		LastSeenAt:  now.Add(-22 * time.Minute),
+	})
+
+	finalized := store.SweepStuckRuns(10*time.Minute, now)
+	if len(finalized) != 1 || finalized[0] != "parent" {
+		t.Fatalf("a fully-idle tree should finalize the running parent, got %v", finalized)
+	}
+	if store.Find("parent").Status != RunUnknown {
+		t.Fatalf("idle parent with no running descendant should be unknown")
+	}
+}
+
 func TestIsStuck(t *testing.T) {
 	now := time.Now()
 	notStuck := &RunRecord{Status: RunRunning, StartedAt: now}
