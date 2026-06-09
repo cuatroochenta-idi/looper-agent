@@ -2,12 +2,22 @@ package web
 
 import (
 	"bytes"
+	"errors"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/a-h/templ"
 	"github.com/starfederation/datastar-go/datastar"
 )
+
+// sseWriteTimeout bounds every individual SSE patch write. The http.Server
+// deliberately runs without a global WriteTimeout (it would kill long-lived
+// streams), so without a per-write deadline a half-dead client — laptop
+// asleep, network dropped without RST — blocks the write forever once the
+// kernel buffer fills, leaking the goroutine and pinning one of the
+// browser's six per-host connections. This was the panel's hang.
+const sseWriteTimeout = 15 * time.Second
 
 // stream holds an SSE connection open and writes a fresh patch every time
 // the Hub publishes on the subscribed topic. Each render is built from the
@@ -27,9 +37,11 @@ func (s *Server) stream(
 	defer cancel()
 
 	sse := datastar.NewSSE(w, r)
+	rc := http.NewResponseController(w)
 
 	// Initial paint.
-	if err := patchInto(sse, r, selector, build()); err != nil {
+	if err := patchInto(sse, rc, r, selector, build()); err != nil {
+		logSSEError(r, err)
 		return
 	}
 
@@ -45,13 +57,15 @@ func (s *Server) stream(
 			if !ok {
 				return
 			}
-			if err := patchInto(sse, r, selector, build()); err != nil {
+			if err := patchInto(sse, rc, r, selector, build()); err != nil {
+				logSSEError(r, err)
 				return
 			}
 		case <-heartbeat.C:
 			// Re-send current state as a keep-alive. Cheap and recovers
 			// from any lost notification.
-			if err := patchInto(sse, r, selector, build()); err != nil {
+			if err := patchInto(sse, rc, r, selector, build()); err != nil {
+				logSSEError(r, err)
 				return
 			}
 		}
@@ -59,15 +73,35 @@ func (s *Server) stream(
 }
 
 // patchInto renders comp and ships it as a single datastar element patch.
-func patchInto(sse *datastar.ServerSentEventGenerator, r *http.Request, selector string, comp templ.Component) error {
+// Each write is bounded by sseWriteTimeout via the ResponseController so a
+// dead client errors out instead of blocking the stream goroutine forever.
+func patchInto(sse *datastar.ServerSentEventGenerator, rc *http.ResponseController, r *http.Request, selector string, comp templ.Component) error {
 	var buf bytes.Buffer
 	if err := comp.Render(r.Context(), &buf); err != nil {
 		return err
 	}
-	return sse.PatchElements(buf.String(),
+	if err := rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	if err := sse.PatchElements(buf.String(),
 		datastar.WithSelector(selector),
 		datastar.WithMode(datastar.ElementPatchModeInner),
-	)
+	); err != nil {
+		return err
+	}
+	// Clear the deadline so the connection can sit idle between patches.
+	return rc.SetWriteDeadline(time.Time{})
+}
+
+// logSSEError reports stream failures that are NOT the client simply going
+// away. Before this, every patch error returned silently and operators had
+// no signal distinguishing "tab closed" from "render panic / stuck write".
+func logSSEError(r *http.Request, err error) {
+	if r.Context().Err() != nil {
+		return // client disconnected; expected churn
+	}
+	log.Printf("sse: %s %s: patch failed: %v", r.Method, r.URL.Path, err)
 }
 
 // ─── SSE handlers ────────────────────────────────────────────────────────────

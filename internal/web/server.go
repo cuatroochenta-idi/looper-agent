@@ -83,13 +83,16 @@ func (s *Server) runStuckRunSweeper() {
 		topics = append(topics, TopicSidebar, TopicChats)
 		for _, id := range finalized {
 			topics = append(topics, TopicRun(id))
-			if s.storeDir != "" {
+		}
+		// Publish first — waking the UI must not wait on disk I/O.
+		s.hub.Publish(topics...)
+		if s.storeDir != "" {
+			for _, id := range finalized {
 				if r := s.store.Find(id); r != nil {
 					_ = writeRunFile(s.storeDir, r)
 				}
 			}
 		}
-		s.hub.Publish(topics...)
 	}
 }
 

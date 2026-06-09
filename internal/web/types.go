@@ -171,6 +171,20 @@ type RunRecord struct {
 	FallbackCalls int `json:"fallback_calls,omitempty"`
 }
 
+// Clone returns a copy of the record safe to read outside the store lock.
+// The struct is copied by value and the two slice fields get fresh headers;
+// step/provider elements are plain value structs, so the copy never observes
+// a concurrent append from the ingest path.
+func (r *RunRecord) Clone() *RunRecord {
+	if r == nil {
+		return nil
+	}
+	c := *r
+	c.Steps = append([]TimelineStep(nil), r.Steps...)
+	c.Providers = append([]ProviderStat(nil), r.Providers...)
+	return &c
+}
+
 // Duration returns the wall-clock time the run has been or was running.
 func (r *RunRecord) Duration() time.Duration {
 	end := r.EndedAt

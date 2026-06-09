@@ -14,30 +14,35 @@ type Store struct {
 // NewStore creates an empty run store.
 func NewStore() *Store { return &Store{runs: make([]*RunRecord, 0, 64)} }
 
-// Add appends a new run. The pointer is shared, so subsequent mutations
-// via Update / AppendStep are visible to readers immediately.
+// Add appends a new run. The store keeps the only live pointer; readers get
+// clones, so all mutations must go through Update / AppendStep.
 func (s *Store) Add(r *RunRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.runs = append(s.runs, r)
 }
 
-// All returns a snapshot copy of every run.
+// All returns a snapshot clone of every run. Cloning under the read lock is
+// what makes SSE renders race-free against the ingest path: previously the
+// shared pointers let renders read Steps while AppendStep grew it (torn
+// slice-header reads under load — the panel froze or drew garbage).
 func (s *Store) All() []*RunRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]*RunRecord, len(s.runs))
-	copy(out, s.runs)
+	for i, r := range s.runs {
+		out[i] = r.Clone()
+	}
 	return out
 }
 
-// Find returns the run with the given ID, or nil.
+// Find returns a snapshot clone of the run with the given ID, or nil.
 func (s *Store) Find(id string) *RunRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, r := range s.runs {
 		if r.ID == id {
-			return r
+			return r.Clone()
 		}
 	}
 	return nil
