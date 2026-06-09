@@ -54,9 +54,8 @@ templ detailHeader(data DetailData) {
 				<span class="dot"></span>
 				{ string(data.Run.Status) }
 				if data.Live {
-					<span class="badge-live">
+					<span class="badge-live" title="live · auto-refreshing">
 						<span class="spin-ring"></span>
-						refreshing
 					</span>
 				}
 			</span>
@@ -637,9 +636,6 @@ templ ChatTraceBody(data DetailData) {
 	<div class="chat-trace-inner fade-in">
 		<div class="chat-trace-bar">
 			<div class="chat-trace-bar-left">
-				<span class={ "badge", "badge-" + string(data.Run.Status) }>
-					<span class="dot"></span>{ string(data.Run.Status) }
-				</span>
 				<span class="mono" style="font-size:11.5px;color:var(--text-muted);">{ ShortID(data.Run.ID) }</span>
 			</div>
 			<div class="chat-trace-bar-right">
