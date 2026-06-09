@@ -64,13 +64,13 @@ func looksLikeToolError(content string) bool {
 
 // TurnNode aggregates everything that happened in one agentic turn.
 type TurnNode struct {
-	Index     int
-	StartAt   time.Time
-	LLMCall   *TimelineStep
-	ToolNodes []ToolCallNode
-	Final     *TimelineStep
-	Error     *TimelineStep
-	Reasoning string
+	Index         int
+	StartAt       time.Time
+	LLMCall       *TimelineStep
+	ToolNodes     []ToolCallNode
+	Final         *TimelineStep
+	Error         *TimelineStep
+	Reasoning     string
 	AssistantText string
 	HasTokens     bool
 	InTokens      int
@@ -401,6 +401,10 @@ type DetailData struct {
 	SpawnedByToolCall map[string][]*SpawnedRun
 	// RunRollup is this run's cost/tokens including all descendant sub-agents.
 	RunRollup CostRollup
+	// Usage is this run's own token totals + per-model breakdown, aggregated
+	// live from the timeline turns (so it is populated during the run, not
+	// only at run_end).
+	Usage RunUsage
 }
 
 type RunsViewData struct {

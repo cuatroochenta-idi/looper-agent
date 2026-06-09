@@ -42,7 +42,6 @@ func (s *Server) handleChatsPage(w http.ResponseWriter, r *http.Request) {
 	page(w, r, "Chats — Looper Agent", "/chats", ChatsPage(view))
 }
 
-
 // ─── Partials (datastar-SSE patches) ─────────────────────────────────────────
 
 func (s *Server) partialDashboard(w http.ResponseWriter, r *http.Request) {
@@ -650,12 +649,22 @@ func (s *Server) detailData(run *RunRecord) DetailData {
 	// inline. visited guards against a malformed parent/child cycle.
 	visited := map[string]bool{run.ID: true}
 	spawned := buildSpawnTree(run.ID, childIndex, rollups, visited)
+	// Aggregate usage live from the turns so the header shows real tokens +
+	// per-model breakdown during the run. Fall back to the run-level totals for
+	// traces whose per-step usage was trimmed (where the live agg would be 0).
+	usage := usageFromTimeline(tl, run.Providers)
+	if !usage.HasTokens() && (run.InputTokens > 0 || run.OutputTokens > 0) {
+		usage.InTokens = run.InputTokens
+		usage.OutTokens = run.OutputTokens
+		usage.CachedTokens = run.CachedTokens
+	}
 	return DetailData{
 		Run:               run,
 		Timeline:          tl,
 		Live:              run.Status == RunRunning,
 		SpawnedByToolCall: spawned,
 		RunRollup:         rollups[run.ID],
+		Usage:             usage,
 	}
 }
 

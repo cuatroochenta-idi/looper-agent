@@ -84,10 +84,10 @@ templ detailHeader(data DetailData) {
 				<span class="lbl">cost{ rollupCostLbl(data.RunRollup) }</span>
 				<span class="val success">${ fmt.Sprintf("%.5f", data.RunRollup.TotalUSD()) }</span>
 			</div>
-			<div class="metric"><span class="lbl">input</span><span class="val">{ fmt.Sprintf("%d", data.Run.InputTokens) }</span></div>
-			<div class="metric"><span class="lbl">output</span><span class="val">{ fmt.Sprintf("%d", data.Run.OutputTokens) }</span></div>
-			if data.Run.CachedTokens > 0 {
-				<div class="metric"><span class="lbl">cached</span><span class="val">{ fmt.Sprintf("%d", data.Run.CachedTokens) }</span></div>
+			<div class="metric"><span class="lbl">input</span><span class="val">{ fmt.Sprintf("%d", data.Usage.InTokens) }</span></div>
+			<div class="metric"><span class="lbl">output</span><span class="val">{ fmt.Sprintf("%d", data.Usage.OutTokens) }</span></div>
+			if data.Usage.CachedTokens > 0 {
+				<div class="metric"><span class="lbl">cached</span><span class="val">{ fmt.Sprintf("%d", data.Usage.CachedTokens) }</span></div>
 			}
 			<div class="metric"><span class="lbl">latency</span><span class="val">{ PrettyDuration(data.Timeline.Duration()) }</span></div>
 			if data.Run.FallbackCalls > 0 {
@@ -102,9 +102,9 @@ templ detailHeader(data DetailData) {
 				<span class="rollup-self">self ${ fmt.Sprintf("%.5f", data.RunRollup.SelfUSD) } · { fmt.Sprintf("%d", data.RunRollup.SelfTokens) } tok</span>
 			</div>
 		}
-		if len(data.Run.Providers) > 1 || (len(data.Run.Providers) == 1 && data.Run.FallbackCalls > 0) {
+		if len(data.Usage.ByModel) > 0 {
 			<div class="provider-breakdown">
-				<div class="section-label">providers · { fmt.Sprintf("%d", len(data.Run.Providers)) }</div>
+				<div class="section-label">models · { fmt.Sprintf("%d", len(data.Usage.ByModel)) }</div>
 				<table class="providers-table">
 					<thead>
 						<tr>
@@ -117,7 +117,7 @@ templ detailHeader(data DetailData) {
 						</tr>
 					</thead>
 					<tbody>
-						for _, p := range data.Run.Providers {
+						for _, p := range data.Usage.ByModel {
 							<tr>
 								<td>
 									{ p.Provider }
@@ -127,9 +127,15 @@ templ detailHeader(data DetailData) {
 								</td>
 								<td>{ p.Model }</td>
 								<td>{ fmt.Sprintf("%d", p.Calls) }</td>
-								<td>{ fmt.Sprintf("%d", p.InputTokens) }</td>
-								<td>{ fmt.Sprintf("%d", p.OutputTokens) }</td>
-								<td>${ fmt.Sprintf("%.5f", p.TotalUSD) }</td>
+								<td>{ fmt.Sprintf("%d", p.InTokens) }</td>
+								<td>{ fmt.Sprintf("%d", p.OutTokens) }</td>
+								<td>
+									if p.HasUSD {
+										${ fmt.Sprintf("%.5f", p.USD) }
+									} else {
+										<span style="color:var(--text-muted)">&mdash;</span>
+									}
+								</td>
 							</tr>
 						}
 					</tbody>
@@ -637,8 +643,8 @@ templ ChatTraceBody(data DetailData) {
 				<span class="mono" style="font-size:11.5px;color:var(--text-muted);">{ ShortID(data.Run.ID) }</span>
 			</div>
 			<div class="chat-trace-bar-right">
-				if data.Run.TotalUSD > 0 {
-					<span class="chat-trace-cost">${ fmt.Sprintf("%.4f", data.Run.TotalUSD) }</span>
+				if data.RunRollup.TotalUSD() > 0 {
+					<span class="chat-trace-cost">${ fmt.Sprintf("%.4f", data.RunRollup.TotalUSD()) }</span>
 				}
 				<button class="chat-trace-close" type="button"
 					title="Close detail panel" aria-label="Close detail panel"
