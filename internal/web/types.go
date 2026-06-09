@@ -86,6 +86,11 @@ const (
 	RunRunning   RunStatus = "running"
 	RunCompleted RunStatus = "completed"
 	RunError     RunStatus = "error"
+	// RunUnknown marks a run the sweeper gave up on: it stayed "running"
+	// with no events past the idle cap, so its outcome is genuinely
+	// unknown (process died or run_end was lost) — distinct from a run
+	// that actively failed. Rendered neutral grey, not red.
+	RunUnknown RunStatus = "unknown"
 )
 
 // TimelineStep is a single step persisted on a run for the detail view.
@@ -133,23 +138,29 @@ type ProviderStat struct {
 
 // RunRecord is the in-memory snapshot of an agent run.
 type RunRecord struct {
-	ID               string         `json:"id"`
-	SessionID        string         `json:"session_id,omitempty"`
-	ParentRunID      string         `json:"parent_run_id,omitempty"`
-	ParentToolCallID string         `json:"parent_tool_call_id,omitempty"`
-	Project          string         `json:"project,omitempty"`
-	Input        string         `json:"input"`
-	Output       string         `json:"output"`
-	Status       RunStatus      `json:"status"`
-	Turns        int            `json:"turns"`
-	TotalUSD     float64        `json:"total_usd"`
-	Tokens       int            `json:"tokens"`
-	InputTokens  int            `json:"input_tokens"`
-	OutputTokens int            `json:"output_tokens"`
-	CachedTokens int            `json:"cached_tokens"`
-	StartedAt    time.Time      `json:"started_at"`
-	EndedAt      time.Time      `json:"ended_at,omitzero"`
-	Steps        []TimelineStep `json:"steps,omitempty"`
+	ID               string    `json:"id"`
+	SessionID        string    `json:"session_id,omitempty"`
+	ParentRunID      string    `json:"parent_run_id,omitempty"`
+	ParentToolCallID string    `json:"parent_tool_call_id,omitempty"`
+	Project          string    `json:"project,omitempty"`
+	Input            string    `json:"input"`
+	Output           string    `json:"output"`
+	Status           RunStatus `json:"status"`
+	Turns            int       `json:"turns"`
+	TotalUSD         float64   `json:"total_usd"`
+	Tokens           int       `json:"tokens"`
+	InputTokens      int       `json:"input_tokens"`
+	OutputTokens     int       `json:"output_tokens"`
+	CachedTokens     int       `json:"cached_tokens"`
+	StartedAt        time.Time `json:"started_at"`
+	EndedAt          time.Time `json:"ended_at,omitzero"`
+	// LastSeenAt is the timestamp of the most recent event anywhere in this
+	// run's subtree (its own events plus descendants', propagated up the
+	// parent chain on ingest). The stuck-run sweeper uses it so a busy
+	// sub-agent keeps its whole parent chain alive instead of letting a slow
+	// child mark the run "unknown".
+	LastSeenAt time.Time      `json:"last_seen_at,omitzero"`
+	Steps      []TimelineStep `json:"steps,omitempty"`
 
 	// Providers is the per-(Provider, Model) breakdown when the run
 	// used a multiprovider chain. Empty when single-provider.
@@ -158,6 +169,20 @@ type RunRecord struct {
 	// FallbackCalls is the total number of LLM calls that hit the
 	// failover path during this run.
 	FallbackCalls int `json:"fallback_calls,omitempty"`
+}
+
+// Clone returns a copy of the record safe to read outside the store lock.
+// The struct is copied by value and the two slice fields get fresh headers;
+// step/provider elements are plain value structs, so the copy never observes
+// a concurrent append from the ingest path.
+func (r *RunRecord) Clone() *RunRecord {
+	if r == nil {
+		return nil
+	}
+	c := *r
+	c.Steps = append([]TimelineStep(nil), r.Steps...)
+	c.Providers = append([]ProviderStat(nil), r.Providers...)
+	return &c
 }
 
 // Duration returns the wall-clock time the run has been or was running.
@@ -178,10 +203,16 @@ func (r *RunRecord) IsStuck(idleThreshold time.Duration) bool {
 	if r.Status != RunRunning {
 		return false
 	}
-	last := r.StartedAt
-	if n := len(r.Steps); n > 0 {
-		if t := r.Steps[n-1].At; t.After(last) {
-			last = t
+	// LastSeenAt reflects the most recent event in this run's subtree, so a
+	// run whose sub-agent is actively working is not flagged stuck. Fall back
+	// to StartedAt / last step for runs persisted before LastSeenAt existed.
+	last := r.LastSeenAt
+	if last.IsZero() {
+		last = r.StartedAt
+		if n := len(r.Steps); n > 0 {
+			if t := r.Steps[n-1].At; t.After(last) {
+				last = t
+			}
 		}
 	}
 	return time.Since(last) > idleThreshold

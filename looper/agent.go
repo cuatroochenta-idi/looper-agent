@@ -8,8 +8,8 @@
 // Basic usage:
 //
 //	provider := openai.NewProvider(os.Getenv("OPENAI_API_KEY"))
-//	agent := looper.NewAgent(provider, "You are a helpful assistant",
-//	    looper.NewTool(SearchInput{}, searchFn, looper.ToolConfig{
+//	agent := looper.MustNewAgent(provider, "You are a helpful assistant",
+//	    tool.MustNewTool(SearchInput{}, searchFn, looper.ToolConfig{
 //	        Name: "web_search", Description: "Search the web",
 //	    }),
 //	)

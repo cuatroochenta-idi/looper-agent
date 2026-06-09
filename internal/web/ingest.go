@@ -132,6 +132,7 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 				r.Input = d.Input
 				r.Status = RunRunning
 				r.StartedAt = started
+				r.LastSeenAt = started
 				r.EndedAt = time.Time{}
 				r.Output = ""
 				r.Turns = 0
@@ -161,6 +162,7 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 				Input:            d.Input,
 				Status:           RunRunning,
 				StartedAt:        started,
+				LastSeenAt:       started,
 				Steps:            initialSteps,
 			})
 		}
@@ -246,6 +248,41 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "unknown event type: "+ev.Type, http.StatusBadRequest)
 		return
+	}
+
+	// Propagate liveness up the run tree, then fan out to ancestor topics.
+	// Every event refreshes LastSeenAt on the emitting run AND all its
+	// ancestors, so the stuck-run sweeper treats a busy sub-agent as keeping
+	// its whole parent chain alive — a long-running child no longer makes the
+	// main run look stuck/failed. A parent's detail/chat-trace pane renders its
+	// sub-agents' traces inline but only listens on TopicRun(its own id), so we
+	// also publish each ancestor topic to re-render those panes. Cycle-guarded.
+	liveAt := ev.Ts
+	if liveAt.IsZero() {
+		liveAt = time.Now()
+	}
+	seen := map[string]bool{}
+	for cur := ev.RunID; cur != ""; {
+		if seen[cur] {
+			break
+		}
+		seen[cur] = true
+		parent := ""
+		found := false
+		s.store.Update(cur, func(r *RunRecord) {
+			found = true
+			if liveAt.After(r.LastSeenAt) {
+				r.LastSeenAt = liveAt
+			}
+			parent = r.ParentRunID
+		})
+		if !found {
+			break
+		}
+		if cur != ev.RunID {
+			topics = append(topics, TopicRun(cur))
+		}
+		cur = parent
 	}
 
 	s.hub.Publish(topics...)

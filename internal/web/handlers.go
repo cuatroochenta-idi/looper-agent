@@ -42,7 +42,6 @@ func (s *Server) handleChatsPage(w http.ResponseWriter, r *http.Request) {
 	page(w, r, "Chats — Looper Agent", "/chats", ChatsPage(view))
 }
 
-
 // ─── Partials (datastar-SSE patches) ─────────────────────────────────────────
 
 func (s *Server) partialDashboard(w http.ResponseWriter, r *http.Request) {
@@ -419,7 +418,7 @@ func (s *Server) sidebarData(filter, query, selectedID string, tr TimeRange) Sid
 	// Loose runs: newest first.
 	sort.Slice(loose, func(i, j int) bool { return loose[i].StartedAt.After(loose[j].StartedAt) })
 
-	allN, run, done, errN := s.store.Counts()
+	allN, run, done, errN, unknownN := s.store.Counts()
 	var selected *RunRecord
 	if selectedID != "" {
 		selected = s.store.Find(selectedID)
@@ -433,16 +432,22 @@ func (s *Server) sidebarData(filter, query, selectedID string, tr TimeRange) Sid
 			selected = loose[0]
 		}
 	}
+	// Rollups span the full store, not the time-filtered slice — a sub-agent
+	// could fall just outside the window yet still belong to a visible parent.
+	everything := s.store.All()
+	rollups := buildRollups(everything, childrenByParent(everything))
 	return SidebarData{
-		Groups:     groups,
-		Loose:      loose,
-		Selected:   selected,
-		Filter:     filter,
-		Query:      query,
-		CountAll:   allN,
-		CountRun:   run,
-		CountDone:  done,
-		CountError: errN,
+		Groups:       groups,
+		Loose:        loose,
+		Selected:     selected,
+		Filter:       filter,
+		Query:        query,
+		CountAll:     allN,
+		CountRun:     run,
+		CountDone:    done,
+		CountError:   errN,
+		CountUnknown: unknownN,
+		Rollups:      rollups,
 	}
 }
 
@@ -472,6 +477,11 @@ func (s *Server) chatSidebarData(filter, query, selectedID string, tr TimeRange)
 		matched = append(matched, r)
 	}
 
+	// Rollups span the full store so a parent bubble shows the cost of
+	// sub-agents that may sit outside the active time window.
+	everything := s.store.All()
+	rollups := buildRollups(everything, childrenByParent(everything))
+
 	byID := map[string]*ChatConversation{}
 	for _, r := range matched {
 		sid := r.SessionID
@@ -493,6 +503,8 @@ func (s *Server) chatSidebarData(filter, query, selectedID string, tr TimeRange)
 		case RunError:
 			conv.HasError = true
 		}
+		model := RunModelLabel(r)
+		rollup := rollups[r.ID]
 		// Each run is one user turn + one agent turn. Emit both bubbles —
 		// previously we picked one of the two, which dropped the user input
 		// after reload (run_start ingest does not carry a user_input step).
@@ -508,6 +520,7 @@ func (s *Server) chatSidebarData(filter, query, selectedID string, tr TimeRange)
 		if userText != "" {
 			conv.Messages = append(conv.Messages, ChatMessage{
 				Run: r, Association: ChatUser, Text: userText, StatusClass: statusClass,
+				Model: model, Rollup: rollup,
 			})
 		}
 		// Agent reply: final Output if the run finished; otherwise accumulate
@@ -526,6 +539,9 @@ func (s *Server) chatSidebarData(filter, query, selectedID string, tr TimeRange)
 		}
 		conv.Messages = append(conv.Messages, ChatMessage{
 			Run: r, Association: ChatAgent, Text: agentText, StatusClass: statusClass,
+			Model: model, Rollup: rollup,
+			SubAgentCount:   rollup.SubCount,
+			SubAgentRunning: rollup.SubRunning,
 		})
 		conv.TotalUSD += r.TotalUSD
 		if r.Project != "" && conv.Project == "" {
@@ -546,7 +562,7 @@ func (s *Server) chatSidebarData(filter, query, selectedID string, tr TimeRange)
 		return latestTime(conversations[i]).After(latestTime(conversations[j]))
 	})
 
-	allN, run, done, errN := s.store.Counts()
+	allN, run, done, errN, unknownN := s.store.Counts()
 
 	var selected *RunRecord
 	if selectedID != "" {
@@ -562,6 +578,7 @@ func (s *Server) chatSidebarData(filter, query, selectedID string, tr TimeRange)
 		CountRun:      run,
 		CountDone:     done,
 		CountError:    errN,
+		CountUnknown:  unknownN,
 	}
 }
 
@@ -625,20 +642,61 @@ func (s *Server) detailData(run *RunRecord) DetailData {
 	if !run.EndedAt.IsZero() {
 		tl.EndAt = run.EndedAt
 	}
-	// Index every child run by the tool call that spawned it. The lookup is
-	// scoped to children of this run only; cross-run spawns aren't a thing.
-	spawned := map[string][]*RunRecord{}
-	for _, r := range s.store.All() {
-		if r.ParentRunID == run.ID && r.ParentToolCallID != "" {
-			spawned[r.ParentToolCallID] = append(spawned[r.ParentToolCallID], r)
-		}
+	all := s.store.All()
+	childIndex := childrenByParent(all)
+	rollups := buildRollups(all, childIndex)
+	// Build the whole spawned sub-tree so the trace can expand sub-agents
+	// inline. visited guards against a malformed parent/child cycle.
+	visited := map[string]bool{run.ID: true}
+	spawned := buildSpawnTree(run.ID, childIndex, rollups, visited)
+	// Aggregate usage live from the turns so the header shows real tokens +
+	// per-model breakdown during the run. Fall back to the run-level totals for
+	// traces whose per-step usage was trimmed (where the live agg would be 0).
+	usage := usageFromTimeline(tl, run.Providers)
+	if !usage.HasTokens() && (run.InputTokens > 0 || run.OutputTokens > 0) {
+		usage.InTokens = run.InputTokens
+		usage.OutTokens = run.OutputTokens
+		usage.CachedTokens = run.CachedTokens
 	}
 	return DetailData{
 		Run:               run,
 		Timeline:          tl,
 		Live:              run.Status == RunRunning,
 		SpawnedByToolCall: spawned,
+		RunRollup:         rollups[run.ID],
+		Usage:             usage,
 	}
+}
+
+// buildSpawnTree returns the sub-agent runs spawned by parentRunID, keyed by the
+// tool call that spawned them, each with its own timeline + recursively-built
+// children. The rollups map is shared (it covers every run) and visited breaks
+// any parent/child cycle.
+func buildSpawnTree(parentRunID string, childIndex map[string][]*RunRecord, rollups map[string]CostRollup, visited map[string]bool) map[string][]*SpawnedRun {
+	kids := childIndex[parentRunID]
+	if len(kids) == 0 {
+		return nil
+	}
+	out := map[string][]*SpawnedRun{}
+	for _, child := range kids {
+		if child.ParentToolCallID == "" || visited[child.ID] {
+			continue
+		}
+		visited[child.ID] = true
+		tl := BuildTimeline(child.Steps)
+		if !child.EndedAt.IsZero() {
+			tl.EndAt = child.EndedAt
+		}
+		out[child.ParentToolCallID] = append(out[child.ParentToolCallID], &SpawnedRun{
+			Run:      child,
+			Timeline: tl,
+			Live:     child.Status == RunRunning,
+			Rollup:   rollups[child.ID],
+			Model:    RunModelLabel(child),
+			Children: buildSpawnTree(child.ID, childIndex, rollups, visited),
+		})
+	}
+	return out
 }
 
 // ─── Render helpers ──────────────────────────────────────────────────────────

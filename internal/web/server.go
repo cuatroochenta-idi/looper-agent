@@ -7,11 +7,11 @@ import (
 )
 
 // stuckRunMaxIdle is the cap on how long a run may stay "running" with no
-// new step events before the sweeper auto-finalizes it as errored. Picked
-// to be longer than any reasonable LLM turn so legitimate slow calls
-// aren't killed, but short enough that a dead process clears within
-// minutes instead of hanging the panel forever.
-const stuckRunMaxIdle = 3 * time.Minute
+// new step events before the sweeper finalizes it as "unknown". Picked to be
+// comfortably longer than any reasonable LLM turn (incl. slow tool calls and
+// long sub-agent fan-outs) so legitimate work isn't discarded, while still
+// clearing a dead process out of the "running" filter within minutes.
+const stuckRunMaxIdle = 10 * time.Minute
 
 // stuckRunSweepInterval is how often the background sweeper runs.
 const stuckRunSweepInterval = 30 * time.Second
@@ -83,13 +83,16 @@ func (s *Server) runStuckRunSweeper() {
 		topics = append(topics, TopicSidebar, TopicChats)
 		for _, id := range finalized {
 			topics = append(topics, TopicRun(id))
-			if s.storeDir != "" {
+		}
+		// Publish first — waking the UI must not wait on disk I/O.
+		s.hub.Publish(topics...)
+		if s.storeDir != "" {
+			for _, id := range finalized {
 				if r := s.store.Find(id); r != nil {
 					_ = writeRunFile(s.storeDir, r)
 				}
 			}
 		}
-		s.hub.Publish(topics...)
 	}
 }
 

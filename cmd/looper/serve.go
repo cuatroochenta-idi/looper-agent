@@ -59,7 +59,15 @@ func serveCmd(args []string) {
 	log.Printf("Store directory : %s", *storeDir)
 	log.Printf("Provider        : %s", providerLabel())
 
-	httpServer := &http.Server{Addr: addr, Handler: srv.Handler()}
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: srv.Handler(),
+		// No WriteTimeout: it would kill the long-lived SSE streams. Each SSE
+		// write is individually bounded inside the web package instead.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	// Start the server. If it stops on its own (port conflict, etc.) we still
 	// want to surface it.

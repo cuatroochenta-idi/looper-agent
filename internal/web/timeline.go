@@ -64,13 +64,13 @@ func looksLikeToolError(content string) bool {
 
 // TurnNode aggregates everything that happened in one agentic turn.
 type TurnNode struct {
-	Index     int
-	StartAt   time.Time
-	LLMCall   *TimelineStep
-	ToolNodes []ToolCallNode
-	Final     *TimelineStep
-	Error     *TimelineStep
-	Reasoning string
+	Index         int
+	StartAt       time.Time
+	LLMCall       *TimelineStep
+	ToolNodes     []ToolCallNode
+	Final         *TimelineStep
+	Error         *TimelineStep
+	Reasoning     string
 	AssistantText string
 	HasTokens     bool
 	InTokens      int
@@ -337,15 +337,19 @@ type DashboardData struct {
 }
 
 type SidebarData struct {
-	Groups     []SessionGroup
-	Loose      []*RunRecord
-	Selected   *RunRecord
-	Filter     string
-	Query      string
-	CountAll   int
-	CountRun   int
-	CountDone  int
-	CountError int
+	Groups       []SessionGroup
+	Loose        []*RunRecord
+	Selected     *RunRecord
+	Filter       string
+	Query        string
+	CountAll     int
+	CountRun     int
+	CountDone    int
+	CountError   int
+	CountUnknown int
+	// Rollups maps every visible run ID to its cost rollup (own + sub-agents)
+	// so cards can show the aggregated total without re-walking the store.
+	Rollups map[string]CostRollup
 }
 
 type SessionGroup struct {
@@ -388,10 +392,19 @@ func (g SessionGroup) Contains(runID string) bool {
 }
 
 type DetailData struct {
-	Run               *RunRecord
-	Timeline          RunTimeline
-	Live              bool
-	SpawnedByToolCall map[string][]*RunRecord
+	Run      *RunRecord
+	Timeline RunTimeline
+	Live     bool
+	// SpawnedByToolCall maps a tool call ID to the sub-agent runs it spawned,
+	// each carrying its own timeline + nested children so the trace can expand
+	// the whole sub-tree inline instead of navigating away.
+	SpawnedByToolCall map[string][]*SpawnedRun
+	// RunRollup is this run's cost/tokens including all descendant sub-agents.
+	RunRollup CostRollup
+	// Usage is this run's own token totals + per-model breakdown, aggregated
+	// live from the timeline turns (so it is populated during the run, not
+	// only at run_end).
+	Usage RunUsage
 }
 
 type RunsViewData struct {
@@ -434,6 +447,7 @@ type ChatSidebarData struct {
 	CountRun      int
 	CountDone     int
 	CountError    int
+	CountUnknown  int
 }
 
 type ChatConversation struct {
@@ -451,6 +465,14 @@ type ChatMessage struct {
 	Association ChatAssociation
 	Text        string
 	StatusClass string
+	// Model is a compact label of the model(s) this run used (RunModelLabel).
+	Model string
+	// Rollup is the run's cost/tokens including spawned sub-agents.
+	Rollup CostRollup
+	// SubAgentCount / SubAgentRunning summarise the sub-agent runs this run
+	// spawned, so the agent bubble can flag them without opening the trace.
+	SubAgentCount   int
+	SubAgentRunning int
 }
 
 type ChatAssociation string

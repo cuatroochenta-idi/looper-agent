@@ -54,9 +54,8 @@ templ detailHeader(data DetailData) {
 				<span class="dot"></span>
 				{ string(data.Run.Status) }
 				if data.Live {
-					<span class="badge-live">
+					<span class="badge-live" title="live · auto-refreshing">
 						<span class="spin-ring"></span>
-						refreshing
 					</span>
 				}
 			</span>
@@ -80,20 +79,31 @@ templ detailHeader(data DetailData) {
 		</div>
 		<div class="metric-row">
 			<div class="metric"><span class="lbl">turns</span><span class="val">{ fmt.Sprintf("%d", data.Run.Turns) }</span></div>
-			<div class="metric"><span class="lbl">cost</span><span class="val success">${ fmt.Sprintf("%.5f", data.Run.TotalUSD) }</span></div>
-			<div class="metric"><span class="lbl">input</span><span class="val">{ fmt.Sprintf("%d", data.Run.InputTokens) }</span></div>
-			<div class="metric"><span class="lbl">output</span><span class="val">{ fmt.Sprintf("%d", data.Run.OutputTokens) }</span></div>
-			if data.Run.CachedTokens > 0 {
-				<div class="metric"><span class="lbl">cached</span><span class="val">{ fmt.Sprintf("%d", data.Run.CachedTokens) }</span></div>
+			<div class="metric">
+				<span class="lbl">cost{ rollupCostLbl(data.RunRollup) }</span>
+				<span class="val success">${ fmt.Sprintf("%.5f", data.RunRollup.TotalUSD()) }</span>
+			</div>
+			<div class="metric"><span class="lbl">input</span><span class="val">{ fmt.Sprintf("%d", data.Usage.InTokens) }</span></div>
+			<div class="metric"><span class="lbl">output</span><span class="val">{ fmt.Sprintf("%d", data.Usage.OutTokens) }</span></div>
+			if data.Usage.CachedTokens > 0 {
+				<div class="metric"><span class="lbl">cached</span><span class="val">{ fmt.Sprintf("%d", data.Usage.CachedTokens) }</span></div>
 			}
 			<div class="metric"><span class="lbl">latency</span><span class="val">{ PrettyDuration(data.Timeline.Duration()) }</span></div>
 			if data.Run.FallbackCalls > 0 {
 				<div class="metric"><span class="lbl">fallback</span><span class="val warn">{ fmt.Sprintf("%d call%s", data.Run.FallbackCalls, pluralS(data.Run.FallbackCalls)) }</span></div>
 			}
 		</div>
-		if len(data.Run.Providers) > 1 || (len(data.Run.Providers) == 1 && data.Run.FallbackCalls > 0) {
+		if data.RunRollup.HasSubs() {
+			<div class="rollup-note">
+				<span class="rollup-arrow">↳</span>
+				incl. <b>{ fmt.Sprintf("%d", data.RunRollup.SubCount) }</b> sub-agent{ pluralS(data.RunRollup.SubCount) }:
+				<b>+${ fmt.Sprintf("%.5f", data.RunRollup.SubUSD) }</b> · <b>+{ fmt.Sprintf("%d", data.RunRollup.SubTokens) }</b> tok
+				<span class="rollup-self">self ${ fmt.Sprintf("%.5f", data.RunRollup.SelfUSD) } · { fmt.Sprintf("%d", data.RunRollup.SelfTokens) } tok</span>
+			</div>
+		}
+		if len(data.Usage.ByModel) > 0 {
 			<div class="provider-breakdown">
-				<div class="section-label">providers · { fmt.Sprintf("%d", len(data.Run.Providers)) }</div>
+				<div class="section-label">models · { fmt.Sprintf("%d", len(data.Usage.ByModel)) }</div>
 				<table class="providers-table">
 					<thead>
 						<tr>
@@ -106,7 +116,7 @@ templ detailHeader(data DetailData) {
 						</tr>
 					</thead>
 					<tbody>
-						for _, p := range data.Run.Providers {
+						for _, p := range data.Usage.ByModel {
 							<tr>
 								<td>
 									{ p.Provider }
@@ -116,9 +126,15 @@ templ detailHeader(data DetailData) {
 								</td>
 								<td>{ p.Model }</td>
 								<td>{ fmt.Sprintf("%d", p.Calls) }</td>
-								<td>{ fmt.Sprintf("%d", p.InputTokens) }</td>
-								<td>{ fmt.Sprintf("%d", p.OutputTokens) }</td>
-								<td>${ fmt.Sprintf("%.5f", p.TotalUSD) }</td>
+								<td>{ fmt.Sprintf("%d", p.InTokens) }</td>
+								<td>{ fmt.Sprintf("%d", p.OutTokens) }</td>
+								<td>
+									if p.HasUSD {
+										${ fmt.Sprintf("%.5f", p.USD) }
+									} else {
+										<span style="color:var(--text-muted)">&mdash;</span>
+									}
+								</td>
 							</tr>
 						}
 					</tbody>
@@ -128,7 +144,7 @@ templ detailHeader(data DetailData) {
 	</div>
 }
 
-templ TraceTree(tl RunTimeline, live bool, spawned map[string][]*RunRecord) {
+templ TraceTree(tl RunTimeline, live bool, spawned map[string][]*SpawnedRun) {
 	<div class="trace">
 		<div class="section-label">trace · { fmt.Sprintf("%d", len(tl.Turns)) } turn{ pluralS(len(tl.Turns)) }</div>
 		if tl.UserInput != nil {
@@ -183,7 +199,7 @@ templ userInputNode(s TimelineStep) {
 	</details>
 }
 
-templ turnNode(turn TurnNode, tl RunTimeline, inFlight bool, spawned map[string][]*RunRecord) {
+templ turnNode(turn TurnNode, tl RunTimeline, inFlight bool, spawned map[string][]*SpawnedRun) {
 	<details class={ "node", templ.KV("tn-active", inFlight) } open>
 		<summary>
 			<span class="caret">▸</span>
@@ -211,6 +227,14 @@ templ turnNode(turn TurnNode, tl RunTimeline, inFlight bool, spawned map[string]
 					<span class="live-pill" title="this turn is in flight">
 						<span class="spin-ring"></span>
 						thinking
+					</span>
+				}
+				if turnModelShort(turn) != "" {
+					<span class="turn-model" title={ turnProviderTitle(turn) }>
+						if turn.Fallback {
+							<span class="turn-model-fb" title="answered via fallback">↪</span>
+						}
+						{ turnModelShort(turn) }
 					</span>
 				}
 				if turn.HasTokens {
@@ -322,7 +346,7 @@ templ llmCallNode(s TimelineStep, turn TurnNode, inFlight bool) {
 	</details>
 }
 
-templ toolNode(tn ToolCallNode, tl RunTimeline, children []*RunRecord) {
+templ toolNode(tn ToolCallNode, tl RunTimeline, children []*SpawnedRun) {
 	{{ endAt := tn.Call.At }}
 	if tn.Result != nil {
 		{{ endAt = tn.Result.At }}
@@ -428,45 +452,70 @@ templ toolNode(tn ToolCallNode, tl RunTimeline, children []*RunRecord) {
 	</details>
 }
 
-// spawnedRuns renders a strip of nested cards for every sub-agent run that
-// this tool call kicked off. Click loads the child run into the main detail
-// pane — same datastar pattern as the sidebar cards.
-templ spawnedRuns(children []*RunRecord) {
+// spawnedRuns renders the sub-agent runs a tool call kicked off. Each is a
+// collapsible node: the summary is a mini status card, and expanding it renders
+// the child's full trace inline (recursively, so deeper sub-agents nest too)
+// instead of navigating away from the parent. An "open full ↗" link still
+// swaps the main pane to the child for a focused view.
+templ spawnedRuns(children []*SpawnedRun) {
 	<div class="spawned-runs">
 		<div class="spawned-label">
 			<span class="spawned-arrow">↳</span>
 			{ fmt.Sprintf("spawned %d sub-agent run%s", len(children), pluralS(len(children))) }
 		</div>
-		for _, r := range children {
-			<a class={ "spawn-card", "s-" + string(r.Status) }
-				href={ templ.URL("/runs/" + r.ID) }
-				data-on:click__prevent={ "$selected = '" + r.ID + "'; @get('/partials/runs/" + r.ID + "/pane')" }>
-				<span class="spawn-bar"></span>
-				<div class="spawn-content">
-					<div class="spawn-row1">
-						<span class={ "spawn-status", "s-" + string(r.Status) }>
-							<span class="dot"></span>{ string(r.Status) }
-						</span>
-						<span class="spawn-id mono">{ ShortID(r.ID) }</span>
-					</div>
-					<div class="spawn-input">{ Truncate(r.Input, 90) }</div>
-					<div class="spawn-meta">
-						if r.Status == RunRunning {
-							<span class="spin-ring"></span>
-							<span>running…</span>
-						} else {
-							<span><b>{ fmt.Sprintf("%d", r.Turns) }</b>&thinsp;turns</span>
-							<span class="sep">·</span>
-							<span><b>${ fmt.Sprintf("%.4f", r.TotalUSD) }</b></span>
-							<span class="sep">·</span>
-							<span><b>{ fmt.Sprintf("%d", r.Tokens) }</b>&thinsp;tk</span>
-						}
-						<span class="spawn-open">open →</span>
-					</div>
-				</div>
-			</a>
+		for _, c := range children {
+			@spawnedRunNode(c)
 		}
 	</div>
+}
+
+templ spawnedRunNode(c *SpawnedRun) {
+	<details class={ "spawn-node", "s-" + string(c.Run.Status) } open?={ c.Live }>
+		<summary>
+			<span class="caret">▸</span>
+			<span class="spawn-bar"></span>
+			<span class={ "spawn-status", "s-" + string(c.Run.Status) }>
+				<span class="dot"></span>{ string(c.Run.Status) }
+			</span>
+			if c.Model != "" {
+				<span class="turn-model">{ c.Model }</span>
+			}
+			<span class="spawn-node-input">{ Truncate(c.Run.Input, 90) }</span>
+			<span class="spawn-node-meta">
+				if c.Run.Status == RunRunning {
+					<span class="spin-ring" title="running"></span>
+				}
+				<span><b>{ fmt.Sprintf("%d", c.Run.Turns) }</b>&thinsp;turns</span>
+				<span class="sep">·</span>
+				<span title={ rollupTitle(c.Rollup) }><b>${ fmt.Sprintf("%.4f", c.Rollup.TotalUSD()) }</b>
+					if c.Rollup.HasSubs() {
+						<span class="rollup-mini">+sub</span>
+					}
+				</span>
+				<span class="sep">·</span>
+				<span><b>{ fmt.Sprintf("%d", c.Rollup.TotalTokens()) }</b>&thinsp;tk</span>
+				<span class="spawn-id mono">{ ShortID(c.Run.ID) }</span>
+			</span>
+		</summary>
+		<div class="spawn-node-body">
+			<div class="spawn-node-toolbar">
+				<a class="spawn-open"
+					href={ templ.URL("/runs/" + c.Run.ID) }
+					data-on:click__prevent={ "$selected = '" + c.Run.ID + "'; @get('/partials/runs/" + c.Run.ID + "/pane')" }>open full ↗</a>
+			</div>
+			@TraceTree(c.Timeline, c.Live, c.Children)
+		</div>
+	</details>
+}
+
+// rollupTitle is the hover tooltip for a sub-agent's cost figure, breaking the
+// rolled-up total into own vs nested-sub-agent spend.
+func rollupTitle(c CostRollup) string {
+	if !c.HasSubs() {
+		return fmt.Sprintf("$%.5f · %d tok", c.SelfUSD, c.SelfTokens)
+	}
+	return fmt.Sprintf("self $%.5f (%d tok) · +%d sub-agent%s $%.5f (%d tok)",
+		c.SelfUSD, c.SelfTokens, c.SubCount, pluralS(c.SubCount), c.SubUSD, c.SubTokens)
 }
 
 templ jsonBlock(raw string) {
@@ -536,6 +585,26 @@ func pluralS(n int) string {
 	return "s"
 }
 
+// rollupCostLbl appends " · total" to the cost metric label when a run's cost
+// includes sub-agents, so it's clear the headline number is the rolled-up
+// figure and not just the parent's own spend.
+func rollupCostLbl(c CostRollup) string {
+	if c.HasSubs() {
+		return " · total"
+	}
+	return ""
+}
+
+// turnModelShort is the compact model label shown on the turn summary line —
+// the model name when known, falling back to the provider. Empty for legacy
+// traces with no provenance.
+func turnModelShort(t TurnNode) string {
+	if t.Model != "" {
+		return t.Model
+	}
+	return t.Provider
+}
+
 // turnProviderTitle composes a hover tooltip for the provider badge shown
 // next to llm_call. Surfaces the same info the per-step trace already
 // stores but in a format readable at a glance — "openai · gpt-x · ****a2Fn ·
@@ -567,14 +636,11 @@ templ ChatTraceBody(data DetailData) {
 	<div class="chat-trace-inner fade-in">
 		<div class="chat-trace-bar">
 			<div class="chat-trace-bar-left">
-				<span class={ "badge", "badge-" + string(data.Run.Status) }>
-					<span class="dot"></span>{ string(data.Run.Status) }
-				</span>
 				<span class="mono" style="font-size:11.5px;color:var(--text-muted);">{ ShortID(data.Run.ID) }</span>
 			</div>
 			<div class="chat-trace-bar-right">
-				if data.Run.TotalUSD > 0 {
-					<span class="chat-trace-cost">${ fmt.Sprintf("%.4f", data.Run.TotalUSD) }</span>
+				if data.RunRollup.TotalUSD() > 0 {
+					<span class="chat-trace-cost">${ fmt.Sprintf("%.4f", data.RunRollup.TotalUSD()) }</span>
 				}
 				<button class="chat-trace-close" type="button"
 					title="Close detail panel" aria-label="Close detail panel"

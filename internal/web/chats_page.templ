@@ -102,6 +102,9 @@ templ chatFilterPills(data ChatSidebarData) {
 		@chatFilterPill("running", "running", data.CountRun)
 		@chatFilterPill("completed", "done", data.CountDone)
 		@chatFilterPill("error", "failed", data.CountError)
+		if data.CountUnknown > 0 {
+			@chatFilterPill("unknown", "unknown", data.CountUnknown)
+		}
 	</div>
 }
 
@@ -213,6 +216,14 @@ templ chatMsgBubble(msg ChatMessage) {
 				if stuck {
 					<span class="msg-stuck-hint" title="no events received for over a minute — likely stuck">stuck?</span>
 				}
+				if msg.SubAgentCount > 0 {
+					<span class="msg-subagents" title="sub-agents spawned by this run — open the trace to expand their steps inline">
+						⤷ { fmt.Sprintf("%d", msg.SubAgentCount) } sub-agent{ pluralS(msg.SubAgentCount) }
+						if msg.SubAgentRunning > 0 {
+							<span class="msg-subagents-live"><span class="spin-ring"></span>{ fmt.Sprintf("%d live", msg.SubAgentRunning) }</span>
+						}
+					</span>
+				}
 			</div>
 			<div class="msg-body">
 				if msg.Text == "" && msg.Run.Status == RunRunning {
@@ -234,7 +245,15 @@ templ chatMsgBubble(msg ChatMessage) {
 			<div class="msg-foot">
 				<span><b>{ fmt.Sprintf("%d", msg.Run.Turns) }</b> turn{ pluralS(msg.Run.Turns) }</span>
 				<span class="sep">·</span>
-				<span><b>${ fmt.Sprintf("%.4f", msg.Run.TotalUSD) }</b></span>
+				<span title={ rollupTitle(msg.Rollup) }><b>${ fmt.Sprintf("%.4f", msg.Rollup.TotalUSD()) }</b>
+					if msg.Rollup.HasSubs() {
+						<span class="rollup-mini">+sub</span>
+					}
+				</span>
+				if msg.Model != "" {
+					<span class="sep">·</span>
+					<span class="turn-model">{ msg.Model }</span>
+				}
 				<span class="sep">·</span>
 				<span class="mono">{ msg.Run.StartedAt.Format("15:04:05") }</span>
 				if msg.Run.Status == RunRunning {
