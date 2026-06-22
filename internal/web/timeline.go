@@ -333,7 +333,12 @@ type DashboardData struct {
 	TotalCost   float64
 	TotalTokens int
 	AvgTurns    float64
-	Recent      []*RunRecord
+	// Recent lists top-level runs only (sub-agents are surfaced via their
+	// parent row's badge, as in the chats/traces lists).
+	Recent []*RunRecord
+	// Rollups maps each recent run ID to its cost rollup (own + sub-agents) so a
+	// row can flag how many sub-agents it spawned.
+	Rollups map[string]CostRollup
 }
 
 type SidebarData struct {
@@ -458,6 +463,11 @@ type ChatConversation struct {
 	TotalUSD   float64
 	HasRunning bool
 	HasError   bool
+	// SubAgentCount / SubAgentRunning tally the sub-agent runs spawned within
+	// this conversation. They render nested under their parent's bubble rather
+	// than as standalone bubbles, so the conversation card surfaces the count.
+	SubAgentCount   int
+	SubAgentRunning int
 }
 
 type ChatMessage struct {

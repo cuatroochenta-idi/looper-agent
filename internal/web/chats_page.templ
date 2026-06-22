@@ -44,8 +44,18 @@ templ ChatsPage(data ChatViewData) {
 				data-init="@get('/sse/chat-thread')">
 				@chatThreadContent(data.Sidebar)
 			</div>
+			// A SINGLE SSE subscription owns the trace panel: when $selected
+			// changes, this element (re)issues the @get. Because every
+			// (re)subscription fires from this SAME element, datastar auto-cancels
+			// the previous /sse/chat-trace stream before opening the next — so
+			// selecting bubble A then B never leaves A's stream alive to clobber
+			// B's panel on its next tick (a per-bubble @get can't cancel across
+			// distinct elements). The -filter scopes the trigger to $selected so
+			// typing in the search box or other signal churn doesn't re-subscribe.
 			<div class="chat-trace-panel" id="chat-trace"
-				data-class="{open: $selected !== ''}">
+				data-class="{open: $selected !== ''}"
+				data-on-signal-patch-filter="{include: /^selected$/}"
+				data-on-signal-patch="$selected !== '' ? @get('/sse/chat-trace/' + $selected) : null">
 			</div>
 		</section>
 	</div>
@@ -84,7 +94,7 @@ templ ChatSidebarBody(data ChatSidebarData) {
 					} else if data.Filter != "" {
 						No "{ data.Filter }" runs.
 					} else {
-						No chats yet. Trigger one via <code class="kbd">POST /api/run</code>.
+						No chats yet.
 					}
 				</p>
 			</div>
@@ -147,6 +157,14 @@ templ convListItem(conv ChatConversation) {
 			<span><b>{ fmt.Sprintf("%d", runs) }</b> turn{ pluralS(runs) }</span>
 			<span class="sep">·</span>
 			<span>${ fmt.Sprintf("%.4f", conv.TotalUSD) }</span>
+			if conv.SubAgentCount > 0 {
+				<span class="subagents-chip" title="sub-agents spawned in this conversation — open a run's trace to expand their steps inline">
+					<span class="arr">⤷</span>{ fmt.Sprintf("%d", conv.SubAgentCount) } sub-agent{ pluralS(conv.SubAgentCount) }
+					if conv.SubAgentRunning > 0 {
+						<span class="subagents-chip-live"><span class="spin-ring"></span>{ fmt.Sprintf("%d live", conv.SubAgentRunning) }</span>
+					}
+				</span>
+			}
 		</div>
 		<div class="conv-item-preview">
 			for i, msg := range conv.Messages {
@@ -199,9 +217,7 @@ templ chatMsgBubble(msg ChatMessage) {
 	{{ stuck := msg.Run.IsStuck(stuckBubbleHint) }}
 	<div class={ "msg-row", templ.KV("is-agent", msg.Association == ChatAgent), templ.KV("is-user", msg.Association == ChatUser), msg.StatusClass }
 		data-class={ "{highlight: $selected === '" + msg.Run.ID + "'}" }
-		data-on:click={
-			"$selected = '" + msg.Run.ID + "'; " +
-			"@get('/sse/chat-trace/" + msg.Run.ID + "')" }>
+		data-on:click={ "$selected = '" + msg.Run.ID + "'" }>
 		<div class="msg-bubble">
 			<div class="msg-head">
 				<span class="msg-role">

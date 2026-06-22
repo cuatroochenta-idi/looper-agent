@@ -4,6 +4,45 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.1.0] — 2026-06-22
+
+Debug panel: sub-agents are now presented consistently as nested work, and the
+chat trace no longer fights the operator's scroll. No API changes.
+
+### Added
+
+- Sub-agent indicator badge (`⤷ N sub-agents · M live`) on the parent run's
+  card across all three list surfaces — dashboard "Recent runs", the chats
+  conversation list, and the traces sidebar — so delegated work is visible at a
+  glance without opening the run.
+
+### Changed
+
+- Sub-agent runs are no longer listed as standalone entries in the chat thread,
+  the chats conversation list, or the dashboard "Recent runs" feed. They nest
+  under their parent (whose trace still expands them inline) and are summarized
+  by the new badge. Conversation grouping now keys a run by its **root
+  ancestor**, so a session-less parent and the sub-agents it spawns stay a
+  single conversation instead of splitting into an empty "ghost".
+- Removed the read-only "Trigger a run" explainer panel from the dashboard and
+  trimmed the "trigger via `POST /api/run`" hints from the empty states.
+
+### Fixed
+
+- **Chat trace no longer jumps to the top on live updates.** The scroll
+  container now carries a stable per-run id, so datastar morphs it in place
+  across SSE patches instead of replacing the node (which reset `scrollTop` to
+  0 under rapid event bursts). Switching to a different run still resets to the
+  top, as expected.
+- **A stale trace stream can no longer hijack the panel.** Selecting one chat
+  bubble then another used to leave the first run's SSE stream alive; on its
+  next tick it patched the shared panel back to the old run (and, with the
+  per-run id, reset scroll). A single `$selected`-keyed subscription now owns
+  the trace panel, so the previous run's stream is cancelled on switch.
+- Conversation-card cost and sub-agent counts now derive from the same
+  full-store rollup as the in-thread bubbles, so the card and the bubbles always
+  agree — previously they could diverge under an active time/status filter.
+
 ## [v1.0.0] — 2026-06-09
 
 First stable release. The public API surface (`looper`, `loop`, `provider`,
@@ -44,4 +83,5 @@ without a major version bump.
 - Parallel tool execution: tools with `ToolConfig.Parallel = true` run
   concurrently within a turn; sequential tools run afterwards in order.
 
+[v1.1.0]: https://github.com/cuatroochenta-idi/looper-agent/releases/tag/v1.1.0
 [v1.0.0]: https://github.com/cuatroochenta-idi/looper-agent/releases/tag/v1.0.0

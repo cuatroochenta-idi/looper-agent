@@ -179,6 +179,12 @@ nav.tabs .nav-link.active { background: var(--bg-elevated); color: var(--text); 
 .msg-subagents-live { display: inline-flex; align-items: center; gap: 3px; color: var(--info); font-weight: 700; }
 .msg-subagents-live .spin-ring { width: 7px; height: 7px; border-width: 1.2px; }
 
+/* ── Sub-agent chip on listing cards (chat conversation list + traces sidebar) ── */
+.subagents-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; font-size: 9px; font-weight: 600; border-radius: 999px; color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border)); white-space: nowrap; line-height: 1.6; }
+.subagents-chip .arr { opacity: 0.75; font-weight: 700; }
+.subagents-chip-live { display: inline-flex; align-items: center; gap: 3px; color: var(--info); font-weight: 700; }
+.subagents-chip-live .spin-ring { width: 7px; height: 7px; border-width: 1.2px; }
+
 /* ── Unknown status — neutral grey, no pulse (idle ≠ failure) ──────── */
 .badge-unknown { color: var(--text-muted); background: color-mix(in srgb, var(--text-muted) 14%, transparent); }
 .cx-status.s-unknown { color: var(--text-muted); }
@@ -541,7 +547,7 @@ nav.tabs .nav-link.active { background: var(--bg-elevated); color: var(--text); 
 .conv-error-dot + .conv-live-dot { margin-left: 4px; }
 .conv-item-meta {
 	font-size: 10px; color: var(--text-muted); font-variant-numeric: tabular-nums;
-	display: flex; gap: 4px;
+	display: flex; gap: 4px; flex-wrap: wrap; align-items: center;
 }
 .conv-item-meta b { color: var(--text); font-weight: 600; }
 .conv-item-meta .sep { color: var(--text-faint); }

@@ -38,8 +38,7 @@ templ SidebarBody(data SidebarData) {
 					} else if data.Filter != "" {
 						No "{ data.Filter }" runs.
 					} else {
-						No runs yet. Trigger one via <code class="kbd">POST /api/run</code>
-						or run <code class="kbd">looper serve -- &lt;cmd&gt;</code>.
+						No runs yet.
 					}
 				</p>
 			</div>
@@ -167,6 +166,14 @@ templ sidebarCard(run *RunRecord, depth int, rollups map[string]CostRollup) {
 				<span><b>{ fmt.Sprintf("%d", rollup.TotalTokens()) }</b>&thinsp;tk</span>
 				<span class="sep">·</span>
 				<span class="mono">{ run.StartedAt.Format("15:04:05") }</span>
+				if rollup.HasSubs() {
+					<span class="subagents-chip" title="sub-agents spawned by this run — nested below and expandable inline in the trace">
+						<span class="arr">⤷</span>{ fmt.Sprintf("%d", rollup.SubCount) } sub-agent{ pluralS(rollup.SubCount) }
+						if rollup.SubRunning > 0 {
+							<span class="subagents-chip-live"><span class="spin-ring"></span>{ fmt.Sprintf("%d live", rollup.SubRunning) }</span>
+						}
+					</span>
+				}
 			</div>
 		</div>
 	</a>

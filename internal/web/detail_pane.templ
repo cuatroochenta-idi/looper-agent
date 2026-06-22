@@ -62,9 +62,11 @@ templ detailHeader(data DetailData) {
 			<span class="run-id-pill">
 				<span class="lbl">run</span>
 				<span class="mono">{ data.Run.ID }</span>
-				<button class="copy-btn"
+				<button
+					class="copy-btn"
 					data-on:click={ copyExpr(data.Run.ID) }
-					title="Copy run ID">⧉</button>
+					title="Copy run ID"
+				>⧉</button>
 			</span>
 			<span style="font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;">
 				started { data.Run.StartedAt.Format("15:04:05.000") }
@@ -211,7 +213,7 @@ templ turnNode(turn TurnNode, tl RunTimeline, inFlight bool, spawned map[string]
 					<span class="preview">
 						{ fmt.Sprintf("%d tool call%s", len(turn.ToolNodes), pluralS(len(turn.ToolNodes))) }
 						if turn.AssistantText != "" {
-							 · "{ Truncate(turn.AssistantText, 90) }"
+							· "{ Truncate(turn.AssistantText, 90) }"
 						}
 					</span>
 				} else if turn.AssistantText != "" {
@@ -299,7 +301,8 @@ templ llmCallNode(s TimelineStep, turn TurnNode, inFlight bool) {
 				<span class="fallback-badge" title="this turn was answered via the FailoverProvider fallback path">↪ fallback</span>
 			}
 			if turn.Provider != "" {
-				<span class="turn-provider" title={ turnProviderTitle(turn) }>{ turn.Provider }
+				<span class="turn-provider" title={ turnProviderTitle(turn) }>
+					{ turn.Provider }
 					if turn.Model != "" {
 						/{ turn.Model }
 					}
@@ -399,16 +402,22 @@ templ toolNode(tn ToolCallNode, tl RunTimeline, children []*SpawnedRun) {
 		</summary>
 		<div class="node-body">
 			<div class="tab-bar">
-				<button class="tab-btn"
+				<button
+					class="tab-btn"
 					data-on:click={ tabSetExpr(cid, "args") }
-					data-class={ "{active: " + tabIsExpr(cid, "args", defaultTab) + "}" }>arguments</button>
+					data-class={ "{active: " + tabIsExpr(cid, "args", defaultTab) + "}" }
+				>arguments</button>
 				if tn.Result != nil {
-					<button class="tab-btn"
+					<button
+						class="tab-btn"
 						data-on:click={ tabSetExpr(cid, "result") }
-						data-class={ "{active: " + tabIsExpr(cid, "result", defaultTab) + "}" }>result</button>
-					<button class="tab-btn"
+						data-class={ "{active: " + tabIsExpr(cid, "result", defaultTab) + "}" }
+					>result</button>
+					<button
+						class="tab-btn"
 						data-on:click={ tabSetExpr(cid, "both") }
-						data-class={ "{active: " + tabIsExpr(cid, "both", defaultTab) + "}" }>both</button>
+						data-class={ "{active: " + tabIsExpr(cid, "both", defaultTab) + "}" }
+					>both</button>
 				}
 			</div>
 			<div data-show={ tabIsExpr(cid, "args", defaultTab) }>
@@ -487,7 +496,8 @@ templ spawnedRunNode(c *SpawnedRun) {
 				}
 				<span><b>{ fmt.Sprintf("%d", c.Run.Turns) }</b>&thinsp;turns</span>
 				<span class="sep">·</span>
-				<span title={ rollupTitle(c.Rollup) }><b>${ fmt.Sprintf("%.4f", c.Rollup.TotalUSD()) }</b>
+				<span title={ rollupTitle(c.Rollup) }>
+					<b>${ fmt.Sprintf("%.4f", c.Rollup.TotalUSD()) }</b>
 					if c.Rollup.HasSubs() {
 						<span class="rollup-mini">+sub</span>
 					}
@@ -499,9 +509,11 @@ templ spawnedRunNode(c *SpawnedRun) {
 		</summary>
 		<div class="spawn-node-body">
 			<div class="spawn-node-toolbar">
-				<a class="spawn-open"
+				<a
+					class="spawn-open"
 					href={ templ.URL("/runs/" + c.Run.ID) }
-					data-on:click__prevent={ "$selected = '" + c.Run.ID + "'; @get('/partials/runs/" + c.Run.ID + "/pane')" }>open full ↗</a>
+					data-on:click__prevent={ "$selected = '" + c.Run.ID + "'; @get('/partials/runs/" + c.Run.ID + "/pane')" }
+				>open full ↗</a>
 			</div>
 			@TraceTree(c.Timeline, c.Live, c.Children)
 		</div>
@@ -521,7 +533,9 @@ func rollupTitle(c CostRollup) string {
 templ jsonBlock(raw string) {
 	<div class="block-wrap">
 		<button class="copy-btn" data-on:click={ copyExpr(raw) }>⧉</button>
-		<pre class="block is-json">@templ.Raw(string(PrettyJSON(raw)))</pre>
+		<pre class="block is-json">
+			@templ.Raw(string(PrettyJSON(raw)))
+		</pre>
 	</div>
 }
 
@@ -633,7 +647,15 @@ func turnProviderTitle(t TurnNode) string {
 // data-init that would open a second /sse/runs/{id} subscription competing
 // for the same DOM (which is what kept the trace stale before).
 templ ChatTraceBody(data DetailData) {
-	<div class="chat-trace-inner fade-in">
+	// The scroll container carries a per-run id. On a live tick the stream
+	// re-renders this fragment with the SAME id, so idiomorph morphs it in place
+	// and the operator's scroll position is kept. On a run SWITCH the id differs,
+	// so idiomorph replaces the node and the newly selected run starts at the top
+	// instead of inheriting the previous run's scroll offset. A single
+	// $selected-keyed stream owns #chat-trace (see ChatsPage), so the previous
+	// run's stream is cancelled on switch and a stale run can't patch this panel
+	// after the operator has moved on.
+	<div id={ "chat-trace-scroll-" + data.Run.ID } class="chat-trace-inner fade-in">
 		<div class="chat-trace-bar">
 			<div class="chat-trace-bar-left">
 				<span class="mono" style="font-size:11.5px;color:var(--text-muted);">{ ShortID(data.Run.ID) }</span>
@@ -642,9 +664,13 @@ templ ChatTraceBody(data DetailData) {
 				if data.RunRollup.TotalUSD() > 0 {
 					<span class="chat-trace-cost">${ fmt.Sprintf("%.4f", data.RunRollup.TotalUSD()) }</span>
 				}
-				<button class="chat-trace-close" type="button"
-					title="Close detail panel" aria-label="Close detail panel"
-					data-on:click="$selected = ''">×</button>
+				<button
+					class="chat-trace-close"
+					type="button"
+					title="Close detail panel"
+					aria-label="Close detail panel"
+					data-on:click="$selected = ''"
+				>×</button>
 			</div>
 		</div>
 		<div id="detail-pane">

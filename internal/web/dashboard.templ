@@ -27,41 +27,37 @@ templ DashboardBody(data DashboardData) {
 		if len(data.Recent) > 0 {
 			<div style="display:flex;flex-direction:column;gap:4px;">
 				for _, r := range data.Recent {
-					@recentRow(r)
+					@recentRow(r, data.Rollups[r.ID])
 				}
 			</div>
 		} else {
 			<div class="empty-state" style="padding:32px;">
 				<span class="icon">∅</span>
-				<p>No runs yet. Trigger one below.</p>
+				<p>No runs yet.</p>
 			</div>
 		}
 	</div>
-
-	<div class="card">
-		<div class="ttl"><span>Trigger a run</span></div>
-		<p style="font-size:12.5px;color:var(--text-muted);line-height:1.65;margin-bottom:12px;">
-			This panel is <b>read-only</b>. Runs are submitted programmatically — via the CLI or the REST endpoint.
-			The framework streams every step (LLM call, tool call, tool result, final) and persists it for inspection.
-		</p>
-		<pre class="block is-json" style="font-size:11.5px;">curl -X POST http://localhost:9090/api/run \
-    --data-urlencode "input=What is 12+30 and 7+5? Then echo 'hola'."</pre>
-		<p style="margin-top:10px;font-size:11.5px;color:var(--text-muted);">
-			Tools available in the demo agent: <span class="kbd">add</span> <span class="kbd">get_clock</span> <span class="kbd">echo</span>.
-			Switch provider via <span class="kbd">LOOPER_PROVIDER=openai|anthropic|google</span>.
-		</p>
-	</div>
 }
 
-templ recentRow(r *RunRecord) {
+templ recentRow(r *RunRecord, rollup CostRollup) {
 	<a href={ templ.URL("/runs/" + r.ID) }
 		style="display:grid;grid-template-columns:90px 1fr 90px 90px 80px;gap:14px;align-items:center;padding:10px 12px;border-radius:8px;text-decoration:none;color:var(--text);border:1px solid transparent;transition:background 100ms ease, border-color 100ms ease;"
 		onmouseover="this.style.background='var(--bg-hover)';this.style.borderColor='var(--border)';"
 		onmouseout="this.style.background='transparent';this.style.borderColor='transparent';">
 		<span class={ "cx-status", "s-" + string(r.Status) }><span class="dot"></span>{ string(r.Status) }</span>
-		<span style="font-size:12.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{ r.Input }</span>
+		<span style="display:flex;align-items:center;gap:8px;min-width:0;">
+			<span style="font-size:12.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto;min-width:0;">{ r.Input }</span>
+			if rollup.HasSubs() {
+				<span class="subagents-chip" title="sub-agents spawned by this run — open the trace to expand their steps inline">
+					<span class="arr">⤷</span>{ fmt.Sprintf("%d", rollup.SubCount) } sub-agent{ pluralS(rollup.SubCount) }
+					if rollup.SubRunning > 0 {
+						<span class="subagents-chip-live"><span class="spin-ring"></span>{ fmt.Sprintf("%d live", rollup.SubRunning) }</span>
+					}
+				</span>
+			}
+		</span>
 		<span style="font-size:11.5px;color:var(--text-muted);font-variant-numeric:tabular-nums;text-align:right;"><b style="color:var(--text);">{ fmt.Sprintf("%d", r.Turns) }</b> turns</span>
-		<span style="font-size:11.5px;color:var(--success);font-variant-numeric:tabular-nums;text-align:right;font-family:'JetBrains Mono',monospace;"><b>${ fmt.Sprintf("%.4f", r.TotalUSD) }</b></span>
+		<span style="font-size:11.5px;color:var(--success);font-variant-numeric:tabular-nums;text-align:right;font-family:'JetBrains Mono',monospace;"><b>${ fmt.Sprintf("%.4f", rollup.TotalUSD()) }</b></span>
 		<span class="mono" style="font-size:10.5px;color:var(--text-faint);text-align:right;">{ ShortID(r.ID) }</span>
 	</a>
 }

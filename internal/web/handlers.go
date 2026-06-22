@@ -328,10 +328,25 @@ func (s *Server) dashboardData(tr TimeRange) DashboardData {
 	if len(runs) > 0 {
 		avg = float64(turns) / float64(len(runs))
 	}
-	// Recent first.
-	recent := make([]*RunRecord, 0, len(runs))
+	// Rollups span the full store so a top-level row reflects the cost + count
+	// of sub-agents that may sit outside the active time window.
+	everything := s.store.All()
+	rollups := buildRollups(everything, childrenByParent(everything))
+	inStore := make(map[string]bool, len(everything))
+	for _, r := range everything {
+		inStore[r.ID] = true
+	}
+	// Recent first — top-level runs only. Sub-agents are surfaced via the badge
+	// on their parent's row (matching the chats/traces lists) instead of as
+	// standalone rows; an orphan whose parent isn't stored still shows so it
+	// isn't lost.
+	recent := make([]*RunRecord, 0, 12)
 	for i := len(runs) - 1; i >= 0; i-- {
-		recent = append(recent, runs[i])
+		r := runs[i]
+		if r.ParentRunID != "" && inStore[r.ParentRunID] {
+			continue
+		}
+		recent = append(recent, r)
 		if len(recent) >= 12 {
 			break
 		}
@@ -342,6 +357,7 @@ func (s *Server) dashboardData(tr TimeRange) DashboardData {
 		TotalTokens: tok,
 		AvgTurns:    avg,
 		Recent:      recent,
+		Rollups:     rollups,
 	}
 }
 
@@ -476,18 +492,51 @@ func (s *Server) chatSidebarData(filter, query, selectedID string, tr TimeRange)
 		}
 		matched = append(matched, r)
 	}
+	// Index the visible set so we can tell whether a sub-agent's parent is also
+	// on screen — only then do we nest it under the parent instead of emitting
+	// it as a standalone bubble (an orphan whose parent is filtered out still
+	// renders normally so it isn't lost).
+	matchedIDs := make(map[string]bool, len(matched))
+	for _, r := range matched {
+		matchedIDs[r.ID] = true
+	}
 
 	// Rollups span the full store so a parent bubble shows the cost of
 	// sub-agents that may sit outside the active time window.
 	everything := s.store.All()
 	rollups := buildRollups(everything, childrenByParent(everything))
 
+	// byIDFull indexes the whole store so a conversation key can be derived from
+	// a run's ROOT ancestor. SessionID and ParentRunID are independent on the
+	// wire: a sub-agent inherits the parent's LOOPER_SESSION_ID only if the
+	// parent had one. Keying purely on the run's own session/id would split a
+	// sessionless parent and its sub-agent into a real conversation plus an empty
+	// ghost (and misattribute the sub-agent's cost to the ghost). Walking to the
+	// root ancestor lands every descendant in the parent's conversation.
+	byIDFull := make(map[string]*RunRecord, len(everything))
+	for _, r := range everything {
+		byIDFull[r.ID] = r
+	}
+	convKeyFor := func(r *RunRecord) string {
+		cur := r
+		seen := map[string]bool{}
+		for cur.ParentRunID != "" && !seen[cur.ID] {
+			seen[cur.ID] = true
+			p := byIDFull[cur.ParentRunID]
+			if p == nil {
+				break // orphan: key by the deepest ancestor we can see
+			}
+			cur = p
+		}
+		if cur.SessionID != "" {
+			return cur.SessionID
+		}
+		return cur.ID
+	}
+
 	byID := map[string]*ChatConversation{}
 	for _, r := range matched {
-		sid := r.SessionID
-		if sid == "" {
-			sid = r.ID
-		}
+		sid := convKeyFor(r)
 		conv, ok := byID[sid]
 		if !ok {
 			conv = &ChatConversation{ID: sid, ShortID: ShortID(sid), Project: r.Project}
@@ -502,6 +551,19 @@ func (s *Server) chatSidebarData(filter, query, selectedID string, tr TimeRange)
 			conv.HasRunning = true
 		case RunError:
 			conv.HasError = true
+		}
+		if r.Project != "" && conv.Project == "" {
+			conv.Project = r.Project
+		}
+		// Sub-agent runs whose parent is also visible here are not rendered as
+		// standalone bubbles — they belong nested under the parent (whose bubble
+		// flags the count and whose trace expands their steps inline). Their cost
+		// and count reach the conversation card through the parent's rollup below,
+		// so the card and the parent bubble always agree. A sub-agent whose parent
+		// is filtered out of view falls through and renders normally so it isn't
+		// lost.
+		if r.ParentRunID != "" && matchedIDs[r.ParentRunID] {
+			continue
 		}
 		model := RunModelLabel(r)
 		rollup := rollups[r.ID]
@@ -543,10 +605,12 @@ func (s *Server) chatSidebarData(filter, query, selectedID string, tr TimeRange)
 			SubAgentCount:   rollup.SubCount,
 			SubAgentRunning: rollup.SubRunning,
 		})
-		conv.TotalUSD += r.TotalUSD
-		if r.Project != "" && conv.Project == "" {
-			conv.Project = r.Project
-		}
+		// Aggregate from the rollup (own + descendants, full store) so the
+		// conversation card's cost and sub-agent chip match the sum of the
+		// per-bubble figures rendered in the thread.
+		conv.TotalUSD += rollup.TotalUSD()
+		conv.SubAgentCount += rollup.SubCount
+		conv.SubAgentRunning += rollup.SubRunning
 	}
 
 	conversations := make([]ChatConversation, 0, len(byID))
