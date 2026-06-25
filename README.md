@@ -118,7 +118,7 @@ func main() {
 | `looper.Agent` | The runnable agent — combines provider, system prompt, tools, options. |
 | `provider.LLMProvider` | Interface every LLM implements. First-party: `openai`, `anthropic`, `google`. |
 | `*tool.Tool` | A single callable tool. Built from a Go struct (input schema) + a function. |
-| `skill.Skill` | A group of tools plus a prompt fragment. |
+| `skill.Skill` | A group of tools plus a prompt fragment. Embed `skill.Lazy` to load it on demand via `load_skill` — see [Skills](#skills-eager-and-lazy). |
 | `toolkit.Toolkit` | A group of tools that share internal state (DB handle, rate limiter, …). |
 | `*message.History` | The conversation log. Thread-safe, JSON-serializable. |
 | `loop.AgentLoop` | The internal iterative engine. Most users won't touch it directly. |
@@ -248,6 +248,53 @@ tool.NewToolFromRawSchema(name, description, rawJSONSchema,
     func(ctx context.Context, args json.RawMessage) (string, error) { ... },
 )
 ```
+
+---
+
+## Skills (eager and lazy)
+
+A **skill** groups related tools with a prompt fragment under one API:
+
+```go
+type Skill interface {
+    Name() string                       // stable id (used by load_skill)
+    Title() string                      // short label for the skills index
+    Summary() string                    // one-liner: when/why to use it
+    RegisterTools(reg *tool.ToolRegistry)
+    PromptFragment() string             // the full, detailed instructions
+}
+```
+
+**Eager skill** — pass any `Skill` to `NewAgent`. Its tools and full
+`PromptFragment` are in the system prompt and tool list from the first turn.
+
+**Lazy skill (`load_skill`)** — embed `skill.Lazy` to make the same skill
+load-on-demand. Until the model loads it, only its `Title` + `Summary` appear
+in a compact `## Skills (load on demand …)` index in the system prompt; its
+tools stay hidden and its full `PromptFragment` is withheld. This keeps the
+base context small — heavy, situational instructions only enter the window when
+the model decides the skill is relevant.
+
+```go
+type TranslatorSkill struct {
+    skill.Lazy        // ← marker: same Skill API, now loaded on demand
+    TargetLang string
+}
+// Name/Title/Summary/RegisterTools/PromptFragment as for any Skill.
+
+agent := looper.MustNewAgent(provider, systemPrompt,
+    CalculatorSkill{},                       // eager
+    TranslatorSkill{TargetLang: "Catalan"},  // lazy
+)
+```
+
+When any lazy skill is present, `NewAgent` auto-injects a native `load_skill`
+tool. The model calls `load_skill skill="translator"`; the tool result carries
+that skill's full `PromptFragment` plus the list of unlocked tools, and from
+that turn on its tools are exposed. Activation is read structurally from the
+conversation history (the recorded tool-call, not text), so it survives resume.
+A user-supplied [`WithDynamicTools`](#withdynamictools--per-turn-allowlist)
+takes precedence over the built-in gating. See `examples/19_lazy_skills`.
 
 ---
 
@@ -854,6 +901,7 @@ The `examples/` folder is a graduated tour:
 | 16 | `16_history_truncate` | `TruncateByTurns` preserving tool pairs |
 | 17 | `17_tool_choice` | `ToolChoiceRequired` forcing tool use on a turn |
 | 18 | `18_preexecute` | `tool.WithPreExecute` + `RejectWithHint` for business validation |
+| 19 | `19_lazy_skills` | Eager `Skill` + lazy `LazySkill` (`skill.Lazy`) loaded via `load_skill` |
 
 Run any of them with `go run ./examples/12_multimodal` (after sourcing
 `.env.local` with the required API keys).

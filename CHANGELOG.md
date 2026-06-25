@@ -4,6 +4,45 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.2.0] — 2026-06-25
+
+Lazy skills: a skill can now be loaded on demand by the model instead of always
+sitting in the system prompt, keeping the base context small. Minor and
+additive in practice — the only contract change is two new methods on the
+`skill.Skill` interface, and every in-repo implementer was updated.
+
+### Added
+
+- Unified skill content API: `skill.Skill` now also requires `Title() string`
+  and `Summary() string` alongside the existing `Name()`, `RegisterTools()`,
+  and `PromptFragment()`. Every skill — eager or lazy — exposes the same API;
+  `Title`/`Summary` feed the compact skills index, `PromptFragment` carries the
+  full instructions.
+- `skill.LazySkill` — a `Skill` plus an unembeddable marker. Embed the new
+  `skill.Lazy` struct into a skill to make it load-on-demand. Until the model
+  loads it, only its `Title` + `Summary` appear in a `## Skills (load on demand
+  …)` index in the system prompt; its tools stay hidden and its full
+  `PromptFragment` is withheld.
+- Auto-injected `load_skill` tool. When an agent is built with one or more lazy
+  skills, `NewAgent` registers a native `load_skill` tool. Calling it with a
+  skill name validates against the lazy set (erroring with the list of valid
+  names on a miss) and returns that skill's full `PromptFragment` plus the list
+  of unlocked tools, delivered as a tool result into history (never the base
+  prompt).
+- Activation gating read from history. A `DynamicToolsFunc` exposes the base
+  tools (eager + standalone + `load_skill`) on every turn and turns a lazy
+  skill's tools on once a `load_skill` call for it appears in the conversation.
+  Detection is structural (assistant tool-calls, not text markers), order is
+  preserved for prompt-cache stability, and a user-supplied `WithDynamicTools`
+  takes precedence. Lazy-skill tools are also registered in the main registry,
+  so a stray call before loading degrades gracefully rather than erroring.
+
+### Changed
+
+- Existing skill implementers were updated to the unified API (e.g. example
+  `06_skill_and_toolkit`'s `TranslatorSkill` gained `Title`/`Summary`). New
+  example `19_lazy_skills` demonstrates an eager skill alongside a lazy one.
+
 ## [v1.1.1] — 2026-06-25
 
 Streaming robustness for OpenAI-compatible servers that append non-standard SSE

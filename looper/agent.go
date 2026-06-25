@@ -39,21 +39,21 @@ import (
 // a provider, system prompt, tools, skills, and configuration into a
 // runnable agent with observability, cost tracking, and hook support.
 type Agent struct {
-	provider            provider.LLMProvider
-	systemPrompt        func(context.Context) string
-	tools               []*tool.Tool
-	skills              []skill.Skill
-	loops               *loop.AgentLoop
-	hooks               *loop.HookManager
-	memoryMgr           memory.MemoryManager
-	telemetry           *telemetry.CostTracker
-	pauseMgr            *pause.PauseManager
-	costModel           *telemetry.CostModel
-	maxTurns            int
-	maxRetries          int
-	model               string
-	temperature         float64
-	reasoning           *provider.ReasoningConfig
+	provider               provider.LLMProvider
+	systemPrompt           func(context.Context) string
+	tools                  []*tool.Tool
+	skills                 []skill.Skill
+	loops                  *loop.AgentLoop
+	hooks                  *loop.HookManager
+	memoryMgr              memory.MemoryManager
+	telemetry              *telemetry.CostTracker
+	pauseMgr               *pause.PauseManager
+	costModel              *telemetry.CostModel
+	maxTurns               int
+	maxRetries             int
+	model                  string
+	temperature            float64
+	reasoning              *provider.ReasoningConfig
 	validator              loop.TurnValidator
 	validatorMaxRetries    int
 	dynamicTools           loop.DynamicToolsFunc
@@ -96,13 +96,32 @@ func NewAgent(p provider.LLMProvider, systemPrompt any, components ...any) (*Age
 	reg := tool.NewToolRegistry()
 	var (
 		skills []skill.Skill
-		opts   []AgentOption
+		lazies []skill.LazySkill
+		// lazyTools maps a lazy skill's name to the tools it registers, so the
+		// gating function can flip them on once the skill is loaded.
+		lazyTools = map[string][]*tool.Tool{}
+		opts      []AgentOption
 	)
 
 	for _, comp := range components {
 		switch c := comp.(type) {
 		case *tool.Tool:
 			reg.Add(c)
+		// LazySkill embeds Skill; this case MUST come before skill.Skill —
+		// Go's type switch takes the first matching case, so a lazy skill
+		// would otherwise be handled as an eager one.
+		case skill.LazySkill:
+			lazies = append(lazies, c)
+			// Capture this skill's tools in isolation so gating can identify
+			// them, then add them to the main registry so they remain
+			// executable even before the skill is loaded (graceful
+			// degradation: a stray call still works rather than erroring).
+			tmp := tool.NewToolRegistry()
+			c.RegisterTools(tmp)
+			lazyTools[c.Name()] = tmp.Tools()
+			for _, t := range tmp.Tools() {
+				reg.Add(t)
+			}
 		case skill.Skill:
 			skills = append(skills, c)
 			c.RegisterTools(reg)
@@ -113,6 +132,15 @@ func NewAgent(p provider.LLMProvider, systemPrompt any, components ...any) (*Age
 		default:
 			return nil, fmt.Errorf("looper: unsupported component type %T", comp)
 		}
+	}
+
+	// When there are lazy skills, the model needs the load_skill tool to
+	// activate them. It is registered in the main registry so it is both
+	// executable and part of the stable tool order. Because it is not owned
+	// by any lazy skill, the gating below classifies it as a base tool, so it
+	// is always exposed.
+	if len(lazies) > 0 {
+		reg.Add(newLoadSkillTool(lazies))
 	}
 
 	tools := reg.Tools()
@@ -135,14 +163,39 @@ func NewAgent(p provider.LLMProvider, systemPrompt any, components ...any) (*Age
 		opt(a)
 	}
 
-	// Build the system prompt — skill fragments are concatenated lazily so a
-	// dynamic prompt func() keeps working.
+	// Build the system prompt — eager skill fragments are concatenated lazily
+	// so a dynamic prompt func() keeps working. Lazy skills contribute only
+	// their compact index (Title + Summary); their full PromptFragment is
+	// delivered via the load_skill tool result (into history), never the
+	// base prompt.
+	skillsIndex := lazySkillsIndex(lazies)
 	fullPrompt := func(ctx context.Context) string {
 		prompt := spFn(ctx)
 		for _, s := range skills {
 			prompt += "\n" + s.PromptFragment()
 		}
-		return prompt
+		return prompt + skillsIndex
+	}
+
+	// Wire lazy-skill gating: by default the loop exposes only the base tools
+	// (eager + standalone + load_skill) and turns each lazy skill's tools on
+	// once the model has loaded it. If the user already set a custom
+	// dynamicTools func (via WithDynamicTools), that takes precedence and
+	// we leave it untouched.
+	if len(lazies) > 0 && a.dynamicTools == nil {
+		lazyOwned := make(map[string]bool)
+		for _, ts := range lazyTools {
+			for _, t := range ts {
+				lazyOwned[t.Name()] = true
+			}
+		}
+		var base []*tool.Tool
+		for _, t := range tools {
+			if !lazyOwned[t.Name()] {
+				base = append(base, t)
+			}
+		}
+		a.dynamicTools = buildLazyGating(base, lazyTools, lazies, tools)
 	}
 
 	loopOpts := []loop.LoopOption{

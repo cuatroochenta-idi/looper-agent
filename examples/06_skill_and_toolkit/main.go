@@ -1,9 +1,9 @@
 // Example: composing an agent from a Toolkit and a Skill.
 //
 //   - Toolkit  — groups related tools that share internal state. Does NOT
-//                modify the system prompt.
+//     modify the system prompt.
 //   - Skill    — like a toolkit but ALSO appends a prompt fragment, giving the
-//                LLM thematic instructions for the new capability.
+//     LLM thematic instructions for the new capability.
 //
 // Here we build a `CalculatorToolkit` (math tools) and a `TranslatorSkill`
 // (translation tool + a "respond in <lang>" instruction).
@@ -74,6 +74,12 @@ type TranslatorSkill struct {
 
 func (s TranslatorSkill) Name() string { return "translator" }
 
+func (s TranslatorSkill) Title() string { return "Translator" }
+
+func (s TranslatorSkill) Summary() string {
+	return fmt.Sprintf("Translate the user's message into %s before answering.", s.TargetLang)
+}
+
 func (s TranslatorSkill) RegisterTools(reg *tool.ToolRegistry) {
 	target := strings.ToLower(s.TargetLang)
 	reg.Add(tool.MustNewTool(TranslateInput{},
@@ -105,8 +111,8 @@ func main() {
 
 	agent := looper.MustNewAgent(p,
 		"You are a helpful assistant.",
-		CalculatorToolkit{},                       // toolkit (no prompt fragment)
-		TranslatorSkill{TargetLang: "Catalan"},    // skill (adds a prompt fragment)
+		CalculatorToolkit{},                    // toolkit (no prompt fragment)
+		TranslatorSkill{TargetLang: "Catalan"}, // skill (adds a prompt fragment)
 	)
 
 	result, err := agent.Run(ctx,
