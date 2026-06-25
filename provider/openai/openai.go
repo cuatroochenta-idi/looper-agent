@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -344,6 +345,12 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		// it, rather than returning at finish_reason.
 		var finalChunk *openai.ChatCompletionChunk
 
+		// sawFinish records whether the model signalled completion via a
+		// finish_reason. Once set, the model's reply is whole; any error that
+		// surfaces afterwards is post-completion noise (see the stream.Err()
+		// handling below) rather than a truncated response.
+		var sawFinish bool
+
 		// Per-chunk handler. Factored out as a closure so the probed first
 		// chunk (above) and the rest of the stream go through the exact
 		// same branches — no risk of the two paths drifting.
@@ -400,6 +407,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 				if chunk.Choices[0].FinishReason != "" {
 					c := chunk
 					finalChunk = &c
+					sawFinish = true
 				}
 			}
 
@@ -428,8 +436,26 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		// content failure path is now handled by the synchronous probe
 		// above; this branch covers mid-stream errors (after at least
 		// one chunk has been emitted).
+		//
+		// Narrow exception — a JSON *syntax* error that surfaces AFTER the model
+		// already emitted a finish_reason. Some OpenAI-compatible servers (vLLM /
+		// NeuralWatt) append non-standard SSE *comment* frames (": energy …",
+		// ": cost …") after the usage chunk; openai-go's Stream wrapper turns each
+		// comment into an empty-Data event and runs json.Unmarshal("") on it,
+		// which returns *json.SyntaxError ("unexpected end of JSON input"). By
+		// that point the reply is already fully assembled from the pre-finish
+		// deltas, so this is post-completion noise. We drop ONLY this case:
+		//   - the error must be a *json.SyntaxError (a typed parse failure), and
+		//   - a finish_reason must have been seen (the reply is complete).
+		// Everything else still propagates: server "error" events, connection
+		// drops / network errors, and any malformed chunk that arrives mid-reply
+		// (before finish_reason — e.g. a truncated content delta).
 		if err := stream.Err(); err != nil {
-			final.Error = fmt.Errorf("openai stream: %w", err)
+			var syntaxErr *json.SyntaxError
+			trailingTelemetryNoise := sawFinish && errors.As(err, &syntaxErr)
+			if !trailingTelemetryNoise {
+				final.Error = fmt.Errorf("openai stream: %w", err)
+			}
 		}
 		// Provenance lives on the final chunk — same place Usage is set,
 		// which is where the loop attributes cost.

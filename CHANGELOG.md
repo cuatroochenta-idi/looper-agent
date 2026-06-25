@@ -4,6 +4,24 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.1.1] — 2026-06-25
+
+Streaming robustness for OpenAI-compatible servers that append non-standard SSE
+telemetry. No API changes.
+
+### Fixed
+
+- `provider/openai` `ChatStream` no longer fails a turn when the upstream sends
+  SSE *comment* frames (e.g. `: energy …`, `: cost …`) after the usage chunk —
+  as NeuralWatt / vLLM do. openai-go decodes each comment as an empty-data event
+  and `json.Unmarshal("")` returns a `*json.SyntaxError` ("unexpected end of
+  JSON input"); previously that surfaced as a spurious `network_error` and
+  killed the turn despite a fully-streamed reply. The drop is narrow and typed:
+  only a `*json.SyntaxError` that arrives *after* a `finish_reason` (reply
+  already complete) is ignored. Server `error` events, connection drops, and
+  any malformed chunk before `finish_reason` (a real truncation) still
+  propagate.
+
 ## [v1.1.0] — 2026-06-22
 
 Debug panel: sub-agents are now presented consistently as nested work, and the

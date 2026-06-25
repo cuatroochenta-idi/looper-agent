@@ -113,6 +113,125 @@ func TestChatStream_HappyPathStreamsContent(t *testing.T) {
 	}
 }
 
+// TestChatStream_ToleratesTrailingTelemetryComments reproduces the
+// NeuralWatt / vLLM streaming incompatibility: after the usage chunk the
+// server appends non-standard SSE *comment* frames (": energy …", ": cost …")
+// carrying telemetry, then "[DONE]". openai-go decodes each comment as an
+// empty-Data event and json.Unmarshal("") fails with "unexpected end of JSON
+// input". Because a finish_reason was already received, the model's reply is
+// complete, so the trailing error must be dropped — not propagated as a turn
+// failure. Without the fix, final.Error is non-nil and the whole turn dies
+// with a spurious network_error despite a fully-streamed answer.
+func TestChatStream_ToleratesTrailingTelemetryComments(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("ResponseWriter has no Flusher — httptest server expected to support flush")
+		}
+		writes := []string{
+			`data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hola"}}]}` + "\n\n",
+			`data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" mundo"}}]}` + "\n\n",
+			`data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+			`data: {"id":"x","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":2,"total_tokens":14}}` + "\n\n",
+			// Non-standard SSE comment frames appended by NeuralWatt after usage.
+			`: energy {"energy_joules":56.82,"avg_power_watts":5515.3}` + "\n\n",
+			`: cost {"request_cost_usd":7.9e-05,"allowance_remaining_usd":11.59}` + "\n\n",
+			"data: [DONE]\n\n",
+		}
+		for _, s := range writes {
+			_, _ = w.Write([]byte(s))
+			flusher.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	p := NewProvider("sk-test",
+		WithBaseURL(srv.URL),
+		WithModel("glm-x"),
+	)
+
+	ch, err := p.ChatStream(context.Background(), provider.LLMRequest{
+		Messages: []message.Message{message.NewUserMessage("hola")},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	var got strings.Builder
+	var final provider.StreamChunk
+	for c := range ch {
+		if c.IsFinal {
+			final = c
+			continue
+		}
+		got.WriteString(c.Content)
+	}
+	if got.String() != "Hola mundo" {
+		t.Errorf("content = %q, want %q", got.String(), "Hola mundo")
+	}
+	if !final.IsFinal {
+		t.Fatal("never received final chunk")
+	}
+	if final.Error != nil {
+		t.Errorf("final.Error = %v, want nil — trailing telemetry comments after finish_reason must not fail the turn", final.Error)
+	}
+	// Statistics must survive the swallowed error. NeuralWatt sends the usage
+	// chunk BEFORE the telemetry comment frames, so it is captured before the
+	// drop — token accounting (cost, budgets) stays intact even when the
+	// trailing parse error is ignored.
+	if final.Usage == nil {
+		t.Fatal("final.Usage = nil — usage stats must survive the dropped trailing error")
+	}
+	if final.Usage.InputTokens != 12 || final.Usage.OutputTokens != 2 {
+		t.Errorf("usage = %+v, want InputTokens=12 OutputTokens=2", final.Usage)
+	}
+}
+
+// TestChatStream_StillSurfacesRealErrorAfterFinish guards the precision of
+// the trailing-telemetry exception: the drop is gated on a *json.SyntaxError,
+// so a GENUINE error event that arrives after finish_reason (here a server
+// "error" frame, which openai-go reports as "received error while streaming",
+// not a syntax error) must still propagate. This is the "could other things
+// slip through?" guard — they must not.
+func TestChatStream_StillSurfacesRealErrorAfterFinish(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		writes := []string{
+			`data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hola"}}]}` + "\n\n",
+			`data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+			// A real server error AFTER finish_reason — must NOT be swallowed.
+			`data: {"error":{"message":"backend exploded","code":500}}` + "\n\n",
+			"data: [DONE]\n\n",
+		}
+		for _, s := range writes {
+			_, _ = w.Write([]byte(s))
+			flusher.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	p := NewProvider("sk-test", WithBaseURL(srv.URL), WithModel("glm-x"))
+	ch, err := p.ChatStream(context.Background(), provider.LLMRequest{
+		Messages: []message.Message{message.NewUserMessage("hola")},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	var final provider.StreamChunk
+	for c := range ch {
+		if c.IsFinal {
+			final = c
+		}
+	}
+	if final.Error == nil {
+		t.Fatal("final.Error = nil, want propagated server error — a real error after finish_reason must NOT be swallowed by the telemetry exception")
+	}
+}
+
 // TestChatStream_FailoverEngagesOnPreContentError is the integration
 // test: pair the fixed openai provider against FailoverProvider with a
 // scripted second inner. The 404 from the first inner must trigger a
