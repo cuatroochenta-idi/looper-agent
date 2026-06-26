@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/cuatroochenta-idi/looper-agent/memory"
@@ -1105,10 +1106,33 @@ func extractFinalResponseOutput(calls []message.ToolCall) (string, bool) {
 			Output json.RawMessage `json:"output"`
 		}
 		if err := json.Unmarshal(tc.Arguments, &args); err == nil && len(args.Output) > 0 {
-			return string(args.Output), true
+			return normalizeStructuredOutput(string(args.Output)), true
 		}
 	}
 	return "", false
+}
+
+// normalizeStructuredOutput repairs a double-encoded structured output. Some
+// models deliver the final_response `output` as a JSON STRING that itself
+// contains the JSON value (e.g. "{\"message\":...}") instead of the value
+// itself. When the payload is a JSON string that decodes to a JSON object or
+// array, one layer of string-encoding is peeled so RunResult.Output — and
+// every consumer reading it — sees the intended structured value rather than
+// an escaped blob. A genuine string answer (schema = plain string) is left
+// untouched.
+func normalizeStructuredOutput(out string) string {
+	trimmed := strings.TrimSpace(out)
+	if !strings.HasPrefix(trimmed, `"`) {
+		return out
+	}
+	var unquoted string
+	if err := json.Unmarshal([]byte(trimmed), &unquoted); err != nil {
+		return out
+	}
+	if inner := strings.TrimSpace(unquoted); strings.HasPrefix(inner, "{") || strings.HasPrefix(inner, "[") {
+		return unquoted
+	}
+	return out
 }
 
 // createFinalResponseTool builds the final_response tool. The input schema
