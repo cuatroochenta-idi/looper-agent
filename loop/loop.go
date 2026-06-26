@@ -342,7 +342,7 @@ func NewAgentLoop(p provider.LLMProvider, systemPrompt func(context.Context) str
 		hooks:        NewHookManager(),
 		maxTurns:     10,
 		maxRetries:   3,
-		temperature:  0.7,
+		temperature:  0,
 	}
 	for _, opt := range opts {
 		opt(l)

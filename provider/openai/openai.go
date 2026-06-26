@@ -160,7 +160,7 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 		// 128k cap — neither extreme is right, so the framework now
 		// stays out of the way.
 		maxTokens:   0,
-		temperature: 0.7,
+		temperature: 0,
 	}
 
 	for _, opt := range opts {
@@ -585,9 +585,16 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 	}
 
 	params := openai.ChatCompletionNewParams{
-		Messages:    openaiMessages,
-		Model:       shared.ChatModel(t.model),
-		Temperature: openai.Float(t.temperature),
+		Messages: openaiMessages,
+		Model:    shared.ChatModel(t.model),
+	}
+	// Only set temperature when one is configured. The zero value means
+	// "unset" — omit the field so the provider's own default applies. This
+	// is required by reasoning models (gpt-5.x, o-series) that reject any
+	// explicit temperature other than 1. Chat / ChatStream apply the same
+	// non-zero guard for the per-request override.
+	if t.temperature != 0 {
+		params.Temperature = openai.Float(t.temperature)
 	}
 	// Token cap is set by Chat / ChatStream, not here — they know the
 	// effective model after request-level overrides and route to either

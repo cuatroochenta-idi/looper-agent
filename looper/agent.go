@@ -154,7 +154,7 @@ func NewAgent(p provider.LLMProvider, systemPrompt any, components ...any) (*Age
 		costModel:    telemetry.NewCostModel(),
 		maxTurns:     10,
 		maxRetries:   3,
-		temperature:  0.7,
+		temperature:  0,
 	}
 
 	// Apply user-supplied options (memory, pause, model, temperature…) so they

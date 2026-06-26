@@ -4,6 +4,31 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.2.2] — 2026-06-26
+
+Temperature is now opt-in. Previously every request carried `temperature: 0.7`
+(the openai Translator baked the provider default unconditionally), which made
+reasoning models — gpt-5.x, o-series — fail with a 400 (`temperature does not
+support 0.7 … only the default (1) is supported`). Now temperature is omitted
+unless explicitly configured, so the provider's own default applies and
+reasoning models work out of the box.
+
+### Changed
+
+- `provider/openai` only sets `temperature` on a request when one is
+  configured (non-zero). The Translator no longer bakes the provider default
+  into every request.
+- Default temperature dropped from `0.7` to unset (`0`) in the openai provider,
+  the loop, and the agent. Set a value explicitly via `WithTemperature` /
+  `WithLoopTemperature` (or per-request `LLMRequest.Temperature`) to send it.
+  anthropic and google already gated temperature behind a non-zero check, so
+  they only change by no longer receiving the loop's `0.7` default.
+
+### Note
+
+A temperature of exactly `0` is treated as "unset" (omitted). Callers that
+relied on the implicit `0.7` should set it explicitly.
+
 ## [v1.2.1] — 2026-06-26
 
 API-reported cost. When an upstream gateway returns the actual price of a call
