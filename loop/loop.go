@@ -493,11 +493,11 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 		if l.model != "" {
 			req.Model = l.model
 		}
-		// Native structured output: when the provider supports it, hand
-		// it the schema directly. Non-capable providers (Anthropic) get
-		// nothing here and rely on the final_response tool we appended
-		// inside buildToolList.
-		if l.structuredOutput != nil && provider.SupportsNativeResponseFormat(l.provider) {
+		// Native structured output: only when the agent has no tools of its
+		// own (see useNativeResponseFormat). With tools present, structured
+		// output rides the final_response tool appended in buildToolList so
+		// the model can still emit ordinary tool calls.
+		if l.useNativeResponseFormat() {
 			req.ResponseSchema = l.structuredOutput
 		}
 
@@ -855,12 +855,12 @@ func toolErrorContent(name string, err error) string {
 // resolveSystemPrompt evaluates the system prompt function and appends
 // structured-output instructions when needed. The wording differs by path:
 //
-//   - Native response_format (OpenAI / Gemini): the provider enforces the
-//     schema server-side, so we just nudge the model toward returning
-//     plain JSON without any framing.
-//   - Tool-injection fallback (Anthropic): the model must invoke the
-//     framework-injected final_response tool — instruct it explicitly so
-//     it doesn't reply with prose.
+//   - Native response_format (tool-less agents on OpenAI / Gemini): the
+//     provider enforces the schema server-side, so we just nudge the model
+//     toward returning plain JSON without any framing.
+//   - Tool-injection path (Anthropic, or any agent that has tools): the
+//     model must invoke the framework-injected final_response tool —
+//     instruct it explicitly so it doesn't reply with prose.
 func (l *AgentLoop) resolveSystemPrompt(ctx context.Context) string {
 	if l.systemPrompt == nil {
 		return ""
@@ -869,7 +869,7 @@ func (l *AgentLoop) resolveSystemPrompt(ctx context.Context) string {
 
 	if l.structuredOutput != nil {
 		schemaStr := string(l.structuredOutput)
-		if provider.SupportsNativeResponseFormat(l.provider) {
+		if l.useNativeResponseFormat() {
 			prompt += fmt.Sprintf(
 				"\n\nReply with a single JSON object — no markdown, no prose, "+
 					"no leading commentary — matching this JSON Schema:\n%s",
@@ -1038,9 +1038,10 @@ func (l *AgentLoop) HookManager() *HookManager { return l.hooks }
 // buildToolList returns the tool list for the next LLM call. When a
 // DynamicToolsFunc is registered it is consulted with the current history
 // — its return value replaces the static tools. The structured-output
-// final_response tool is appended only when the provider does NOT support
-// native response_format: with native support there is no need for the
-// proxy tool, and double-binding (tool + schema) tends to confuse models.
+// final_response tool is appended unless we use native response_format (see
+// useNativeResponseFormat) — i.e. it is appended whenever the agent has tools
+// of its own, so structured output never has to be bound via response_format
+// alongside a tool list.
 //
 // A nil ctx or history is tolerated to keep callers that don't yet thread
 // them through working (the dynamic function should also be defensive).
@@ -1056,11 +1057,32 @@ func (l *AgentLoop) buildToolList(ctx context.Context, history *message.History)
 	tools := make([]*tool.Tool, len(base))
 	copy(tools, base)
 
-	if l.structuredOutput != nil && !provider.SupportsNativeResponseFormat(l.provider) {
+	if l.structuredOutput != nil && !l.useNativeResponseFormat() {
 		tools = append(tools, l.createFinalResponseTool())
 	}
 
 	return tools
+}
+
+// useNativeResponseFormat reports whether structured output should be
+// enforced via the provider's native response_format (true) or via the
+// injected final_response tool (false).
+//
+// Native response_format constrains EVERY completion to the output schema.
+// That is correct for a pure extraction agent (no tools of its own), but on
+// a tool-using agent it prevents the model from ever emitting a tool call:
+// strict OpenAI-compatible servers (vLLM/SGLang and the like) honour
+// response_format rigidly and fabricate a schema-shaped answer instead of
+// calling the tool. OpenAI proper happens to let tool calls take precedence,
+// but relying on that is a portability trap. So native is used ONLY when the
+// agent exposes no tools; otherwise structured output rides the
+// final_response tool, which composes cleanly with ordinary tool calls (the
+// approach frameworks like pydantic-ai take).
+func (l *AgentLoop) useNativeResponseFormat() bool {
+	if l.structuredOutput == nil || !provider.SupportsNativeResponseFormat(l.provider) {
+		return false
+	}
+	return len(l.tools) == 0 && l.dynamicTools == nil
 }
 
 // finalResponseInput is the internal schema for the final_response tool.
@@ -1411,7 +1433,7 @@ func (it *Iterator) run(ctx context.Context) {
 			Reasoning:    it.loop.reasoning,
 			ToolChoice:   it.loop.toolChoice,
 		}
-		if it.loop.structuredOutput != nil && provider.SupportsNativeResponseFormat(it.loop.provider) {
+		if it.loop.useNativeResponseFormat() {
 			req.ResponseSchema = it.loop.structuredOutput
 		}
 		if it.loop.model != "" {
