@@ -26,8 +26,8 @@ import (
 type StepType string
 
 const (
-	StepSystemPrompt   StepType = "system_prompt"
-	StepLLMCall        StepType = "llm_call"
+	StepSystemPrompt StepType = "system_prompt"
+	StepLLMCall      StepType = "llm_call"
 	// StepLLMResponse fires after the LLM call returns (or the streaming
 	// final chunk arrives) and carries the turn's provenance —
 	// ProviderID, ModelID, Fallback, Usage. Trace consumers use it to
@@ -322,6 +322,74 @@ func (it *Iterator) validateStructuredOrAbort(
 	return false, true
 }
 
+// gateStructuredClose runs the turn validator against a structured-output
+// close — i.e. the model ended the run by emitting the framework-injected
+// final_response tool. Without this gate the structured-output short-circuit
+// commits the close directly and the TurnValidator never sees it, so a
+// consumer-defined "you may not finish yet" rule is silently bypassed.
+//
+// On rejection it answers the otherwise-dangling final_response tool call with
+// the corrective hint as an error result. That serves two purposes at once:
+// it keeps the history provider-valid (an assistant message carrying
+// tool_calls MUST be followed by matching tool results or OpenAI/Anthropic
+// reject the next request with a 400), and it delivers the feedback in-band so
+// the model sees that its close was refused and why — no separate system
+// message, hence no ordering hazard between the assistant call and its result.
+//
+// Contract mirrors validateTurn: (proceed) accept the close, (abort) retry
+// budget spent — stop the run, otherwise re-prompt. A nil validator accepts
+// unconditionally, so validator-less consumers are unaffected.
+func (l *AgentLoop) gateStructuredClose(
+	ctx context.Context,
+	toolCalls []message.ToolCall,
+	final string,
+	history *message.History,
+	turn int,
+	failures *int,
+) (proceed, abort bool, out Outcome) {
+	if l.validator == nil {
+		return true, false, Outcome{OK: true}
+	}
+	out = l.validator.Validate(ctx, TurnSnapshot{
+		Turn:                 turn,
+		LastAssistantContent: final,
+		ToolCalls:            toolCalls,
+		History:              history,
+	})
+	if out.OK {
+		*failures = 0
+		return true, false, out
+	}
+	// Refuse the close in-band: every dangling tool call from this turn gets
+	// an error result carrying the reason/hint. final_response is the only
+	// expected call here, but answering all of them keeps history valid if a
+	// provider streamed extra calls alongside it.
+	rejection := closeRejectionResult(out)
+	for _, tc := range toolCalls {
+		history.AddToolResult(tc.ID, tc.Name, rejection, true)
+	}
+	if out.SkipBudget {
+		return false, false, out
+	}
+	if *failures < l.validatorMaxRetries {
+		*failures++
+		return false, false, out
+	}
+	return false, true, out
+}
+
+// closeRejectionResult renders a rejected close as the JSON body of the
+// final_response tool's error result. It is the model-facing explanation for
+// why the run was not allowed to finish.
+func closeRejectionResult(out Outcome) string {
+	b, _ := json.Marshal(map[string]any{
+		"ok":     false,
+		"reason": out.Reason,
+		"hint":   out.Hint,
+	})
+	return string(b)
+}
+
 // SetHookManager installs a pre-built hook manager (typically the one held by
 // the Agent so external callers can register hooks via agent.On). Replaces
 // the internal one created in NewAgentLoop.
@@ -475,6 +543,28 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 		// up to outputMaxRetries.
 		if l.structuredOutput != nil {
 			if out, ok := extractFinalResponseOutput(llmResp.ToolCalls); ok {
+				// Gate the close through the turn validator first (parity
+				// with the streaming Iterator path): a premature
+				// final_response is refused in-band and re-prompted, or the
+				// run aborts once the retry budget is spent.
+				_, abort, vout := l.gateStructuredClose(ctx, llmResp.ToolCalls, llmResp.Content, history, turn, &consecutiveValidatorFail)
+				if abort {
+					cost, providers, fc := finalizeBreakdown()
+					return &RunResult{
+						Output:        out,
+						History:       history,
+						Cost:          cost,
+						Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+						Turns:         turn + 1,
+						Status:        "validation_exhausted",
+						Providers:     providers,
+						FallbackCalls: fc,
+					}, nil
+				}
+				if !vout.OK {
+					// Rejection result added to history; re-prompt.
+					continue
+				}
 				lastStructuredCandidate = out
 				ok, hint := l.validateStructuredOutput(out)
 				if !ok {
@@ -1119,7 +1209,6 @@ func WrapIterator(inner *Iterator, onStep func(Step), onDone func()) *Iterator {
 	return out
 }
 
-
 // recordUsage adds a single LLM response's usage to the running totals.
 // Kept for backward compatibility; new code paths use recordResponse /
 // recordChunk so the per-provider stats accumulator stays in sync.
@@ -1414,6 +1503,20 @@ func (it *Iterator) run(ctx context.Context) {
 						// executing the tool and looping again.
 						if it.loop.structuredOutput != nil {
 							if out, ok := extractFinalResponseOutput(chunk.ToolCalls); ok {
+								// Gate the close through the turn validator first:
+								// a premature final_response is refused in-band and
+								// re-prompted rather than committed as the answer.
+								proceed, abort, vout := it.loop.gateStructuredClose(ctx, chunk.ToolCalls, final, history, turn, &validatorFails)
+								if abort {
+									it.recordFinal(out, turn, "validation_exhausted")
+									it.steps <- Step{Type: StepError, Error: fmt.Errorf("validation_exhausted: %s", vout.Reason), Turn: turn}
+									return
+								}
+								if !proceed {
+									// Rejection result already in history; break the
+									// inner chunk loop so the outer for re-prompts.
+									break
+								}
 								okOut, abortOut := it.validateStructuredOrAbort(out, history, &outputRetriesUsed)
 								if abortOut {
 									it.recordFinal(out, turn, "output_validation_exhausted")
@@ -1548,6 +1651,19 @@ func (it *Iterator) run(ctx context.Context) {
 				// Structured-output short-circuit (non-streaming fallback path).
 				if it.loop.structuredOutput != nil {
 					if out, ok := extractFinalResponseOutput(llmResp.ToolCalls); ok {
+						// Gate the close through the turn validator first (see
+						// the streaming path); refuse a premature final_response
+						// in-band and re-prompt instead of committing it.
+						proceed, abort, vout := it.loop.gateStructuredClose(ctx, llmResp.ToolCalls, llmResp.Content, history, turn, &validatorFails)
+						if abort {
+							it.recordFinal(out, turn, "validation_exhausted")
+							it.steps <- Step{Type: StepError, Error: fmt.Errorf("validation_exhausted: %s", vout.Reason), Turn: turn}
+							return
+						}
+						if !proceed {
+							// Rejection result added; outer loop re-prompts.
+							continue
+						}
 						okOut, abortOut := it.validateStructuredOrAbort(out, history, &outputRetriesUsed)
 						if abortOut {
 							it.recordFinal(out, turn, "output_validation_exhausted")
