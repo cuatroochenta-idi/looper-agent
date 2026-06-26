@@ -1108,6 +1108,13 @@ func extractFinalResponseOutput(calls []message.ToolCall) (string, bool) {
 		if err := json.Unmarshal(tc.Arguments, &args); err == nil && len(args.Output) > 0 {
 			return normalizeStructuredOutput(string(args.Output)), true
 		}
+		// The model called final_response but omitted the `output` wrapper —
+		// a common quirk where it puts the payload at the top level
+		// (e.g. {"message":...}). Treat the whole argument object as the
+		// output so the call is still recognized as the close and never falls
+		// through to tool execution, where final_response is not registered
+		// ("unknown tool"). An empty call still closes with an empty output.
+		return normalizeStructuredOutput(string(tc.Arguments)), true
 	}
 	return "", false
 }
