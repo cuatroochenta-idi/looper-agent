@@ -210,6 +210,13 @@ type Usage struct {
 	InputTokens  int
 	OutputTokens int
 	CachedTokens int
+
+	// Cost is the USD cost reported by the upstream API for this call, when
+	// the provider exposes it (e.g. OpenRouter returns usage.cost). Zero when
+	// the upstream reports no cost; in that case the telemetry cost model
+	// falls back to its hardcoded price matrix. Multi-provider chains
+	// (FailoverProvider, KeyRotationProvider) propagate the inner's value.
+	Cost float64
 }
 
 // StreamChunk represents a chunk of a streaming LLM response.

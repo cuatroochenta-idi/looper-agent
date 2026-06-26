@@ -499,6 +499,9 @@ func buildFinalChunk(content string, tcm map[int]*toolCallAccumulator, chunk *op
 			// was the silent cost-tracking bug: cache hits read as zero,
 			// so InputUSD was billed at full rate and SavingsUSD stayed 0.
 			CachedTokens: int(chunk.Usage.PromptTokensDetails.CachedTokens),
+			// OpenRouter-style gateways report the actual USD in usage.cost,
+			// which the SDK schema doesn't model — read it from the raw JSON.
+			Cost: extractCostField(chunk.Usage.RawJSON()),
 		}
 	}
 
@@ -682,6 +685,9 @@ func (t *Translator) FromNative(response any) (*provider.LLMResponse, error) {
 			InputTokens:  int(chat.Usage.PromptTokens),
 			OutputTokens: int(chat.Usage.CompletionTokens),
 			CachedTokens: int(chat.Usage.PromptTokensDetails.CachedTokens),
+			// OpenRouter-style gateways report the actual USD in usage.cost,
+			// which the SDK schema doesn't model — read it from the raw JSON.
+			Cost: extractCostField(chat.Usage.RawJSON()),
 		},
 	}
 

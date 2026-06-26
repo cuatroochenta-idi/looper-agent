@@ -1,10 +1,47 @@
 package loop
 
 import (
+	"math"
 	"testing"
 
 	"github.com/cuatroochenta-idi/looper-agent/provider"
+	"github.com/cuatroochenta-idi/looper-agent/telemetry"
 )
+
+// TestRunStats_APICostAccumulatesAndOverridesMatrix proves the full cost
+// threading: per-call provider.Usage.Cost is summed in the accumulator and,
+// at snapshot time, the cost model uses that API-reported total instead of
+// the hardcoded matrix. This is the end-to-end check for the
+// API-cost-with-matrix-fallback feature at the loop layer.
+func TestRunStats_APICostAccumulatesAndOverridesMatrix(t *testing.T) {
+	stats := newRunStats()
+	stats.add(&provider.LLMResponse{
+		ProviderID: "openai",
+		ModelID:    "gpt-4o",
+		Usage:      provider.Usage{InputTokens: 1000, OutputTokens: 500, Cost: 0.20},
+	}, "openai", "gpt-4o")
+	stats.add(&provider.LLMResponse{
+		ProviderID: "openai",
+		ModelID:    "gpt-4o",
+		Usage:      provider.Usage{InputTokens: 1000, OutputTokens: 500, Cost: 0.30},
+	}, "openai", "gpt-4o")
+
+	cm := telemetry.NewCostModel()
+	out := stats.snapshot(func(p, m string, u provider.Usage) CostBreakdown {
+		return providerCostFor(cm, p, m, u)
+	})
+	if len(out) != 1 {
+		t.Fatalf("len(snapshot) = %d, want 1", len(out))
+	}
+	// 0.20 + 0.30 = 0.50 reported by the API, NOT the matrix's 0.015 for
+	// 2000 in / 1000 out.
+	if got := out[0].Cost.TotalUSD; math.Abs(got-0.50) > 1e-9 {
+		t.Errorf("entry.Cost.TotalUSD = %v, want 0.50 (accumulated API cost)", got)
+	}
+	if c := out[0].Cost; math.Abs((c.InputUSD+c.OutputUSD+c.CachedUSD)-c.TotalUSD) > 1e-9 {
+		t.Errorf("split %v+%v+%v != total %v", c.InputUSD, c.OutputUSD, c.CachedUSD, c.TotalUSD)
+	}
+}
 
 // TestRunStats_PerProviderBreakdown drives the runStats accumulator
 // directly to validate that per-(provider, model) usage and fallback

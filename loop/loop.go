@@ -819,13 +819,15 @@ func (l *AgentLoop) resolveRunConfig(opts []RunOption) *runConfig {
 // single-provider case. Multi-provider chains must use finalizeRun
 // instead — it iterates the runStats accumulator and bills each
 // (provider, model) entry at its own rate before summing.
-func (l *AgentLoop) calculateCost(_ provider.Usage, totalInput, totalOutput, totalCached int) CostBreakdown {
+func (l *AgentLoop) calculateCost(u provider.Usage, totalInput, totalOutput, totalCached int) CostBreakdown {
 	tokens := CostBreakdown{
 		InputTokens:  totalInput,
 		OutputTokens: totalOutput,
 		CachedTokens: totalCached,
 	}
 	if l.costModel == nil {
+		// No matrix configured, but an API-reported cost is still valid.
+		tokens.TotalUSD = u.Cost
 		return tokens
 	}
 	providerName := providerLabel(l.provider)
@@ -839,6 +841,7 @@ func (l *AgentLoop) calculateCost(_ provider.Usage, totalInput, totalOutput, tot
 		InputTokens:  totalInput,
 		OutputTokens: totalOutput,
 		CachedTokens: totalCached,
+		Cost:         u.Cost,
 	})
 	return CostBreakdown{
 		TotalUSD:     br.TotalUSD,
@@ -1050,6 +1053,7 @@ type Iterator struct {
 	inputTokens  int
 	outputTokens int
 	cachedTokens int
+	apiCost      float64
 	history      *message.History
 
 	// stats is the per-(provider, model) accumulator. Populated alongside
@@ -1125,6 +1129,7 @@ func (it *Iterator) recordUsage(u provider.Usage) {
 	it.inputTokens += u.InputTokens
 	it.outputTokens += u.OutputTokens
 	it.cachedTokens += u.CachedTokens
+	it.apiCost += u.Cost
 }
 
 // recordResponse adds a non-streaming LLM response to both the legacy
@@ -1224,7 +1229,7 @@ func (it *Iterator) Result() RunResult {
 	if it.stats != nil {
 		cost, providers, fallbackCalls = it.loop.finalizeRun(it.stats)
 	} else {
-		cost = it.loop.calculateCost(provider.Usage{}, it.inputTokens, it.outputTokens, it.cachedTokens)
+		cost = it.loop.calculateCost(provider.Usage{Cost: it.apiCost}, it.inputTokens, it.outputTokens, it.cachedTokens)
 	}
 	return RunResult{
 		Output:  it.output,

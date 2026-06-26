@@ -4,6 +4,32 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.2.1] — 2026-06-26
+
+API-reported cost. When an upstream gateway returns the actual price of a call
+(OpenRouter's `usage.cost`), the telemetry now uses it as the authoritative
+total instead of estimating from the hardcoded price matrix; the matrix becomes
+the fallback for providers that don't report a cost. Additive — the only
+surface change is a new `Cost` field on `provider.Usage` and `telemetry.Usage`.
+
+### Added
+
+- `provider.Usage.Cost` / `telemetry.Usage.Cost` (USD) — the cost reported by
+  the upstream API for a call, zero when none is reported. Multi-provider
+  chains propagate the inner's value; the run accumulator sums it per
+  (provider, model).
+- `provider/openai` now reads a top-level `cost` field from the usage RawJSON
+  on both the streaming and non-streaming paths (OpenRouter and compatible
+  gateways), populating `Usage.Cost`.
+
+### Changed
+
+- `telemetry.CostModel.Calculate`: when `Usage.Cost > 0` it is authoritative
+  for `TotalUSD`; the input/output/cached split is re-scaled from the matrix
+  ratio so the breakdown stays consistent, degrading to zero on a matrix miss.
+  When `Usage.Cost == 0` the behaviour is unchanged (matrix only). The
+  cost-miss warning is now suppressed when an API cost is present.
+
 ## [v1.2.0] — 2026-06-25
 
 Lazy skills: a skill can now be loaded on demand by the model instead of always

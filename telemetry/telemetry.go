@@ -151,4 +151,9 @@ type Usage struct {
 	InputTokens  int
 	OutputTokens int
 	CachedTokens int
+
+	// Cost is the USD cost reported by the upstream API for this usage, when
+	// the provider returns it (e.g. OpenRouter's usage.cost). Zero means the
+	// API reported no cost and CostModel.Calculate falls back to the matrix.
+	Cost float64
 }

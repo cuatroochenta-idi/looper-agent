@@ -105,6 +105,7 @@ func (r *runStats) addCall(provID, modelID string, u provider.Usage, fallback bo
 	e.usage.InputTokens += u.InputTokens
 	e.usage.OutputTokens += u.OutputTokens
 	e.usage.CachedTokens += u.CachedTokens
+	e.usage.Cost += u.Cost
 }
 
 // snapshot materialises the accumulator into the public ProviderStats
@@ -160,12 +161,15 @@ func providerCostFor(cm *telemetry.CostModel, providerName, modelName string, u 
 		CachedTokens: u.CachedTokens,
 	}
 	if cm == nil {
+		// No matrix configured, but an API-reported cost is still valid.
+		tokens.TotalUSD = u.Cost
 		return tokens
 	}
 	br := cm.Calculate(providerName, modelName, telemetry.Usage{
 		InputTokens:  u.InputTokens,
 		OutputTokens: u.OutputTokens,
 		CachedTokens: u.CachedTokens,
+		Cost:         u.Cost,
 	})
 	return CostBreakdown{
 		TotalUSD:     br.TotalUSD,

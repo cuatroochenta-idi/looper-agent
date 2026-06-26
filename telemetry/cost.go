@@ -67,12 +67,20 @@ func (cm *CostModel) WithCustomCost(model string, config CostConfig) {
 }
 
 // Calculate computes the cost for a given usage.
+//
+// When the upstream API reports a cost (usage.Cost > 0) it is authoritative
+// for TotalUSD; the input/output/cached split is estimated from the matrix
+// ratio so the breakdown stays populated (and degrades to zero on a matrix
+// miss). When usage.Cost is zero the cost is computed entirely from the
+// hardcoded matrix — its historical behaviour.
 func (cm *CostModel) Calculate(provider, model string, usage Usage) CostBreakdown {
 	cm.mu.RLock()
 	config, matched := cm.lookup(provider, model)
 	cm.mu.RUnlock()
 
-	if !matched {
+	// Only warn about a missing matrix entry when there's no API-reported cost
+	// to fall back on — an upstream cost makes the matrix irrelevant here.
+	if !matched && usage.Cost == 0 {
 		cm.warnMiss(provider, model)
 	}
 
@@ -89,9 +97,12 @@ func (cm *CostModel) Calculate(provider, model string, usage Usage) CostBreakdow
 	// Savings from caching: what we would have paid for those tokens at full input rate
 	savings := (float64(usage.CachedTokens)/1_000_000.0*config.InputCostPer1MTokens) - cachedCost
 
-	return CostBreakdown{
-		TotalUSD:     nonCachedCost + cachedCost + outputCost,
-		InputUSD:     nonCachedCost + cachedCost,
+	matrixInput := nonCachedCost + cachedCost
+	matrixTotal := matrixInput + outputCost
+
+	breakdown := CostBreakdown{
+		TotalUSD:     matrixTotal,
+		InputUSD:     matrixInput,
 		OutputUSD:    outputCost,
 		CachedUSD:    cachedCost,
 		SavingsUSD:   savings,
@@ -99,6 +110,28 @@ func (cm *CostModel) Calculate(provider, model string, usage Usage) CostBreakdow
 		OutputTokens: usage.OutputTokens,
 		CachedTokens: usage.CachedTokens,
 	}
+
+	// API-reported cost overrides the matrix total. Re-scale the matrix split
+	// to the reported total so the per-component breakdown stays consistent;
+	// when the matrix can't price this model (matrixTotal == 0) the split
+	// degrades to zero rather than being invented.
+	if usage.Cost > 0 {
+		breakdown.TotalUSD = usage.Cost
+		if matrixTotal > 0 {
+			scale := usage.Cost / matrixTotal
+			breakdown.InputUSD = matrixInput * scale
+			breakdown.OutputUSD = outputCost * scale
+			breakdown.CachedUSD = cachedCost * scale
+			breakdown.SavingsUSD = savings * scale
+		} else {
+			breakdown.InputUSD = 0
+			breakdown.OutputUSD = 0
+			breakdown.CachedUSD = 0
+			breakdown.SavingsUSD = 0
+		}
+	}
+
+	return breakdown
 }
 
 // lookup returns the price config for (provider, model) and whether a match
