@@ -788,6 +788,16 @@ res.Turns
 res.Status   // "completed" | "error" | "cancelled" | "validation_exhausted" | "output_validation_exhausted" | "usage_exceeded" | "max_turns_exceeded"
 ```
 
+**Cost precision cascade.** The run's cost prefers the API-reported cost per
+call (e.g. OpenRouter's `usage.cost`), including for failed/partial calls —
+partial usage is still attributed. When no API cost is reported, it falls back
+to pricing-table estimation per `(provider, model)`. A custom cost dictionary
+(`looper.json` `model_costs`, or `telemetry.CostModel.WithCustomCosts`) overrides
+the built-in matrix during that estimation. Tokens bucket into `input`,
+`output`, `cached` (cache reads) and `cache_write` (cache writes), each priced
+separately. When any contributing call was estimated, `cost_estimated` is true
+and the panel renders the figure with a `~` (Estimated marker).
+
 For step-level traces and OTel:
 
 ```go
@@ -902,6 +912,7 @@ The `examples/` folder is a graduated tour:
 | 17 | `17_tool_choice` | `ToolChoiceRequired` forcing tool use on a turn |
 | 18 | `18_preexecute` | `tool.WithPreExecute` + `RejectWithHint` for business validation |
 | 19 | `19_lazy_skills` | Eager `Skill` + lazy `LazySkill` (`skill.Lazy`) loaded via `load_skill` |
+| 20 | `20_server_panel` | Deploy the core as a supervision/control-panel server (auth, ingest token, custom costs, folder/postgres persistence) |
 
 Run any of them with `go run ./examples/12_multimodal` (after sourcing
 `.env.local` with the required API keys).
@@ -956,21 +967,31 @@ framework-level tools to MCP-aware clients (Claude Code, Cursor, Zed,
 ### `looper serve` — live web UI + trace ingest
 
 ```bash
-looper serve [--port 9090] [--store .looper] [-- <child-cmd> [args...]]
+looper serve [--config looper.json] [--port 9090] [--store .looper] [--db <dsn>] [-- <child-cmd> [args...]]
 ```
 
 | Flag | Default | Effect |
 |------|---------|--------|
+| `--config` | _(auto)_ | Path to a `looper.json` config file. When unset, `./looper.json` (or `$LOOPER_CONFIG`) is auto-discovered. See [Config file](#config-file). |
 | `--port` | `9090` | HTTP port the dashboard binds to. |
 | `--store` | `.looper` | Directory where streamed runs are persisted (created if missing — gitignored by default). |
+| `--db` | _(none)_ | PostgreSQL DSN for run persistence. Overrides `--store` (folder store) when set; also via `LOOPER_DB`. Schema is Atlas-authored — see `internal/store/postgres/migrations` (`make db-diff` authors a migration). |
 | `-- <cmd ...>` | _(none)_ | Anything after `--` is launched as a child process inheriting stdio. Child auto-receives `LOOPER_TRACE_ENDPOINT`, `LOOPER_SESSION_ID`, and `LOOPER_DEBUG=true` so every step it emits streams into the panel. |
+
+The panel is an embedded SolidJS single-page app (Bun+Vite, in `ui/`), bundled
+into the binary via `//go:embed` (`internal/web/ui/dist`). Build the real UI
+into the binary with `make release` (runs `ui-build` then `build`); iterate on
+it with `make ui-dev`, which runs the Vite dev server proxying `/api`, `/ingest`
+and `/sse` to the Go server on `:9090`. The built bundle is committed at release
+time, so `go install` and plain `go build` ship the real UI with no JS
+toolchain; `make ui-build` (Bun) regenerates it after UI changes.
 
 Pattern A — UI only, drive the demo agent from the browser / curl:
 
 ```bash
 looper serve --port 9090
 # open http://localhost:9090
-curl -s -X POST localhost:9090/api/run --data-urlencode 'input=hello'
+curl -s -X POST localhost:9090/api/run -H 'Content-Type: application/json' --data '{"input":"hello"}'
 ```
 
 Pattern B — wrap any Go program so its runs flow through the panel:
@@ -987,15 +1008,17 @@ child exits the panel stays alive (Ctrl-C to stop).
 
 | Route | What you get |
 |-------|--------------|
-| `GET  /`                       | Dashboard (totals, run history). |
-| `GET  /runs` / `GET /runs/{id}` | Run list / per-run detail. |
-| `GET  /partials/...`           | htmx fragments (sidebar, detail pane, dashboard). |
-| `GET  /sse/sidebar`            | SSE stream of new runs. |
-| `GET  /sse/runs/{id}`          | SSE stream of one run's live steps. |
-| `GET  /sse/dashboard`          | SSE stream of aggregate stats. |
-| `POST /api/run`                | Kick off the built-in demo agent with form field `input=...`. |
-| `GET  /api/runs` / `/api/costs` | JSON snapshots for external dashboards. |
-| `POST /ingest`                 | Where the agent's `LOOPER_TRACE_ENDPOINT` posts. This is the contract: any external agent pointing at this URL shows up in the panel. |
+| `GET  /`                        | The embedded SolidJS SPA (dashboard, runs, chats — client-rendered). |
+| `GET  /api/state/summary`       | Aggregate totals (runs, cost, tokens, turns). |
+| `GET  /api/state/runs` / `/api/state/runs/{id}` | Flat run list (incl. subagents) / per-run detail. |
+| `GET  /api/state/chats`         | Conversation summaries. |
+| `GET  /api/state/costs`         | Cost breakdown by model. |
+| `GET  /api/events?topics=...`   | Single multiplexed JSON SSE stream (topics: `runs`, `chats`, `run:{id}`, `summary`). |
+| `POST /api/run`                 | Kick off the built-in demo agent with JSON `{input}` → `{id}`. |
+| `POST /ingest`                  | Where the agent's `LOOPER_TRACE_ENDPOINT` posts. This is the contract: any external agent pointing at this URL shows up in the panel. Requires `Authorization: Bearer <ingest_token>` when auth is on. |
+| `POST /api/login` / `POST /api/logout` / `GET /api/me` | Auth endpoints (login gate, session cookie, current-user probe). |
+
+The full REST + SSE contract lives in `docs/tasks/2026-07-10_api_contract.md`.
 
 **Demo provider** (used by `POST /api/run`) is picked by env:
 
@@ -1004,6 +1027,47 @@ LOOPER_PROVIDER=openai   looper serve   # default, needs OPENAI_API_KEY
 LOOPER_PROVIDER=anthropic looper serve  # needs ANTHROPIC_API_KEY
 LOOPER_PROVIDER=google   looper serve   # needs GOOGLE_API_KEY or GEMINI_API_KEY
 ```
+
+#### Config file
+
+`serve` reads an optional `looper.json` (auto-discovered as `./looper.json`, or
+via `--config` / `$LOOPER_CONFIG`):
+
+```jsonc
+{
+  "port": 9090,
+  "db": "postgres://user:pass@localhost:5432/looper?sslmode=disable", // empty ⇒ folder store
+  "store_dir": ".looper",
+  "auth": {
+    "username": "admin",
+    "password": "secret",           // set to enable the login gate
+    "session_secret": "…",          // set to persist sessions across restarts
+    "ingest_token": "…"             // bearer token external agents must send
+  },
+  "model_costs": {                  // override the built-in price matrix
+    "anthropic/claude-sonnet-4": { "input": 3e-6, "output": 15e-6, "cached": 0.3e-6, "cache_write": 3.75e-6 }
+  }
+}
+```
+
+Every field has a `LOOPER_*` env override (`LOOPER_PORT`, `LOOPER_DB`,
+`LOOPER_STORE_DIR`, `LOOPER_AUTH_USERNAME`, `LOOPER_AUTH_PASSWORD`,
+`LOOPER_SESSION_SECRET`, `LOOPER_INGEST_TOKEN`, `LOOPER_CONFIG`). Precedence is
+highest-wins: **flags > env > file > defaults** (port `9090`, store_dir
+`.looper`). Unknown fields in `looper.json` are a hard error. `model_costs` keys
+are `"provider/model"` or a bare model id; values are per-token USD config
+(`input`, `output`, `cached`, `cache_write`) — the same thing
+`telemetry.CostModel.WithCustomCosts` does programmatically.
+
+#### Auth for production
+
+Setting `auth.password` (in `looper.json` or via `LOOPER_AUTH_PASSWORD`) turns on
+a login gate: a `looper_session` HMAC cookie (HttpOnly, SameSite=Lax, 7-day)
+guards the panel, and `/ingest` starts requiring `Authorization: Bearer
+<ingest_token>`. The effective ingest token is printed/logged at boot so you can
+configure external agents by setting `LOOPER_INGEST_TOKEN` in their environment.
+Set `auth.session_secret` to persist sessions across restarts (otherwise the key
+is ephemeral). With no `auth` block the panel is open — everything is nil-safe.
 
 ### `looper mcp` — MCP debug server over stdio
 

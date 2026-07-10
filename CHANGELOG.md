@@ -4,6 +4,120 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.6.0] — 2026-07-10
+
+The supervision panel grows up: a JSON REST + typed SSE API behind an embedded
+SolidJS SPA, an optional PostgreSQL backend, a production login gate, and a
+config file — plus a cost-tracking pass that prefers real API-reported prices.
+
+### Added
+
+- **Subagent-aware JSON API + typed SSE.** New `/api/state/*` REST surface
+  (`summary`, `runs`, `runs/{id}`, `chats`, `costs`) and a single multiplexed
+  `GET /api/events` SSE stream (topics: `runs`, `chats`, `run:{id}`, `summary`),
+  replacing the old htmx-fragment endpoints and per-view SSE streams. Runs are a
+  flat list with parent linkage; `kind` (`run`|`subagent`) is derived
+  server-side; costs roll up as self vs subtree.
+- **SolidJS UI embedded in the binary.** The panel is now a Bun+Vite SolidJS SPA
+  embedded via `//go:embed` (`internal/web/ui/dist`). The built bundle is
+  committed at release time, so `go install` / module consumers get the real UI
+  with no JS toolchain; `make ui-build` regenerates it (Bun) and `make ui-dev`
+  runs the Vite dev server (proxying `/api`, `/ingest`, `/sse` to `:9090`).
+- **PostgreSQL backend with versioned Atlas migrations.** `--db` / `LOOPER_DB`
+  selects a Postgres store (overrides the folder `--store`); migrations are
+  authored via Atlas (`make db-diff`, `internal/store/postgres/migrations`).
+- **Auth for production.** Optional login gate (`auth.password`) with an HMAC
+  `looper_session` cookie and a bearer-token-protected `/ingest`; the effective
+  ingest token is logged at boot so external agents can be wired via
+  `LOOPER_INGEST_TOKEN`. `POST /api/login`, `POST /api/logout`, `GET /api/me`.
+- **Config file.** Optional `looper.json` (`port`, `db`, `store_dir`, `auth`,
+  `model_costs`) with `LOOPER_*` env overrides and `flags > env > file >
+  defaults` precedence; new `--config` flag. Unknown fields are a hard error.
+- **Custom cost dictionary.** `looper.json` `model_costs` and
+  `telemetry.CostModel.WithCustomCosts` override the built-in price matrix during
+  estimation.
+- New example `20_server_panel` demonstrating the production supervision-server
+  pattern (login gate, ingest token, custom pricing, folder-or-postgres store).
+
+### Changed
+
+- **Cost precision cascade.** The API-reported cost is now preferred per call —
+  including for failed/partial calls, whose partial usage is still attributed —
+  falling back to pricing-table estimation only when no API cost is reported.
+  Custom pricing (dict) outranks the built-in matrix during estimation.
+  Cache-write tokens are now priced as their own bucket (alongside cache reads),
+  and `cost_estimated` / `CostBreakdown.Estimated` marks any figure that
+  involved estimation.
+- **`provider.Usage` normalisation contract** (breaking for adapter authors):
+  `InputTokens` is the inclusive prompt total; `CachedTokens` (cache reads) and
+  the new `CacheWriteTokens` (cache writes) are subsets of it. The Anthropic
+  adapter now sums its disjoint buckets accordingly. `Usage`/`CostBreakdown`
+  across `provider`, `loop`, `looper`, and `telemetry` gained
+  `CacheWriteTokens` / `CacheWriteUSD` / `Estimated` fields.
+- Aggregate panel figures (`/api/state/summary`, `/api/state/costs`, chat
+  cards) count each run's **self** cost exactly once — sub-agent spend no
+  longer double-counts or pollutes the tracker, and sub-agent runs never
+  produce their own chat messages when their parent is known.
+- Streaming chunks are now transient end to end: forwarded live over the
+  `chunk` SSE event to `run:{id}` subscribers only, and stripped from the
+  in-memory record at run end (previously they accumulated in RAM for runs
+  nobody was viewing).
+
+### Fixed
+
+- **Anthropic streaming billed $0.** The streaming path never read usage from
+  `message_start` / `message_delta`, so every streamed Claude call reported
+  zero tokens and zero cost. It also swallowed stream errors entirely —
+  a mid-stream failure surfaced as a successful, quietly truncated turn.
+- Mid-stream failures now bill the partial usage the API already charged
+  (all three providers attach usage to error chunks; the loop records it
+  before emitting `StepError`).
+- Anthropic `cache_creation_input_tokens` (billed at 1.25× input) were
+  silently dropped; Gemini `thoughts_token_count` (billed as output) was
+  never counted.
+- `looper serve`'s in-process runner recomputed run cost from aggregate
+  tokens, discarding the per-provider attribution and any API-reported cost
+  the run already carried.
+
+### Removed
+
+- The templ/datastar server-rendered UI: all `*.templ` components, the
+  htmx-fragment `/partials/*` routes, and the per-view `/sse/*` streams.
+  Panel consumers migrate to `/api/state/*` + `/api/events` (see
+  `docs/tasks/2026-07-10_api_contract.md`). The `templ` CLI is no longer a
+  dev dependency.
+
+## [v1.5.1] — 2026-06-26
+
+### Fixed
+
+- A `final_response` tool call is always recognised as the structured-output
+  close, even when the model omits the `output` wrapper — it no longer falls
+  through to "unknown tool" execution.
+
+## [v1.5.0] — 2026-06-26
+
+### Fixed
+
+- Double-encoded structured output (a JSON string containing JSON) is
+  normalised before schema validation.
+
+## [v1.4.0] — 2026-06-26
+
+### Changed
+
+- Native provider `response_format` is used only for tool-less agents;
+  agents with tools keep the injected `final_response` tool so tool use and
+  structured output compose.
+
+## [v1.3.0] — 2026-06-26
+
+### Changed
+
+- Structured-output closes are gated through the `TurnValidator`: a rejected
+  close answers the dangling tool call in-band (keeping history
+  provider-valid) instead of committing the run.
+
 ## [v1.2.2] — 2026-06-26
 
 Temperature is now opt-in. Previously every request carried `temperature: 0.7`
