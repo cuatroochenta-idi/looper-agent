@@ -4,6 +4,14 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.6.2] — 2026-07-10
+
+### Security
+
+- Bumped indirect dependency `golang.org/x/crypto` to v0.52.0, clearing the
+  remaining 13 Dependabot alerts (all advisories against `x/crypto < 0.52.0`;
+  7 critical / 2 high / 4 moderate).
+
 ## [v1.6.1] — 2026-07-10
 
 ### Security
