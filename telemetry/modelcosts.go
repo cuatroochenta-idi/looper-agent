@@ -16,6 +16,24 @@ package telemetry
 func defaultCosts() map[string]map[string]CostConfig {
 	return map[string]map[string]CostConfig{
 		"openai": {
+			// gpt-5.6 family — released July 2026 (Sol / Terra / Luna tiers).
+			// Cache writes bill at 1.25× input, which is exactly the
+			// Calculate fallback, so no explicit cache_write rate is needed.
+			"gpt-5.6-sol": {
+				InputCostPer1MTokens:  5.00,
+				OutputCostPer1MTokens: 30.00,
+				CachedCostPer1MTokens: 0.50,
+			},
+			"gpt-5.6-terra": {
+				InputCostPer1MTokens:  2.50,
+				OutputCostPer1MTokens: 15.00,
+				CachedCostPer1MTokens: 0.25,
+			},
+			"gpt-5.6-luna": {
+				InputCostPer1MTokens:  1.00,
+				OutputCostPer1MTokens: 6.00,
+				CachedCostPer1MTokens: 0.10,
+			},
 			// gpt-5 family — released August 2025.
 			"gpt-5": {
 				InputCostPer1MTokens:  1.25,

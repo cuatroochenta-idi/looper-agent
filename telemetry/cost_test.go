@@ -299,3 +299,39 @@ func almostEqual(a, b, epsilon float64) bool {
 	}
 	return diff < epsilon
 }
+
+// gpt-5.6 tiers must price at their own rates, not fall back to the gpt-5
+// family entry (4× cheaper for Sol), and dated ids must inherit their tier.
+func TestCostModelGPT56Tiers(t *testing.T) {
+	cm := NewCostModel()
+
+	tests := []struct {
+		model     string
+		wantTotal float64
+	}{
+		// 1M in + 1M out at the official July-2026 rates.
+		{"gpt-5.6-sol", 35.00},
+		{"gpt-5.6-terra", 17.50},
+		{"gpt-5.6-luna", 7.00},
+		// Dated suffix inherits its tier via longest-family-prefix.
+		{"gpt-5.6-sol-2026-07-09", 35.00},
+	}
+	usage := Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000}
+	for _, tt := range tests {
+		got := cm.Calculate("openai", tt.model, usage)
+		if !got.Estimated {
+			t.Errorf("%s: want Estimated=true, got false", tt.model)
+		}
+		if diff := got.TotalUSD - tt.wantTotal; diff > 1e-9 || diff < -1e-9 {
+			t.Errorf("%s: TotalUSD = %v, want %v", tt.model, got.TotalUSD, tt.wantTotal)
+		}
+	}
+
+	// Cache reads keep the 90% discount; cache writes fall back to 1.25×
+	// input, matching the official $6.25/M for Sol.
+	cw := cm.Calculate("openai", "gpt-5.6-sol", Usage{InputTokens: 1_000_000, CachedTokens: 500_000, CacheWriteTokens: 500_000})
+	want := 0.50*0.5 + 6.25*0.5 // cached half + cache-write half
+	if diff := cw.TotalUSD - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("sol cache buckets: TotalUSD = %v, want %v", cw.TotalUSD, want)
+	}
+}
