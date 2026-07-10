@@ -148,15 +148,16 @@ func stripChunkSteps(steps []TimelineStep) []TimelineStep {
 	return out
 }
 
-// loadRunsFromDisk hydrates every run found in dir into store. Returns the
-// number of records loaded. Bad files are logged and skipped.
-func loadRunsFromDisk(dir string, store *Store) (int, error) {
+// loadRunsFromDisk reads every run found in dir and returns them in
+// chronological (filename-prefix) order. A missing directory is not an error —
+// it yields an empty slice. Bad files are skipped, not fatal.
+func loadRunsFromDisk(dir string) ([]*RunRecord, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil
+			return nil, nil
 		}
-		return 0, err
+		return nil, err
 	}
 	type loaded struct {
 		name string
@@ -183,8 +184,9 @@ func loadRunsFromDisk(dir string, store *Store) (int, error) {
 	}
 	// Sort by filename (timestamp prefix) so insertion is chronological.
 	sort.Slice(all, func(i, j int) bool { return all[i].name < all[j].name })
-	for _, x := range all {
-		store.Add(x.run)
+	out := make([]*RunRecord, len(all))
+	for i, x := range all {
+		out[i] = x.run
 	}
-	return len(all), nil
+	return out, nil
 }
