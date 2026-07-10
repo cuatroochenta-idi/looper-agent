@@ -72,11 +72,11 @@ func (r *runStats) add(resp *provider.LLMResponse, fallbackProv, fallbackModel s
 	r.addCall(resp.ProviderID, resp.ModelID, resp.Usage, resp.Fallback, fallbackProv, fallbackModel)
 }
 
-// addChunk accounts one streaming chunk (only the final chunk carries
-// Usage in the wire contract). Same merging logic as add. Non-final
-// chunks are ignored.
+// addChunk accounts one streaming chunk. Only final and error chunks carry
+// Usage in the wire contract (an errored call still billed its partial
+// tokens); deltas carry none and are ignored.
 func (r *runStats) addChunk(c provider.StreamChunk, fallbackProv, fallbackModel string) {
-	if !c.IsFinal || c.Usage == nil {
+	if c.Usage == nil {
 		return
 	}
 	r.addCall(c.ProviderID, c.ModelID, *c.Usage, c.Fallback, fallbackProv, fallbackModel)
@@ -105,6 +105,7 @@ func (r *runStats) addCall(provID, modelID string, u provider.Usage, fallback bo
 	e.usage.InputTokens += u.InputTokens
 	e.usage.OutputTokens += u.OutputTokens
 	e.usage.CachedTokens += u.CachedTokens
+	e.usage.CacheWriteTokens += u.CacheWriteTokens
 	e.usage.Cost += u.Cost
 }
 
@@ -124,9 +125,10 @@ func (r *runStats) snapshot(costFn func(provider, model string, u provider.Usage
 			Calls:         e.calls,
 			FallbackCalls: e.fallbackCalls,
 			Usage: Usage{
-				InputTokens:  e.usage.InputTokens,
-				OutputTokens: e.usage.OutputTokens,
-				CachedTokens: e.usage.CachedTokens,
+				InputTokens:      e.usage.InputTokens,
+				OutputTokens:     e.usage.OutputTokens,
+				CachedTokens:     e.usage.CachedTokens,
+				CacheWriteTokens: e.usage.CacheWriteTokens,
 			},
 		}
 		if costFn != nil {
@@ -156,29 +158,34 @@ func (r *runStats) fallbackCount() int {
 // the single point that talks to telemetry.CostModel.
 func providerCostFor(cm *telemetry.CostModel, providerName, modelName string, u provider.Usage) CostBreakdown {
 	tokens := CostBreakdown{
-		InputTokens:  u.InputTokens,
-		OutputTokens: u.OutputTokens,
-		CachedTokens: u.CachedTokens,
+		InputTokens:      u.InputTokens,
+		OutputTokens:     u.OutputTokens,
+		CachedTokens:     u.CachedTokens,
+		CacheWriteTokens: u.CacheWriteTokens,
 	}
 	if cm == nil {
-		// No matrix configured, but an API-reported cost is still valid.
+		// No pricing tables configured, but an API-reported cost is still valid.
 		tokens.TotalUSD = u.Cost
 		return tokens
 	}
 	br := cm.Calculate(providerName, modelName, telemetry.Usage{
-		InputTokens:  u.InputTokens,
-		OutputTokens: u.OutputTokens,
-		CachedTokens: u.CachedTokens,
-		Cost:         u.Cost,
+		InputTokens:      u.InputTokens,
+		OutputTokens:     u.OutputTokens,
+		CachedTokens:     u.CachedTokens,
+		CacheWriteTokens: u.CacheWriteTokens,
+		Cost:             u.Cost,
 	})
 	return CostBreakdown{
-		TotalUSD:     br.TotalUSD,
-		InputUSD:     br.InputUSD,
-		OutputUSD:    br.OutputUSD,
-		CachedUSD:    br.CachedUSD,
-		SavingsUSD:   br.SavingsUSD,
-		InputTokens:  u.InputTokens,
-		OutputTokens: u.OutputTokens,
-		CachedTokens: u.CachedTokens,
+		TotalUSD:         br.TotalUSD,
+		InputUSD:         br.InputUSD,
+		OutputUSD:        br.OutputUSD,
+		CachedUSD:        br.CachedUSD,
+		CacheWriteUSD:    br.CacheWriteUSD,
+		SavingsUSD:       br.SavingsUSD,
+		InputTokens:      u.InputTokens,
+		OutputTokens:     u.OutputTokens,
+		CachedTokens:     u.CachedTokens,
+		CacheWriteTokens: u.CacheWriteTokens,
+		Estimated:        br.Estimated,
 	}
 }

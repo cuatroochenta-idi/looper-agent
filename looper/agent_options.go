@@ -150,6 +150,17 @@ func WithCustomModelCost(model string, config telemetry.CostConfig) AgentOption 
 	}
 }
 
+// WithCustomModelCosts bulk-registers pricing overrides from a dict. Keys
+// are "provider/model" (overrides that provider's built-in matrix entry) or
+// a bare model id (registered as a custom model, which outranks every
+// built-in during lookup). Custom pricing is the estimation source when the
+// upstream API reports no cost for a call.
+func WithCustomModelCosts(costs map[string]telemetry.CostConfig) AgentOption {
+	return func(a *Agent) {
+		a.costModel.WithCustomCosts(costs)
+	}
+}
+
 // WithCacheConfig sets the prompt caching configuration.
 func WithCacheConfig(config provider.CacheConfig) AgentOption {
 	return func(a *Agent) {

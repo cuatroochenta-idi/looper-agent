@@ -34,6 +34,11 @@ type Provider struct {
 	// public api.anthropic.com one in the trace UI / cost tables.
 	providerID string
 
+	// baseURL overrides the SDK's default api.anthropic.com endpoint. Empty
+	// means "use the SDK default". Set via WithBaseURL — see that option for
+	// the rationale (testability + gateways).
+	baseURL string
+
 	// Default thinking config. Applied when LLMRequest.Reasoning is nil.
 	// budgetTokens=0 means "no extended thinking by default".
 	defaultBudgetTokens int
@@ -135,6 +140,26 @@ func WithProviderID(id string) Option {
 	}
 }
 
+// WithBaseURL points the SDK client at an alternate endpoint instead of the
+// default api.anthropic.com. Two reasons this exists:
+//
+//   - Testability: tests can spin up an httptest.Server that serves canned
+//     SSE / JSON and aim the provider at it, exercising the real SDK decode
+//     path without a network call or API key.
+//   - Gateways: an in-house proxy, LiteLLM, or a corporate egress gateway that
+//     speaks the Anthropic wire format can be targeted without forking the
+//     provider. (Pair with WithProviderID to relabel the telemetry.)
+//
+// An empty url is ignored so callers can pass a config value through
+// unconditionally without clobbering the SDK default.
+func WithBaseURL(url string) Option {
+	return func(p *Provider) {
+		if url != "" {
+			p.baseURL = url
+		}
+	}
+}
+
 // effortToBudget translates a tiered effort into an Anthropic budget.
 // Numbers are conservative defaults; the user can always override with
 // BudgetTokens directly.
@@ -192,7 +217,11 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 	for _, opt := range opts {
 		opt(p)
 	}
-	p.client = anthropic.NewClient(option.WithAPIKey(apiKey))
+	clientOpts := []option.RequestOption{option.WithAPIKey(apiKey)}
+	if p.baseURL != "" {
+		clientOpts = append(clientOpts, option.WithBaseURL(p.baseURL))
+	}
+	p.client = anthropic.NewClient(clientOpts...)
 	p.keySuffix = provider.APIKeySuffix(apiKey)
 	p.translator = &Translator{
 		model:            p.model,
@@ -290,11 +319,48 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		var (
 			contentBuilder string
 			toolUseMap     = make(map[int64]*toolUseAccumulator)
+			// usage accumulates across the stream: message_start carries the
+			// prompt-side buckets, each message_delta the cumulative output
+			// count. Kept as a value so a mid-stream failure still bills
+			// whatever the API reported before dying.
+			usage    provider.Usage
+			sawUsage bool
 		)
+
+		// finalUsage normalises to the provider.Usage contract: Anthropic
+		// reports input / cache_read / cache_creation disjointly, so the
+		// inclusive InputTokens total is their sum.
+		finalUsage := func() *provider.Usage {
+			if !sawUsage {
+				return nil
+			}
+			u := usage
+			u.InputTokens += u.CachedTokens + u.CacheWriteTokens
+			return &u
+		}
 
 		for stream.Next() {
 			event := stream.Current()
 			switch e := event.AsAny().(type) {
+			case anthropic.MessageStartEvent:
+				sawUsage = true
+				usage.InputTokens = int(e.Message.Usage.InputTokens)
+				usage.CachedTokens = int(e.Message.Usage.CacheReadInputTokens)
+				usage.CacheWriteTokens = int(e.Message.Usage.CacheCreationInputTokens)
+				usage.OutputTokens = int(e.Message.Usage.OutputTokens)
+			case anthropic.MessageDeltaEvent:
+				// Cumulative totals — overwrite, never add.
+				sawUsage = true
+				usage.OutputTokens = int(e.Usage.OutputTokens)
+				if e.Usage.InputTokens > 0 {
+					usage.InputTokens = int(e.Usage.InputTokens)
+				}
+				if e.Usage.CacheReadInputTokens > 0 {
+					usage.CachedTokens = int(e.Usage.CacheReadInputTokens)
+				}
+				if e.Usage.CacheCreationInputTokens > 0 {
+					usage.CacheWriteTokens = int(e.Usage.CacheCreationInputTokens)
+				}
 			case anthropic.ContentBlockStartEvent:
 				if e.ContentBlock.Type == "tool_use" {
 					toolUseMap[e.Index] = &toolUseAccumulator{
@@ -331,6 +397,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 					Content:      contentBuilder,
 					ToolCalls:    tcs,
 					IsFinal:      true,
+					Usage:        finalUsage(),
 					ProviderID:   p.providerID,
 					ModelID:      string(params.Model),
 					APIKeySuffix: p.keySuffix,
@@ -338,13 +405,22 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 				return
 			}
 		}
-		ch <- provider.StreamChunk{
+		// The iterator ended without a message_stop: either the stream
+		// errored mid-flight or the connection closed early. Either way,
+		// surface the error AND the partial usage so the tokens the API
+		// already billed are not lost.
+		final := provider.StreamChunk{
 			Content:      contentBuilder,
 			IsFinal:      true,
+			Usage:        finalUsage(),
 			ProviderID:   p.providerID,
 			ModelID:      string(params.Model),
 			APIKeySuffix: p.keySuffix,
 		}
+		if err := stream.Err(); err != nil {
+			final.Error = fmt.Errorf("anthropic stream: %w", err)
+		}
+		ch <- final
 	}()
 
 	return ch, nil
@@ -499,11 +575,17 @@ func (t *Translator) FromNative(response any) (*provider.LLMResponse, error) {
 		return nil, fmt.Errorf("expected *anthropic.Message, got %T", response)
 	}
 
+	// Anthropic reports input, cache-read, and cache-write token buckets
+	// disjointly; the universal contract wants InputTokens as the inclusive
+	// prompt total (see provider.Usage).
 	result := &provider.LLMResponse{
 		Usage: provider.Usage{
-			InputTokens:  int(msg.Usage.InputTokens),
-			OutputTokens: int(msg.Usage.OutputTokens),
-			CachedTokens: int(msg.Usage.CacheReadInputTokens),
+			InputTokens: int(msg.Usage.InputTokens +
+				msg.Usage.CacheReadInputTokens +
+				msg.Usage.CacheCreationInputTokens),
+			OutputTokens:     int(msg.Usage.OutputTokens),
+			CachedTokens:     int(msg.Usage.CacheReadInputTokens),
+			CacheWriteTokens: int(msg.Usage.CacheCreationInputTokens),
 		},
 	}
 

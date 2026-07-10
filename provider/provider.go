@@ -206,16 +206,33 @@ type LLMResponse struct {
 }
 
 // Usage reports token consumption for an LLM call.
+//
+// Normalisation contract (every adapter must follow it so the cost model can
+// price uniformly):
+//
+//   - InputTokens is the TOTAL prompt-side token count, including cached
+//     reads and cache writes. Anthropic reports these three buckets
+//     disjointly (input + cache_read + cache_creation), so its adapter sums
+//     them; OpenAI and Gemini already report inclusive totals.
+//   - CachedTokens is the cache-READ subset of InputTokens.
+//   - CacheWriteTokens is the cache-WRITE subset of InputTokens (Anthropic
+//     cache_creation_input_tokens, billed at a premium). Zero on providers
+//     whose cache writes are free/implicit (OpenAI, Gemini implicit cache).
+//   - OutputTokens includes reasoning/thinking tokens when the provider
+//     bills them as output but reports them separately (Gemini's
+//     thoughts_token_count).
 type Usage struct {
-	InputTokens  int
-	OutputTokens int
-	CachedTokens int
+	InputTokens      int
+	OutputTokens     int
+	CachedTokens     int
+	CacheWriteTokens int
 
 	// Cost is the USD cost reported by the upstream API for this call, when
 	// the provider exposes it (e.g. OpenRouter returns usage.cost). Zero when
 	// the upstream reports no cost; in that case the telemetry cost model
-	// falls back to its hardcoded price matrix. Multi-provider chains
-	// (FailoverProvider, KeyRotationProvider) propagate the inner's value.
+	// estimates from its pricing tables (custom overrides first, then the
+	// built-in matrix). Multi-provider chains (FailoverProvider,
+	// KeyRotationProvider) propagate the inner's value.
 	Cost float64
 }
 
@@ -237,7 +254,10 @@ type StreamChunk struct {
 	// IsFinal indicates this is the last chunk.
 	IsFinal bool
 
-	// Usage is the token usage (only set on final chunk).
+	// Usage is the token usage. Set on the final chunk, and — when the
+	// upstream reported any usage before dying — also on error chunks, so
+	// a call that fails mid-stream still bills the tokens it consumed.
+	// Never set on ordinary delta chunks.
 	Usage *Usage
 
 	// Error is set if the stream encountered an error.

@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"context"
 	"math"
 	"testing"
 
@@ -115,16 +116,18 @@ func TestRunStats_FallbackDefaults(t *testing.T) {
 	}
 }
 
-// TestRunStats_ChunkPath asserts addChunk only records final chunks
-// with usage, so intermediate streaming deltas don't double-count.
+// TestRunStats_ChunkPath asserts addChunk records exactly the chunks that
+// carry Usage. Providers attach Usage only to final chunks and to error
+// chunks (partial usage from a call that died mid-stream); ordinary deltas
+// carry none and must be ignored.
 func TestRunStats_ChunkPath(t *testing.T) {
 	stats := newRunStats()
-	// Intermediate chunk — should be ignored.
+	// Ordinary delta — no Usage, must be ignored.
 	stats.addChunk(provider.StreamChunk{
 		ProviderID: "openai",
 		ModelID:    "gpt-x",
 		IsFinal:    false,
-		Usage:      &provider.Usage{InputTokens: 999},
+		Content:    "partial text",
 	}, "openai", "gpt-x")
 	// Final chunk — should land.
 	stats.addChunk(provider.StreamChunk{
@@ -139,6 +142,31 @@ func TestRunStats_ChunkPath(t *testing.T) {
 		t.Fatalf("len(snapshot) = %d, want 1", len(out))
 	}
 	if out[0].Usage.InputTokens != 42 || out[0].Usage.OutputTokens != 8 {
-		t.Errorf("entry.Usage = %+v, want In=42 Out=8 (intermediate chunk must be dropped)", out[0].Usage)
+		t.Errorf("entry.Usage = %+v, want In=42 Out=8 (delta without usage must be dropped)", out[0].Usage)
+	}
+	if out[0].Calls != 1 {
+		t.Errorf("entry.Calls = %d, want 1", out[0].Calls)
+	}
+}
+
+// TestRunStats_ErrorChunkPartialUsage asserts a mid-stream failure still
+// bills the partial usage the upstream reported before dying — a failed
+// call must not read as free.
+func TestRunStats_ErrorChunkPartialUsage(t *testing.T) {
+	stats := newRunStats()
+	stats.addChunk(provider.StreamChunk{
+		ProviderID: "anthropic",
+		ModelID:    "claude-x",
+		Error:      context.DeadlineExceeded,
+		Usage:      &provider.Usage{InputTokens: 1200, OutputTokens: 37, CacheWriteTokens: 800},
+	}, "anthropic", "claude-x")
+
+	out := stats.snapshot(nil)
+	if len(out) != 1 {
+		t.Fatalf("len(snapshot) = %d, want 1", len(out))
+	}
+	u := out[0].Usage
+	if u.InputTokens != 1200 || u.OutputTokens != 37 || u.CacheWriteTokens != 800 {
+		t.Errorf("entry.Usage = %+v, want partial usage from the errored call", u)
 	}
 }

@@ -345,7 +345,9 @@ func processStream(seq iter.Seq2[*genai.GenerateContentResponse, error], ch chan
 
 	for resp, err := range seq {
 		if err != nil {
-			ch <- provider.StreamChunk{Error: err}
+			// Carry whatever usage the stream reported before failing so a
+			// mid-stream error still bills the tokens already consumed.
+			ch <- provider.StreamChunk{Error: err, Usage: usage}
 			return
 		}
 		if resp == nil {
@@ -353,8 +355,12 @@ func processStream(seq iter.Seq2[*genai.GenerateContentResponse, error], ch chan
 		}
 		if resp.UsageMetadata != nil {
 			usage = &provider.Usage{
-				InputTokens:  int(resp.UsageMetadata.PromptTokenCount),
-				OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount),
+				InputTokens: int(resp.UsageMetadata.PromptTokenCount),
+				// Thinking tokens are billed at the output rate but reported
+				// in their own bucket, outside candidates_token_count — fold
+				// them in so reasoning-heavy turns aren't under-counted.
+				OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount +
+					resp.UsageMetadata.ThoughtsTokenCount),
 				CachedTokens: int(resp.UsageMetadata.CachedContentTokenCount),
 			}
 		}
@@ -551,8 +557,11 @@ func (t *Translator) FromNative(response any) (*provider.LLMResponse, error) {
 
 	if resp.UsageMetadata != nil {
 		result.Usage = provider.Usage{
-			InputTokens:  int(resp.UsageMetadata.PromptTokenCount),
-			OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount),
+			InputTokens: int(resp.UsageMetadata.PromptTokenCount),
+			// Thinking tokens bill at the output rate but live in their own
+			// bucket outside candidates_token_count — fold them in.
+			OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount +
+				resp.UsageMetadata.ThoughtsTokenCount),
 			CachedTokens: int(resp.UsageMetadata.CachedContentTokenCount),
 		}
 	}

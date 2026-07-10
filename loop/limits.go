@@ -55,7 +55,7 @@ func (it *Iterator) tripUsageLimitIfExceeded(final string, turn int, usage *prov
 	it.resMu.RLock()
 	tokens := it.inputTokens + it.outputTokens
 	it.resMu.RUnlock()
-	br := it.loop.calculateCost(provider.Usage{Cost: it.apiCost}, it.inputTokens, it.outputTokens, it.cachedTokens)
+	br := it.loop.calculateCost(provider.Usage{Cost: it.apiCost}, it.inputTokens, it.outputTokens, it.cachedTokens, it.cacheWriteTokens)
 	if exceeded, _ := it.loop.usageLimits.exceeds(turn+1, tokens, br.TotalUSD); exceeded {
 		it.recordFinal(final, turn, "usage_exceeded")
 		it.steps <- Step{Type: StepFinalResponse, Content: final, Turn: turn, Usage: usage}

@@ -10,26 +10,40 @@ import (
 // CostConfig holds pricing for a specific model.
 type CostConfig struct {
 	// InputCostPer1MTokens is the USD cost per 1 million input tokens.
-	InputCostPer1MTokens float64
+	InputCostPer1MTokens float64 `json:"input"`
 
 	// OutputCostPer1MTokens is the USD cost per 1 million output tokens.
-	OutputCostPer1MTokens float64
+	OutputCostPer1MTokens float64 `json:"output"`
 
 	// CachedCostPer1MTokens is the USD cost per 1 million cached input tokens.
 	// Typically 50% discount on OpenAI, 90% on Anthropic.
-	CachedCostPer1MTokens float64
+	CachedCostPer1MTokens float64 `json:"cached"`
+
+	// CacheWriteCostPer1MTokens is the USD cost per 1 million cache-write
+	// input tokens (Anthropic bills cache_creation at 1.25× input). When
+	// zero and cache-write tokens are present, Calculate falls back to
+	// 1.25× InputCostPer1MTokens — the only provider that reports the
+	// bucket bills it exactly there.
+	CacheWriteCostPer1MTokens float64 `json:"cache_write"`
 }
 
 // CostBreakdown provides a detailed cost report.
 type CostBreakdown struct {
-	TotalUSD     float64
-	InputUSD     float64
-	OutputUSD    float64
-	CachedUSD    float64
-	SavingsUSD   float64
-	InputTokens  int
-	OutputTokens int
-	CachedTokens int
+	TotalUSD         float64
+	InputUSD         float64
+	OutputUSD        float64
+	CachedUSD        float64
+	CacheWriteUSD    float64
+	SavingsUSD       float64
+	InputTokens      int
+	OutputTokens     int
+	CachedTokens     int
+	CacheWriteTokens int
+
+	// Estimated is true when TotalUSD came from the pricing tables rather
+	// than an API-reported cost. False both for API-reported totals and for
+	// the all-zero "no pricing known" case (which warns instead).
+	Estimated bool
 }
 
 // CostModel is a thread-safe registry of model pricing.
@@ -66,30 +80,62 @@ func (cm *CostModel) WithCustomCost(model string, config CostConfig) {
 	cm.UpdateCost("custom", model, config)
 }
 
-// Calculate computes the cost for a given usage.
+// WithCustomCosts bulk-registers pricing overrides from a dict. Keys are
+// either "provider/model" (scoped to that provider's table, overriding the
+// built-in matrix entry) or a bare model id (registered in the "custom"
+// table, which wins over every built-in during lookup). Family-level keys
+// work the same as matrix keys ("gpt-5" prices "gpt-5-2025-08-07").
 //
-// When the upstream API reports a cost (usage.Cost > 0) it is authoritative
-// for TotalUSD; the input/output/cached split is estimated from the matrix
-// ratio so the breakdown stays populated (and degrades to zero on a matrix
-// miss). When usage.Cost is zero the cost is computed entirely from the
-// hardcoded matrix — its historical behaviour.
+// This is the config-file entry point: looper.json's model_costs feeds it.
+func (cm *CostModel) WithCustomCosts(costs map[string]CostConfig) {
+	for key, cfg := range costs {
+		if prov, model, ok := strings.Cut(key, "/"); ok && prov != "" && model != "" {
+			cm.UpdateCost(prov, model, cfg)
+			continue
+		}
+		cm.WithCustomCost(key, cfg)
+	}
+}
+
+// Calculate computes the cost for a given usage, resolving through the
+// precision cascade:
+//
+//  1. API-reported cost (usage.Cost > 0) is authoritative for TotalUSD —
+//     the upstream already billed it, success or failure. The component
+//     split is re-scaled from whatever pricing table matched so the
+//     breakdown stays populated.
+//  2. Otherwise the total is ESTIMATED from pricing tables — custom
+//     overrides (WithCustomCost / WithCustomCosts) first, then the
+//     built-in matrix — and Estimated is set.
+//  3. Neither available → all-zero breakdown plus a one-time warning.
 func (cm *CostModel) Calculate(provider, model string, usage Usage) CostBreakdown {
 	cm.mu.RLock()
 	config, matched := cm.lookup(provider, model)
 	cm.mu.RUnlock()
 
-	// Only warn about a missing matrix entry when there's no API-reported cost
-	// to fall back on — an upstream cost makes the matrix irrelevant here.
+	// Only warn about a missing pricing entry when there's no API-reported
+	// cost to fall back on — an upstream cost makes the tables irrelevant.
 	if !matched && usage.Cost == 0 {
 		cm.warnMiss(provider, model)
 	}
 
-	// Non-cached input tokens at full input price
-	nonCachedInput := usage.InputTokens - usage.CachedTokens
+	// InputTokens is the inclusive prompt total (see provider.Usage); the
+	// cached and cache-write buckets price differently, so carve them out.
+	// Clamp defensively: a provider that violated the ⊆ contract must not
+	// produce a negative full-rate bucket.
+	nonCachedInput := max(usage.InputTokens-usage.CachedTokens-usage.CacheWriteTokens, 0)
 	nonCachedCost := float64(nonCachedInput) / 1_000_000.0 * config.InputCostPer1MTokens
 
 	// Cached input tokens at cached (discounted) price
 	cachedCost := float64(usage.CachedTokens) / 1_000_000.0 * config.CachedCostPer1MTokens
+
+	// Cache-write tokens at the write premium (default 1.25× input when the
+	// config doesn't say otherwise — the Anthropic billing rule).
+	cacheWriteRate := config.CacheWriteCostPer1MTokens
+	if cacheWriteRate == 0 && usage.CacheWriteTokens > 0 {
+		cacheWriteRate = config.InputCostPer1MTokens * 1.25
+	}
+	cacheWriteCost := float64(usage.CacheWriteTokens) / 1_000_000.0 * cacheWriteRate
 
 	// Output tokens at output price
 	outputCost := float64(usage.OutputTokens) / 1_000_000.0 * config.OutputCostPer1MTokens
@@ -97,36 +143,42 @@ func (cm *CostModel) Calculate(provider, model string, usage Usage) CostBreakdow
 	// Savings from caching: what we would have paid for those tokens at full input rate
 	savings := (float64(usage.CachedTokens)/1_000_000.0*config.InputCostPer1MTokens) - cachedCost
 
-	matrixInput := nonCachedCost + cachedCost
-	matrixTotal := matrixInput + outputCost
+	tableInput := nonCachedCost + cachedCost + cacheWriteCost
+	tableTotal := tableInput + outputCost
 
 	breakdown := CostBreakdown{
-		TotalUSD:     matrixTotal,
-		InputUSD:     matrixInput,
-		OutputUSD:    outputCost,
-		CachedUSD:    cachedCost,
-		SavingsUSD:   savings,
-		InputTokens:  usage.InputTokens,
-		OutputTokens: usage.OutputTokens,
-		CachedTokens: usage.CachedTokens,
+		TotalUSD:         tableTotal,
+		InputUSD:         tableInput,
+		OutputUSD:        outputCost,
+		CachedUSD:        cachedCost,
+		CacheWriteUSD:    cacheWriteCost,
+		SavingsUSD:       savings,
+		InputTokens:      usage.InputTokens,
+		OutputTokens:     usage.OutputTokens,
+		CachedTokens:     usage.CachedTokens,
+		CacheWriteTokens: usage.CacheWriteTokens,
+		Estimated:        matched && tableTotal > 0,
 	}
 
-	// API-reported cost overrides the matrix total. Re-scale the matrix split
-	// to the reported total so the per-component breakdown stays consistent;
-	// when the matrix can't price this model (matrixTotal == 0) the split
-	// degrades to zero rather than being invented.
+	// API-reported cost overrides the estimated total. Re-scale the table
+	// split to the reported total so the per-component breakdown stays
+	// consistent; when no table can price this model (tableTotal == 0) the
+	// split degrades to zero rather than being invented.
 	if usage.Cost > 0 {
 		breakdown.TotalUSD = usage.Cost
-		if matrixTotal > 0 {
-			scale := usage.Cost / matrixTotal
-			breakdown.InputUSD = matrixInput * scale
+		breakdown.Estimated = false
+		if tableTotal > 0 {
+			scale := usage.Cost / tableTotal
+			breakdown.InputUSD = tableInput * scale
 			breakdown.OutputUSD = outputCost * scale
 			breakdown.CachedUSD = cachedCost * scale
+			breakdown.CacheWriteUSD = cacheWriteCost * scale
 			breakdown.SavingsUSD = savings * scale
 		} else {
 			breakdown.InputUSD = 0
 			breakdown.OutputUSD = 0
 			breakdown.CachedUSD = 0
+			breakdown.CacheWriteUSD = 0
 			breakdown.SavingsUSD = 0
 		}
 	}
@@ -135,27 +187,35 @@ func (cm *CostModel) Calculate(provider, model string, usage Usage) CostBreakdow
 }
 
 // lookup returns the price config for (provider, model) and whether a match
-// was found. The resolution order is:
+// was found. User-supplied custom pricing always outranks the built-in
+// matrix; within each table an exact id beats a family prefix. Resolution
+// order:
 //
-//  1. Exact match in the provider's table.
-//  2. Longest family-prefix match within the provider's table — i.e. the
-//     longest registered key K such that the model starts with K and the
-//     next character is a family separator (`-` or `.`). This lets
+//  1. Exact match in the "custom" table (WithCustomCost / bare-key dict).
+//  2. Longest family-prefix match in the "custom" table — the longest
+//     registered key K such that the model starts with K and the next
+//     character is a family separator (`-` or `.`).
+//  3. Exact match in the provider's table. Note UpdateCost(provider, …) and
+//     "provider/model" dict keys write here, so they override the matrix
+//     entry directly rather than racing it.
+//  4. Longest family-prefix match in the provider's table — this lets
 //     "claude-opus-4" match "claude-opus-4-7", "gpt-5" match "gpt-5.5",
 //     and any dated suffix ("…-20250514", "…-2025-08-07") fall back to its
 //     family.
-//  3. Exact match in the "custom" table.
 //
 // Returns (CostConfig{}, false) when nothing matches; the caller surfaces
 // the miss via warnMiss.
 func (cm *CostModel) lookup(provider, model string) (CostConfig, bool) {
+	if c, ok := exact(cm.prices, "custom", model); ok {
+		return c, true
+	}
+	if c, ok := longestFamily(cm.prices, "custom", model); ok {
+		return c, true
+	}
 	if c, ok := exact(cm.prices, provider, model); ok {
 		return c, true
 	}
 	if c, ok := longestFamily(cm.prices, provider, model); ok {
-		return c, true
-	}
-	if c, ok := exact(cm.prices, "custom", model); ok {
 		return c, true
 	}
 	return CostConfig{}, false

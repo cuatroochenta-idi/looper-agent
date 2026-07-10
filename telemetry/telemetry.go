@@ -123,7 +123,9 @@ func (ct *CostTracker) RecordCost(span trace.Span, cost CostBreakdown) {
 		attribute.Float64("looper.cost.input_usd", cost.InputUSD),
 		attribute.Float64("looper.cost.output_usd", cost.OutputUSD),
 		attribute.Float64("looper.cost.cached_usd", cost.CachedUSD),
+		attribute.Float64("looper.cost.cache_write_usd", cost.CacheWriteUSD),
 		attribute.Float64("looper.cost.savings_usd", cost.SavingsUSD),
+		attribute.Bool("looper.cost.estimated", cost.Estimated),
 	)
 }
 
@@ -133,6 +135,7 @@ func (ct *CostTracker) RecordUsage(span trace.Span, usage Usage) {
 		attribute.Int("looper.tokens.prompt", usage.InputTokens),
 		attribute.Int("looper.tokens.completion", usage.OutputTokens),
 		attribute.Int("looper.tokens.cached", usage.CachedTokens),
+		attribute.Int("looper.tokens.cache_write", usage.CacheWriteTokens),
 		attribute.Int("looper.tokens.total", usage.InputTokens+usage.OutputTokens),
 	)
 }
@@ -146,14 +149,18 @@ func (ct *CostTracker) RecordCacheHit(span trace.Span, cachedTokens int, savings
 	)
 }
 
-// Usage mirrors provider.Usage in the telemetry package.
+// Usage mirrors provider.Usage in the telemetry package. Same normalisation
+// contract: InputTokens is the inclusive prompt total; CachedTokens (reads)
+// and CacheWriteTokens (writes) are subsets of it.
 type Usage struct {
-	InputTokens  int
-	OutputTokens int
-	CachedTokens int
+	InputTokens      int
+	OutputTokens     int
+	CachedTokens     int
+	CacheWriteTokens int
 
 	// Cost is the USD cost reported by the upstream API for this usage, when
 	// the provider returns it (e.g. OpenRouter's usage.cost). Zero means the
-	// API reported no cost and CostModel.Calculate falls back to the matrix.
+	// API reported no cost and CostModel.Calculate estimates from its pricing
+	// tables (custom overrides first, then the built-in matrix).
 	Cost float64
 }

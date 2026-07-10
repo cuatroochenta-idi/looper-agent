@@ -92,35 +92,41 @@ func defaultCosts() map[string]map[string]CostConfig {
 			// across minor versions (4.0 through 4.7+). Dated ids like
 			// "claude-opus-4-7-20260301" inherit from these via prefix lookup.
 			"claude-opus-4": {
-				InputCostPer1MTokens:  15.00,
-				OutputCostPer1MTokens: 75.00,
-				CachedCostPer1MTokens: 1.50, // 90% discount
+				InputCostPer1MTokens:      15.00,
+				OutputCostPer1MTokens:     75.00,
+				CachedCostPer1MTokens:     1.50,  // 90% discount
+				CacheWriteCostPer1MTokens: 18.75, // 1.25x input
 			},
 			"claude-sonnet-4": {
-				InputCostPer1MTokens:  3.00,
-				OutputCostPer1MTokens: 15.00,
-				CachedCostPer1MTokens: 0.30,
+				InputCostPer1MTokens:      3.00,
+				OutputCostPer1MTokens:     15.00,
+				CachedCostPer1MTokens:     0.30,
+				CacheWriteCostPer1MTokens: 3.75, // 1.25x input
 			},
 			"claude-haiku-4": {
-				InputCostPer1MTokens:  1.00,
-				OutputCostPer1MTokens: 5.00,
-				CachedCostPer1MTokens: 0.10,
+				InputCostPer1MTokens:      1.00,
+				OutputCostPer1MTokens:     5.00,
+				CachedCostPer1MTokens:     0.10,
+				CacheWriteCostPer1MTokens: 1.25, // 1.25x input
 			},
 			// Legacy 3.x.
 			"claude-3.5-sonnet": {
-				InputCostPer1MTokens:  3.00,
-				OutputCostPer1MTokens: 15.00,
-				CachedCostPer1MTokens: 0.30,
+				InputCostPer1MTokens:      3.00,
+				OutputCostPer1MTokens:     15.00,
+				CachedCostPer1MTokens:     0.30,
+				CacheWriteCostPer1MTokens: 3.75, // 1.25x input
 			},
 			"claude-3.5-haiku": {
-				InputCostPer1MTokens:  0.80,
-				OutputCostPer1MTokens: 4.00,
-				CachedCostPer1MTokens: 0.08,
+				InputCostPer1MTokens:      0.80,
+				OutputCostPer1MTokens:     4.00,
+				CachedCostPer1MTokens:     0.08,
+				CacheWriteCostPer1MTokens: 1.00, // 1.25x input
 			},
 			"claude-3-opus": {
-				InputCostPer1MTokens:  15.00,
-				OutputCostPer1MTokens: 75.00,
-				CachedCostPer1MTokens: 1.50,
+				InputCostPer1MTokens:      15.00,
+				OutputCostPer1MTokens:     75.00,
+				CachedCostPer1MTokens:     1.50,
+				CacheWriteCostPer1MTokens: 18.75, // 1.25x input
 			},
 		},
 		"google": {

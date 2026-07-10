@@ -130,21 +130,31 @@ type RunResult struct {
 
 // CostBreakdown reports cost information for a run.
 type CostBreakdown struct {
-	TotalUSD     float64
-	InputUSD     float64
-	OutputUSD    float64
-	CachedUSD    float64
-	SavingsUSD   float64
-	InputTokens  int
-	OutputTokens int
-	CachedTokens int
+	TotalUSD         float64
+	InputUSD         float64
+	OutputUSD        float64
+	CachedUSD        float64
+	CacheWriteUSD    float64
+	SavingsUSD       float64
+	InputTokens      int
+	OutputTokens     int
+	CachedTokens     int
+	CacheWriteTokens int
+
+	// Estimated is true when TotalUSD was derived from pricing tables
+	// rather than an API-reported cost (telemetry.CostBreakdown.Estimated;
+	// true on the aggregate when ANY contributing call was estimated).
+	Estimated bool
 }
 
-// Usage reports token usage.
+// Usage reports token usage. Same normalisation contract as provider.Usage:
+// InputTokens is the inclusive prompt total; CachedTokens (reads) and
+// CacheWriteTokens (writes) are subsets of it.
 type Usage struct {
-	InputTokens  int
-	OutputTokens int
-	CachedTokens int
+	InputTokens      int
+	OutputTokens     int
+	CachedTokens     int
+	CacheWriteTokens int
 }
 
 // AgentLoop manages the iterative LLM → tool execution cycle.
@@ -446,6 +456,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 		totalInputTokens         int
 		totalOutputTokens        int
 		totalCachedTokens        int
+		totalCacheWriteTokens    int
 		status                   = "completed"
 		consecutiveValidatorFail int
 		outputRetriesUsed        int
@@ -512,6 +523,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 		totalInputTokens += llmResp.Usage.InputTokens
 		totalOutputTokens += llmResp.Usage.OutputTokens
 		totalCachedTokens += llmResp.Usage.CachedTokens
+		totalCacheWriteTokens += llmResp.Usage.CacheWriteTokens
 		stats.add(llmResp, providerLabel(l.provider), l.model)
 
 		// Add assistant message
@@ -527,7 +539,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 				Output:        lastAttemptedOutput,
 				History:       history,
 				Cost:          cost,
-				Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+				Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens, totalCacheWriteTokens},
 				Turns:         turn + 1,
 				Status:        "usage_exceeded",
 				Providers:     providers,
@@ -555,7 +567,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 						Output:        out,
 						History:       history,
 						Cost:          cost,
-						Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+						Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens, totalCacheWriteTokens},
 						Turns:         turn + 1,
 						Status:        "validation_exhausted",
 						Providers:     providers,
@@ -579,7 +591,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 						Output:        lastStructuredCandidate,
 						History:       history,
 						Cost:          cost,
-						Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+						Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens, totalCacheWriteTokens},
 						Turns:         turn + 1,
 						Status:        "output_validation_exhausted",
 						Providers:     providers,
@@ -591,7 +603,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 					Output:        out,
 					History:       history,
 					Cost:          cost,
-					Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+					Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens, totalCacheWriteTokens},
 					Turns:         turn + 1,
 					Status:        status,
 					Providers:     providers,
@@ -637,7 +649,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 					Output:        pickHaltFinalText(lastAttemptedOutput, toolResults),
 					History:       history,
 					Cost:          cost,
-					Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+					Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens, totalCacheWriteTokens},
 					Turns:         turn + 1,
 					Status:        "halted_by_tool",
 					Providers:     providers,
@@ -675,7 +687,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 				Output:        lastAttemptedOutput,
 				History:       history,
 				Cost:          cost,
-				Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+				Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens, totalCacheWriteTokens},
 				Turns:         turn + 1,
 				Status:        "validation_exhausted",
 				Providers:     providers,
@@ -696,7 +708,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 				Output:        llmResp.Content,
 				History:       history,
 				Cost:          cost,
-				Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens},
+				Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens, totalCacheWriteTokens},
 				Turns:         turn + 1,
 				Status:        status,
 				Providers:     providers,
@@ -910,11 +922,12 @@ func (l *AgentLoop) resolveRunConfig(opts []RunOption) *runConfig {
 // single-provider case. Multi-provider chains must use finalizeRun
 // instead — it iterates the runStats accumulator and bills each
 // (provider, model) entry at its own rate before summing.
-func (l *AgentLoop) calculateCost(u provider.Usage, totalInput, totalOutput, totalCached int) CostBreakdown {
+func (l *AgentLoop) calculateCost(u provider.Usage, totalInput, totalOutput, totalCached, totalCacheWrite int) CostBreakdown {
 	tokens := CostBreakdown{
-		InputTokens:  totalInput,
-		OutputTokens: totalOutput,
-		CachedTokens: totalCached,
+		InputTokens:      totalInput,
+		OutputTokens:     totalOutput,
+		CachedTokens:     totalCached,
+		CacheWriteTokens: totalCacheWrite,
 	}
 	if l.costModel == nil {
 		// No matrix configured, but an API-reported cost is still valid.
@@ -929,20 +942,24 @@ func (l *AgentLoop) calculateCost(u provider.Usage, totalInput, totalOutput, tot
 		}
 	}
 	br := l.costModel.Calculate(providerName, modelName, telemetry.Usage{
-		InputTokens:  totalInput,
-		OutputTokens: totalOutput,
-		CachedTokens: totalCached,
-		Cost:         u.Cost,
+		InputTokens:      totalInput,
+		OutputTokens:     totalOutput,
+		CachedTokens:     totalCached,
+		CacheWriteTokens: totalCacheWrite,
+		Cost:             u.Cost,
 	})
 	return CostBreakdown{
-		TotalUSD:     br.TotalUSD,
-		InputUSD:     br.InputUSD,
-		OutputUSD:    br.OutputUSD,
-		CachedUSD:    br.CachedUSD,
-		SavingsUSD:   br.SavingsUSD,
-		InputTokens:  totalInput,
-		OutputTokens: totalOutput,
-		CachedTokens: totalCached,
+		TotalUSD:         br.TotalUSD,
+		InputUSD:         br.InputUSD,
+		OutputUSD:        br.OutputUSD,
+		CachedUSD:        br.CachedUSD,
+		CacheWriteUSD:    br.CacheWriteUSD,
+		SavingsUSD:       br.SavingsUSD,
+		InputTokens:      totalInput,
+		OutputTokens:     totalOutput,
+		CachedTokens:     totalCached,
+		CacheWriteTokens: totalCacheWrite,
+		Estimated:        br.Estimated,
 	}
 }
 
@@ -967,11 +984,14 @@ func (l *AgentLoop) finalizeRun(stats *runStats) (CostBreakdown, []ProviderStats
 		total.InputUSD += ps.Cost.InputUSD
 		total.OutputUSD += ps.Cost.OutputUSD
 		total.CachedUSD += ps.Cost.CachedUSD
+		total.CacheWriteUSD += ps.Cost.CacheWriteUSD
 		total.SavingsUSD += ps.Cost.SavingsUSD
 		total.TotalUSD += ps.Cost.TotalUSD
 		total.InputTokens += ps.Usage.InputTokens
 		total.OutputTokens += ps.Usage.OutputTokens
 		total.CachedTokens += ps.Usage.CachedTokens
+		total.CacheWriteTokens += ps.Usage.CacheWriteTokens
+		total.Estimated = total.Estimated || ps.Cost.Estimated
 	}
 	return total, providers, stats.fallbackCount()
 }
@@ -1193,10 +1213,11 @@ type Iterator struct {
 	output       string
 	status       string
 	turns        int
-	inputTokens  int
-	outputTokens int
-	cachedTokens int
-	apiCost      float64
+	inputTokens      int
+	outputTokens     int
+	cachedTokens     int
+	cacheWriteTokens int
+	apiCost          float64
 	history      *message.History
 
 	// stats is the per-(provider, model) accumulator. Populated alongside
@@ -1271,6 +1292,7 @@ func (it *Iterator) recordUsage(u provider.Usage) {
 	it.inputTokens += u.InputTokens
 	it.outputTokens += u.OutputTokens
 	it.cachedTokens += u.CachedTokens
+	it.cacheWriteTokens += u.CacheWriteTokens
 	it.apiCost += u.Cost
 }
 
@@ -1288,12 +1310,13 @@ func (it *Iterator) recordResponse(resp *provider.LLMResponse) {
 	}
 }
 
-// recordChunk adds the FINAL chunk of a streaming response to both the
-// legacy totals and the per-(provider, model) accumulator. Non-final
-// chunks (or chunks without Usage) are ignored — only the wire-final
-// chunk carries the usage and provenance signals.
+// recordChunk adds a usage-carrying chunk of a streaming response to both
+// the legacy totals and the per-(provider, model) accumulator. Providers
+// attach Usage only to final chunks and to error chunks (partial usage from
+// a call that died mid-stream) — ordinary deltas carry none and are ignored,
+// so a chunk is recorded at most once per call.
 func (it *Iterator) recordChunk(c provider.StreamChunk) {
-	if !c.IsFinal || c.Usage == nil {
+	if c.Usage == nil {
 		return
 	}
 	it.recordUsage(*c.Usage)
@@ -1371,16 +1394,17 @@ func (it *Iterator) Result() RunResult {
 	if it.stats != nil {
 		cost, providers, fallbackCalls = it.loop.finalizeRun(it.stats)
 	} else {
-		cost = it.loop.calculateCost(provider.Usage{Cost: it.apiCost}, it.inputTokens, it.outputTokens, it.cachedTokens)
+		cost = it.loop.calculateCost(provider.Usage{Cost: it.apiCost}, it.inputTokens, it.outputTokens, it.cachedTokens, it.cacheWriteTokens)
 	}
 	return RunResult{
 		Output:  it.output,
 		History: it.history,
 		Cost:    cost,
 		Usage: Usage{
-			InputTokens:  it.inputTokens,
-			OutputTokens: it.outputTokens,
-			CachedTokens: it.cachedTokens,
+			InputTokens:      it.inputTokens,
+			OutputTokens:     it.outputTokens,
+			CachedTokens:     it.cachedTokens,
+			CacheWriteTokens: it.cacheWriteTokens,
 		},
 		Turns:         it.turns,
 		Status:        status,
@@ -1476,7 +1500,20 @@ func (it *Iterator) run(ctx context.Context) {
 			var fullContent string
 			for chunk := range stream {
 				if chunk.Error != nil {
-					it.steps <- Step{Type: StepError, Error: chunk.Error, Turn: turn}
+					// Bill the partial usage BEFORE surfacing the error: the
+					// upstream already charged for the tokens it consumed,
+					// so a failed call must not read as free.
+					it.recordChunk(chunk)
+					it.steps <- Step{
+						Type:         StepError,
+						Error:        chunk.Error,
+						Turn:         turn,
+						Usage:        chunk.Usage,
+						ProviderID:   chunk.ProviderID,
+						ModelID:      chunk.ModelID,
+						Fallback:     chunk.Fallback,
+						APIKeySuffix: chunk.APIKeySuffix,
+					}
 					return
 				}
 				// Provider contract: deltas while streaming, then a final chunk

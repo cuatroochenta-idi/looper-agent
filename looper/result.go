@@ -46,21 +46,30 @@ type ProviderStats = loop.ProviderStats
 
 // CostBreakdown provides detailed cost information for a run.
 type CostBreakdown struct {
-	TotalUSD     float64
-	InputUSD     float64
-	OutputUSD    float64
-	CachedUSD    float64
-	SavingsUSD   float64
-	InputTokens  int
-	OutputTokens int
-	CachedTokens int
+	TotalUSD         float64
+	InputUSD         float64
+	OutputUSD        float64
+	CachedUSD        float64
+	CacheWriteUSD    float64
+	SavingsUSD       float64
+	InputTokens      int
+	OutputTokens     int
+	CachedTokens     int
+	CacheWriteTokens int
+
+	// Estimated is true when TotalUSD came from pricing tables rather than
+	// an API-reported cost (true if ANY contributing call was estimated).
+	Estimated bool
 }
 
-// Usage reports token consumption for a run.
+// Usage reports token consumption for a run. InputTokens is the inclusive
+// prompt total; CachedTokens (cache reads) and CacheWriteTokens (cache
+// writes) are subsets of it.
 type Usage struct {
-	InputTokens  int
-	OutputTokens int
-	CachedTokens int
+	InputTokens      int
+	OutputTokens     int
+	CachedTokens     int
+	CacheWriteTokens int
 }
 
 // ToolConfig is a convenience re-export for basic usage.

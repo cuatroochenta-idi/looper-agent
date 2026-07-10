@@ -371,16 +371,18 @@ func (a *Agent) Iterate(ctx context.Context, input string, opts ...RunOption) *l
 	}, func() {
 		res := inner.Result()
 		tw.send(TraceRunEnd, runID, RunEndData{
-			Output:        res.Output,
-			Status:        res.Status,
-			Turns:         res.Turns,
-			TotalUSD:      res.Cost.TotalUSD,
-			InputTokens:   res.Usage.InputTokens,
-			OutputTokens:  res.Usage.OutputTokens,
-			CachedTokens:  res.Usage.CachedTokens,
-			EndedAt:       time.Now().Format(time.RFC3339Nano),
-			Providers:     providersFromLoop(res.Providers),
-			FallbackCalls: res.FallbackCalls,
+			Output:           res.Output,
+			Status:           res.Status,
+			Turns:            res.Turns,
+			TotalUSD:         res.Cost.TotalUSD,
+			CostEstimated:    res.Cost.Estimated,
+			InputTokens:      res.Usage.InputTokens,
+			OutputTokens:     res.Usage.OutputTokens,
+			CachedTokens:     res.Usage.CachedTokens,
+			CacheWriteTokens: res.Usage.CacheWriteTokens,
+			EndedAt:          time.Now().Format(time.RFC3339Nano),
+			Providers:        providersFromLoop(res.Providers),
+			FallbackCalls:    res.FallbackCalls,
 		})
 		tw.close()
 	})
@@ -447,22 +449,26 @@ func newRunID() string {
 // costBreakdownFromLoop converts loop.CostBreakdown to the public type.
 func costBreakdownFromLoop(cb loop.CostBreakdown) CostBreakdown {
 	return CostBreakdown{
-		TotalUSD:     cb.TotalUSD,
-		InputUSD:     cb.InputUSD,
-		OutputUSD:    cb.OutputUSD,
-		CachedUSD:    cb.CachedUSD,
-		SavingsUSD:   cb.SavingsUSD,
-		InputTokens:  cb.InputTokens,
-		OutputTokens: cb.OutputTokens,
-		CachedTokens: cb.CachedTokens,
+		TotalUSD:         cb.TotalUSD,
+		InputUSD:         cb.InputUSD,
+		OutputUSD:        cb.OutputUSD,
+		CachedUSD:        cb.CachedUSD,
+		CacheWriteUSD:    cb.CacheWriteUSD,
+		SavingsUSD:       cb.SavingsUSD,
+		InputTokens:      cb.InputTokens,
+		OutputTokens:     cb.OutputTokens,
+		CachedTokens:     cb.CachedTokens,
+		CacheWriteTokens: cb.CacheWriteTokens,
+		Estimated:        cb.Estimated,
 	}
 }
 
 // usageFromLoop converts loop.Usage to the public type.
 func usageFromLoop(u loop.Usage) Usage {
 	return Usage{
-		InputTokens:  u.InputTokens,
-		OutputTokens: u.OutputTokens,
-		CachedTokens: u.CachedTokens,
+		InputTokens:      u.InputTokens,
+		OutputTokens:     u.OutputTokens,
+		CachedTokens:     u.CachedTokens,
+		CacheWriteTokens: u.CacheWriteTokens,
 	}
 }
