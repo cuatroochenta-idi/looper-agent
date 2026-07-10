@@ -4,6 +4,14 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.6.1] — 2026-07-10
+
+### Security
+
+- Bumped indirect dependency `golang.org/x/net` to v0.55.0
+  ([Dependabot alert](https://github.com/cuatroochenta-idi/looper-agent/security/dependabot/2):
+  moderate DoS in the HTML parser affected `< 0.55.0`).
+
 ## [v1.6.0] — 2026-07-10
 
 The supervision panel grows up: a JSON REST + typed SSE API behind an embedded
