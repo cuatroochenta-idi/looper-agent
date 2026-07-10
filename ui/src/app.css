@@ -1,0 +1,256 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* ------------------------------------------------------------------ *
+ * Runtime theme tokens. `data-theme` on <html> flips the whole set.
+ * @theme inline (below) maps Tailwind utilities onto these vars so a
+ * runtime attribute swap re-themes everything with no rebuild.
+ * ------------------------------------------------------------------ */
+:root,
+:root[data-theme="dark"] {
+  --bg: #0a0d12;
+  --bg-raised: #0f131a;
+  --card: #11151c;
+  --card-hover: #141924;
+  --input: #181d26;
+  --sunken: #0d1117;
+  --line: #1f2530;
+  --line-strong: #2a323f;
+
+  --text: #e5e7ec;
+  --muted: #8a909c;
+  --faint: #5b626f;
+
+  --accent: #7c8df8;
+  --accent-soft: rgba(124, 141, 248, 0.14);
+  --accent-line: rgba(124, 141, 248, 0.35);
+
+  --success: #4ade80;
+  --success-soft: rgba(74, 222, 128, 0.13);
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.13);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.13);
+  --info: #60a5fa;
+  --info-soft: rgba(96, 165, 250, 0.13);
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.5);
+  --shadow-pop: 0 8px 30px -8px rgba(0, 0, 0, 0.6);
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #f6f7f9;
+  --bg-raised: #ffffff;
+  --card: #ffffff;
+  --card-hover: #fbfbfd;
+  --input: #f1f3f6;
+  --sunken: #eef0f4;
+  --line: #e4e7ec;
+  --line-strong: #d3d8e0;
+
+  --text: #1a1f28;
+  --muted: #5f6672;
+  --faint: #9aa0ac;
+
+  --accent: #4f46e5;
+  --accent-soft: rgba(79, 70, 229, 0.1);
+  --accent-line: rgba(79, 70, 229, 0.3);
+
+  --success: #16a34a;
+  --success-soft: rgba(22, 163, 74, 0.1);
+  --warning: #d97706;
+  --warning-soft: rgba(217, 119, 6, 0.1);
+  --danger: #dc2626;
+  --danger-soft: rgba(220, 38, 38, 0.1);
+  --info: #2563eb;
+  --info-soft: rgba(37, 99, 235, 0.1);
+
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px -16px rgba(16, 24, 40, 0.12);
+  --shadow-pop: 0 8px 30px -8px rgba(16, 24, 40, 0.16);
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-raised: var(--bg-raised);
+  --color-card: var(--card);
+  --color-card-hover: var(--card-hover);
+  --color-input: var(--input);
+  --color-sunken: var(--sunken);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-line: var(--accent-line);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", monospace;
+
+  --radius-lg: 12px;
+  --radius-md: 10px;
+  --radius-sm: 8px;
+}
+
+/* ------------------------------------------------------------------ *
+ * Base
+ * ------------------------------------------------------------------ */
+html {
+  background: var(--bg);
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv11", "ss01";
+}
+
+* {
+  border-color: var(--line);
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+/* Tabular numerics wherever mono is used. */
+.font-mono,
+code,
+kbd {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Scrollbars tuned for the dark surfaces. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--faint);
+  background-clip: content-box;
+  border: 3px solid transparent;
+}
+
+/* ------------------------------------------------------------------ *
+ * Motion — calm pulse for live/running items.
+ * ------------------------------------------------------------------ */
+@keyframes looper-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 var(--accent-soft);
+  }
+  50% {
+    opacity: 0.65;
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+.pulse {
+  animation: looper-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes looper-ring {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+    opacity: 0.55;
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 6px transparent;
+    opacity: 0;
+  }
+}
+
+@keyframes looper-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.fade-up {
+  animation: looper-fade-up 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes looper-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spin {
+  animation: looper-spin 0.7s linear infinite;
+}
+
+@keyframes looper-caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+.caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: looper-caret 1s step-end infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse,
+  .spin,
+  .fade-up,
+  .caret::after {
+    animation: none;
+  }
+}
+
+/* Utility: subtle grid atmosphere for empty canvases. */
+.bg-grid {
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 34px 34px;
+  background-position: center;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 40%, black 30%, transparent 75%);
+  opacity: 0.4;
+}
