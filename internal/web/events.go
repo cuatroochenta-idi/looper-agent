@@ -213,7 +213,15 @@ func writeRaw(w http.ResponseWriter, rc *http.ResponseController, b []byte) erro
 	if err := rc.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return err
 	}
-	return rc.SetWriteDeadline(time.Time{})
+	// Tolerate ErrNotSupported here too: a ResponseWriter without deadline
+	// support (embedded panels bridge SSE through non-net/http transports)
+	// must not kill the stream right after a successful write — that bug
+	// closed every embedded stream after the ": connected" prelude.
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	return nil
 }
 
 // logSSEError reports stream failures that are NOT the client simply going away.

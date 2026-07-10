@@ -4,6 +4,19 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.7.1] — 2026-07-10
+
+### Fixed
+
+- **Embedded panels never received live SSE events.** The SSE writer's
+  trailing write-deadline reset treated `http.ErrNotSupported` as fatal, so
+  any `http.ResponseWriter` without deadline support (e.g. an embedded panel
+  bridging the stream through a non-net/http transport) had its stream
+  closed right after the `: connected` prelude — the SPA fell into a silent
+  reconnect loop and live updates never arrived. Deadline-less writers are
+  now tolerated end to end, matching the tolerance the write/flush calls
+  already had.
+
 ## [v1.7.0] — 2026-07-10
 
 The supervision panel becomes embeddable: a public `analytics` package mounts

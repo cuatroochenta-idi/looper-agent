@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -216,5 +217,68 @@ func getJSONURL(t *testing.T, url string, out any) {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		t.Fatalf("GET %s: decode: %v", url, err)
+	}
+}
+
+// deadlineLessWriter is an http.ResponseWriter + Flusher WITHOUT write-deadline
+// support — the shape embedded panels present when they bridge SSE through a
+// non-net/http transport (e.g. fasthttp). http.ResponseController returns
+// ErrNotSupported for SetWriteDeadline on it.
+type deadlineLessWriter struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	header http.Header
+}
+
+func (w *deadlineLessWriter) Header() http.Header { return w.header }
+func (w *deadlineLessWriter) WriteHeader(int)     {}
+func (w *deadlineLessWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+func (w *deadlineLessWriter) Flush() {}
+func (w *deadlineLessWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// Regression: a writer without deadline support must NOT kill the stream after
+// the prelude (writeRaw's trailing SetWriteDeadline reset used to return
+// ErrNotSupported as a fatal error, so embedded panels never got live events).
+func TestHandleEvents_WriterWithoutDeadlines_StreamsEvents(t *testing.T) {
+	srv, err := NewServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &deadlineLessWriter{header: make(http.Header)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest("GET", "/api/events?topics=runs", nil).WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() { srv.handleEvents(w, req); close(done) }()
+
+	waitFor := func(substr string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for !strings.Contains(w.String(), substr) {
+			if time.Now().After(deadline) {
+				t.Fatalf("stream never contained %q; got: %q", substr, w.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	waitFor(": connected") // subscription registered
+	srv.publishRunsChanged()
+	waitFor("event: runs_changed") // the stream must survive past the prelude
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not exit on context cancel")
 	}
 }
