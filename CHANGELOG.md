@@ -4,6 +4,49 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.7.0] — 2026-07-10
+
+The supervision panel becomes embeddable: a public `analytics` package mounts
+the whole panel inside a host Go binary, with in-process trace delivery — the
+monolith-friendly alternative to a `looper serve` sidecar.
+
+### Added
+
+- **`analytics` package — embedded panel.** `analytics.New(ctx, Config)`
+  composes the CLI's own building blocks (web server, store connectors, trace
+  pipeline) into a value that is both a plain `http.Handler` (SPA +
+  `/api/state/*` + `/api/events` SSE + `/ingest`) and a `looper.TraceSink`.
+  Config selects the store connector (`PostgresDSN` with embedded migrations,
+  `StoreDir` JSON folder, or in-memory), the public `BasePath`, and an
+  optional `IngestToken` guarding only the HTTP `/ingest` route. The embedded
+  panel ships **without** its own login gate by design: the host's
+  authentication/permission middleware wraps the route, and `GET /api/me`
+  reports an open panel so the SPA skips its login screen.
+- **`looper.TraceSink` + `looper.WithTraceSink`.** The tracing transport is
+  now a port: the default adapter still POSTs to `LOOPER_TRACE_ENDPOINT`,
+  while `WithTraceSink` routes an agent's events to an in-process sink with
+  identical queue/backpressure semantics (async worker, silent drops on
+  overflow, inline delivery for `run_start`/`run_end`). Sub-agent parent
+  linkage via context is unchanged.
+- **Base-path-aware SPA.** `internal/web.WithBasePath` injects the mount
+  point into `index.html` (`window.__LOOPER_BASE__` + `<base>` tag); the
+  bundle now builds with relative asset URLs and derives router base, API
+  calls, SSE stream, and login redirects from the injected value. Served at
+  root, behavior is byte-for-byte what it was.
+- New example `21_embedded_analytics` (host app + in-house middleware +
+  in-process tracing).
+
+### Changed
+
+- `internal/web.Server` gained `IngestEvent(TraceEvent) error` — the
+  transport-agnostic core behind `POST /ingest`; the HTTP handler is now a
+  thin decoder over it.
+- **gpt-5.6 pricing.** Official rates for `gpt-5.6-sol` / `gpt-5.6-terra` /
+  `gpt-5.6-luna` (July 2026). Previously these ids family-matched the gpt-5
+  entry — a 4× underestimate for Sol. Cache reads keep the 90% discount;
+  cache writes bill at the existing 1.25×-input fallback, which matches the
+  published rates exactly.
+
 ## [v1.6.2] — 2026-07-10
 
 ### Security

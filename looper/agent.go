@@ -62,6 +62,7 @@ type Agent struct {
 	usageLimits            loop.UsageLimits
 	outputMaxRetries       int
 	outputCustomValidator  func(raw []byte) error
+	traceSink              TraceSink
 }
 
 // NewAgent creates a new agent with the given provider, system prompt, and
@@ -333,7 +334,11 @@ func (a *Agent) Iterate(ctx context.Context, input string, opts ...RunOption) *l
 		runID = newRunID()
 	}
 
-	tw := newTraceWriterFromEnv(ctx, cfg.sessionID)
+	// In-process sink (embedded panel) wins over the env HTTP transport.
+	tw := newTraceWriterForSink(ctx, a.traceSink, cfg.sessionID)
+	if tw == nil {
+		tw = newTraceWriterFromEnv(ctx, cfg.sessionID)
+	}
 
 	// Stamp our runID on ctx so that any tool function executed by this run
 	// can spawn a sub-agent and have that sub-agent record us as its parent.

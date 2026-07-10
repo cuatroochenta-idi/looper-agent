@@ -8,84 +8,84 @@ func TestCostModelCalculate(t *testing.T) {
 	cm := NewCostModel()
 
 	tests := []struct {
-		name       string
-		provider   string
-		model      string
-		usage      Usage
-		wantTotal  float64
-		wantCached float64
+		name        string
+		provider    string
+		model       string
+		usage       Usage
+		wantTotal   float64
+		wantCached  float64
 		wantSavings float64
 	}{
 		{
-			name:       "gpt-4o basic",
-			provider:   "openai",
-			model:      "gpt-4o",
-			usage:      Usage{InputTokens: 1000, OutputTokens: 500, CachedTokens: 0},
-			wantTotal:  0.0075, // 1000/1M * 2.50 + 500/1M * 10.00 = 0.0025 + 0.005 = 0.0075
-			wantCached: 0,
+			name:        "gpt-4o basic",
+			provider:    "openai",
+			model:       "gpt-4o",
+			usage:       Usage{InputTokens: 1000, OutputTokens: 500, CachedTokens: 0},
+			wantTotal:   0.0075, // 1000/1M * 2.50 + 500/1M * 10.00 = 0.0025 + 0.005 = 0.0075
+			wantCached:  0,
 			wantSavings: 0,
 		},
 		{
-			name:       "gpt-4o with cached tokens",
-			provider:   "openai",
-			model:      "gpt-4o",
-			usage:      Usage{InputTokens: 1000, OutputTokens: 500, CachedTokens: 1000},
-			wantTotal:  0.00625, // 0/1M*2.50 + 1000/1M*1.25 + 500/1M*10 = 0 + 0.00125 + 0.005 = 0.00625
-			wantCached: 0.00125,
+			name:        "gpt-4o with cached tokens",
+			provider:    "openai",
+			model:       "gpt-4o",
+			usage:       Usage{InputTokens: 1000, OutputTokens: 500, CachedTokens: 1000},
+			wantTotal:   0.00625, // 0/1M*2.50 + 1000/1M*1.25 + 500/1M*10 = 0 + 0.00125 + 0.005 = 0.00625
+			wantCached:  0.00125,
 			wantSavings: 0.00125, // (1000/1M*2.50) - 0.00125 = 0.0025 - 0.00125 = 0.00125
 		},
 		{
-			name:       "gpt-4o-mini zero tokens",
-			provider:   "openai",
-			model:      "gpt-4o-mini",
-			usage:      Usage{InputTokens: 0, OutputTokens: 0, CachedTokens: 0},
-			wantTotal:  0,
-			wantCached: 0,
+			name:        "gpt-4o-mini zero tokens",
+			provider:    "openai",
+			model:       "gpt-4o-mini",
+			usage:       Usage{InputTokens: 0, OutputTokens: 0, CachedTokens: 0},
+			wantTotal:   0,
+			wantCached:  0,
 			wantSavings: 0,
 		},
 		{
-			name:       "claude sonnet",
-			provider:   "anthropic",
-			model:      "claude-sonnet-4-20250514",
-			usage:      Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000, CachedTokens: 0},
-			wantTotal:  18.0, // 1M/1M*3.0 + 1M/1M*15.0 = 3 + 15 = 18
-			wantCached: 0,
+			name:        "claude sonnet",
+			provider:    "anthropic",
+			model:       "claude-sonnet-4-20250514",
+			usage:       Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000, CachedTokens: 0},
+			wantTotal:   18.0, // 1M/1M*3.0 + 1M/1M*15.0 = 3 + 15 = 18
+			wantCached:  0,
 			wantSavings: 0,
 		},
 		{
-			name:       "claude sonnet cached",
-			provider:   "anthropic",
-			model:      "claude-sonnet-4-20250514",
-			usage:      Usage{InputTokens: 1_000_000, OutputTokens: 500_000, CachedTokens: 1_000_000},
-			wantTotal:  7.8, // 0 + 1M/1M*0.30 + 500k/1M*15 = 0 + 0.30 + 7.5 = 7.80
-			wantCached: 0.30,
+			name:        "claude sonnet cached",
+			provider:    "anthropic",
+			model:       "claude-sonnet-4-20250514",
+			usage:       Usage{InputTokens: 1_000_000, OutputTokens: 500_000, CachedTokens: 1_000_000},
+			wantTotal:   7.8, // 0 + 1M/1M*0.30 + 500k/1M*15 = 0 + 0.30 + 7.5 = 7.80
+			wantCached:  0.30,
 			wantSavings: 2.70, // (1M/1M*3.0) - 0.30 = 2.70
 		},
 		{
-			name:       "gemini flash",
-			provider:   "google",
-			model:      "gemini-2.5-flash",
-			usage:      Usage{InputTokens: 100_000, OutputTokens: 10_000, CachedTokens: 0},
-			wantTotal:  0.021, // 100k/1M*0.15 + 10k/1M*0.60 = 0.015 + 0.006 = 0.021
-			wantCached: 0,
+			name:        "gemini flash",
+			provider:    "google",
+			model:       "gemini-2.5-flash",
+			usage:       Usage{InputTokens: 100_000, OutputTokens: 10_000, CachedTokens: 0},
+			wantTotal:   0.021, // 100k/1M*0.15 + 10k/1M*0.60 = 0.015 + 0.006 = 0.021
+			wantCached:  0,
 			wantSavings: 0,
 		},
 		{
-			name:       "custom model with zero cost",
-			provider:   "custom",
-			model:      "local-llama",
-			usage:      Usage{InputTokens: 10000, OutputTokens: 5000},
-			wantTotal:  0,
-			wantCached: 0,
+			name:        "custom model with zero cost",
+			provider:    "custom",
+			model:       "local-llama",
+			usage:       Usage{InputTokens: 10000, OutputTokens: 5000},
+			wantTotal:   0,
+			wantCached:  0,
 			wantSavings: 0,
 		},
 		{
-			name:       "unknown model returns zero",
-			provider:   "unknown",
-			model:      "nonexistent",
-			usage:      Usage{InputTokens: 1000, OutputTokens: 100},
-			wantTotal:  0,
-			wantCached: 0,
+			name:        "unknown model returns zero",
+			provider:    "unknown",
+			model:       "nonexistent",
+			usage:       Usage{InputTokens: 1000, OutputTokens: 100},
+			wantTotal:   0,
+			wantCached:  0,
 			wantSavings: 0,
 		},
 	}
@@ -190,11 +190,11 @@ func TestCostModelFamilyPrefixLookup(t *testing.T) {
 	cm := NewCostModel()
 
 	tests := []struct {
-		name       string
-		provider   string
-		model      string
-		familyKey  string // the entry the prefix lookup is expected to resolve to
-		usage      Usage
+		name      string
+		provider  string
+		model     string
+		familyKey string // the entry the prefix lookup is expected to resolve to
+		usage     Usage
 	}{
 		{
 			name:      "openai gpt-5 dated id falls back to family",

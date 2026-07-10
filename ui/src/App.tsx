@@ -1,5 +1,6 @@
 import { type JSX } from "solid-js";
 import { Router, Route } from "@solidjs/router";
+import { BASE } from "./lib/base";
 import { AppShell } from "./AppShell";
 import { Dashboard } from "./routes/Dashboard";
 import { Runs } from "./routes/Runs";
@@ -12,7 +13,7 @@ function Shell(props: { children?: JSX.Element }) {
 
 export function App() {
   return (
-    <Router>
+    <Router base={BASE}>
       <Route path="/login" component={Login} />
       <Route path="/" component={Shell}>
         <Route path="/" component={Dashboard} />

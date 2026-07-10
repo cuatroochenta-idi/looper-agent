@@ -1,4 +1,5 @@
 import type { SseHandlers, SseEventName } from "./types";
+import { withBase } from "../base";
 
 const KNOWN_EVENTS: SseEventName[] = [
   "runs_changed",
@@ -20,7 +21,7 @@ export function openSse(topics: string[], handlers: SseHandlers): () => void {
   let attempt = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const url = `/api/events?topics=${encodeURIComponent(topics.join(","))}`;
+  const url = withBase(`/api/events?topics=${encodeURIComponent(topics.join(","))}`);
 
   const connect = () => {
     if (closed) return;

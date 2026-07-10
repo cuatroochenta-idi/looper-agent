@@ -65,7 +65,7 @@ const (
 type TraceEvent struct {
 	Type             TraceEventType  `json:"type"`
 	RunID            string          `json:"run_id"`
-	ParentRunID      string          `json:"parent_run_id,omitempty"`      // empty for top-level runs
+	ParentRunID      string          `json:"parent_run_id,omitempty"`       // empty for top-level runs
 	ParentToolCallID string          `json:"parent_tool_call_id,omitempty"` // populated when this run was spawned from a tool call
 	SessionID        string          `json:"session_id,omitempty"`
 	Ts               time.Time       `json:"ts"`
@@ -84,12 +84,12 @@ type RunStartData struct {
 
 // StepData mirrors loop.Step for wire transport.
 type StepData struct {
-	Kind         string `json:"kind"`
-	Turn         int    `json:"turn"`
-	Content      string `json:"content,omitempty"`
-	ToolName     string `json:"tool_name,omitempty"`
-	ToolArgs     string `json:"tool_args,omitempty"`
-	ToolCallID   string `json:"tool_call_id,omitempty"`
+	Kind             string `json:"kind"`
+	Turn             int    `json:"turn"`
+	Content          string `json:"content,omitempty"`
+	ToolName         string `json:"tool_name,omitempty"`
+	ToolArgs         string `json:"tool_args,omitempty"`
+	ToolCallID       string `json:"tool_call_id,omitempty"`
 	Err              string `json:"err,omitempty"`
 	InputTokens      int    `json:"input_tokens,omitempty"`
 	OutputTokens     int    `json:"output_tokens,omitempty"`
@@ -155,16 +155,27 @@ type RunEndData struct {
 	FallbackCalls int `json:"fallback_calls,omitempty"`
 }
 
-// traceWriter posts events one-by-one to the endpoint. Failures are silent —
-// observability must never break the host program. Sends happen on a private
-// goroutine to keep agent.Run latency stable.
+// TraceSink receives trace events in-process. It is the transport port
+// behind agent tracing: the default adapter POSTs to LOOPER_TRACE_ENDPOINT,
+// while hosts that embed the supervision panel in the same binary (see the
+// analytics package) implement TraceSink to skip the HTTP hop entirely.
+//
+// TraceEvent is called from a dedicated goroutine per run — implementations
+// may block briefly but must never panic; observability must not take the
+// host program down.
+type TraceSink interface {
+	TraceEvent(ev TraceEvent)
+}
+
+// traceWriter delivers events one-by-one to a transport (HTTP endpoint or an
+// in-process TraceSink). Failures are silent — observability must never break
+// the host program. Sends happen on a private goroutine to keep agent.Run
+// latency stable.
 type traceWriter struct {
-	endpoint         string
-	ingestToken      string // bearer for the panel's /ingest; empty = no auth
+	deliver          func(TraceEvent) // transport adapter; never nil
 	sessionID        string
 	parentRunID      string // empty if this is a top-level run
 	parentToolCallID string // empty if this run wasn't spawned from a tool call
-	client           *http.Client
 	mu               sync.Mutex
 	queue            chan TraceEvent
 	done             chan struct{}
@@ -184,17 +195,34 @@ func newTraceWriterFromEnv(ctx context.Context, sessionOverride string) *traceWr
 	if ep == "" {
 		return nil
 	}
+	poster := &httpPoster{
+		endpoint:    ep,
+		ingestToken: strings.TrimSpace(os.Getenv(EnvIngestToken)),
+		client:      &http.Client{Timeout: 5 * time.Second},
+	}
+	return newTraceWriter(ctx, poster.post, sessionOverride)
+}
+
+// newTraceWriterForSink builds a writer that hands events to an in-process
+// TraceSink instead of the HTTP endpoint. Same queue/backpressure semantics
+// as the HTTP path so the agent loop's latency contract is identical.
+func newTraceWriterForSink(ctx context.Context, sink TraceSink, sessionOverride string) *traceWriter {
+	if sink == nil {
+		return nil
+	}
+	return newTraceWriter(ctx, sink.TraceEvent, sessionOverride)
+}
+
+func newTraceWriter(ctx context.Context, deliver func(TraceEvent), sessionOverride string) *traceWriter {
 	sid := strings.TrimSpace(sessionOverride)
 	if sid == "" {
 		sid = strings.TrimSpace(os.Getenv(EnvSessionID))
 	}
 	tw := &traceWriter{
-		endpoint:         ep,
-		ingestToken:      strings.TrimSpace(os.Getenv(EnvIngestToken)),
+		deliver:          deliver,
 		sessionID:        sid,
 		parentRunID:      ParentRunIDFromContext(ctx),
 		parentToolCallID: loop.ParentToolCallIDFromContext(ctx),
-		client:           &http.Client{Timeout: 5 * time.Second},
 		queue:            make(chan TraceEvent, 1024),
 		done:             make(chan struct{}),
 	}
@@ -202,25 +230,37 @@ func newTraceWriterFromEnv(ctx context.Context, sessionOverride string) *traceWr
 	return tw
 }
 
+// httpPoster is the default transport adapter: plain JSON POST per event to
+// the panel's /ingest endpoint, bearer-authed when a token is configured.
+type httpPoster struct {
+	endpoint    string
+	ingestToken string
+	client      *http.Client
+}
+
+func (hp *httpPoster) post(ev TraceEvent) {
+	body, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequest("POST", hp.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if hp.ingestToken != "" {
+		req.Header.Set("Authorization", "Bearer "+hp.ingestToken)
+	}
+	resp, err := hp.client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+	}
+}
+
 func (tw *traceWriter) run() {
 	defer close(tw.done)
 	for ev := range tw.queue {
-		body, err := json.Marshal(ev)
-		if err != nil {
-			continue
-		}
-		req, err := http.NewRequest("POST", tw.endpoint, bytes.NewReader(body))
-		if err != nil {
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if tw.ingestToken != "" {
-			req.Header.Set("Authorization", "Bearer "+tw.ingestToken)
-		}
-		resp, err := tw.client.Do(req)
-		if err == nil {
-			_ = resp.Body.Close()
-		}
+		tw.deliver(ev)
 	}
 }
 
@@ -261,33 +301,13 @@ func (tw *traceWriter) send(t TraceEventType, runID string, data any) {
 		// host program never stalls on observability.
 		return
 	}
-	// Critical event: give the queue a short window, then post inline
-	// rather than losing the lifecycle marker.
+	// Critical event: give the queue a short window, then deliver inline
+	// rather than losing the lifecycle marker. Best-effort and bounded by
+	// the transport's own timeout (5s for the HTTP adapter).
 	select {
 	case tw.queue <- ev:
 	case <-time.After(50 * time.Millisecond):
-		tw.postInline(ev)
-	}
-}
-
-// postInline issues a one-off HTTP POST for an event that couldn't be
-// enqueued. Best-effort and bounded by the client's existing 5s timeout.
-func (tw *traceWriter) postInline(ev TraceEvent) {
-	body, err := json.Marshal(ev)
-	if err != nil {
-		return
-	}
-	req, err := http.NewRequest("POST", tw.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if tw.ingestToken != "" {
-		req.Header.Set("Authorization", "Bearer "+tw.ingestToken)
-	}
-	resp, err := tw.client.Do(req)
-	if err == nil {
-		_ = resp.Body.Close()
+		tw.deliver(ev)
 	}
 }
 

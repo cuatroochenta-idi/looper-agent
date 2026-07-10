@@ -10,6 +10,7 @@ import type {
   Summary,
 } from "./types";
 import { openSse } from "./sse";
+import { withBase } from "../base";
 
 export class UnauthorizedError extends Error {
   constructor() {
@@ -23,13 +24,13 @@ function toLogin() {
   if (redirecting) return;
   redirecting = true;
   const here = window.location.pathname + window.location.search;
-  if (!here.startsWith("/login")) {
-    window.location.assign(`/login?next=${encodeURIComponent(here)}`);
+  if (!here.startsWith(withBase("/login"))) {
+    window.location.assign(withBase(`/login?next=${encodeURIComponent(here)}`));
   }
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(withBase(path), {
     credentials: "include",
     headers: { Accept: "application/json", ...(init?.headers ?? {}) },
     ...init,

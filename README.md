@@ -913,6 +913,7 @@ The `examples/` folder is a graduated tour:
 | 18 | `18_preexecute` | `tool.WithPreExecute` + `RejectWithHint` for business validation |
 | 19 | `19_lazy_skills` | Eager `Skill` + lazy `LazySkill` (`skill.Lazy`) loaded via `load_skill` |
 | 20 | `20_server_panel` | Deploy the core as a supervision/control-panel server (auth, ingest token, custom costs, folder/postgres persistence) |
+| 21 | `21_embedded_analytics` | Embed the panel inside your own app (`analytics` package): host middleware guards the route, agents trace in-process via `WithTraceSink` |
 
 Run any of them with `go run ./examples/12_multimodal` (after sourcing
 `.env.local` with the required API keys).
@@ -1068,6 +1069,37 @@ guards the panel, and `/ingest` starts requiring `Authorization: Bearer
 configure external agents by setting `LOOPER_INGEST_TOKEN` in their environment.
 Set `auth.session_secret` to persist sessions across restarts (otherwise the key
 is ephemeral). With no `auth` block the panel is open — everything is nil-safe.
+
+### Embedded panel — the `analytics` package
+
+When your application is a monolith (or you just don't want a sidecar
+process), import the panel instead of running it:
+
+```go
+import "github.com/cuatroochenta-idi/looper-agent/analytics"
+
+panel, err := analytics.New(ctx, analytics.Config{
+    PostgresDSN: os.Getenv("LOOPER_DB"), // or StoreDir: ".looper"; empty = in-memory
+    BasePath:    "/admin/looper/",       // public mount path, injected into the SPA
+    IngestToken: "…",                    // optional: guards HTTP /ingest only
+})
+defer panel.Close()
+
+// The panel is a plain http.Handler — protect it with YOUR permission system.
+mux.Handle("/admin/looper/", requireAdmin(
+    http.StripPrefix("/admin/looper", panel.Handler())))
+
+// Agents in the same binary trace straight into the panel store — no HTTP hop,
+// no LOOPER_TRACE_ENDPOINT:
+agent, err := looper.NewAgent(prov, prompt, looper.WithTraceSink(panel))
+```
+
+The embedded panel deliberately ships **without** its own login gate: `GET
+/api/me` reports an open panel and the host's middleware owns authentication
+and authorization. External agent processes can still POST traces to the
+mounted `/ingest` route (bearer-guarded when `IngestToken` is set). Store
+connectors are the same as the CLI's: PostgreSQL (embedded migrations applied
+on boot) or a JSON folder store; see example `21_embedded_analytics`.
 
 ### `looper mcp` — MCP debug server over stdio
 

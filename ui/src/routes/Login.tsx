@@ -1,5 +1,6 @@
 import { createResource, createSignal, Show } from "solid-js";
 import { api } from "../lib/api";
+import { withBase } from "../lib/base";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Spinner } from "../components/ui/Spinner";
@@ -11,7 +12,7 @@ export function Login() {
   const [error, setError] = createSignal("");
   const [busy, setBusy] = createSignal(false);
 
-  const nextUrl = () => new URLSearchParams(window.location.search).get("next") || "/";
+  const nextUrl = () => new URLSearchParams(window.location.search).get("next") || withBase("/");
 
   const submit = async (e: Event) => {
     e.preventDefault();

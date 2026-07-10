@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -92,9 +93,21 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad event: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if ev.RunID == "" {
-		http.Error(w, "run_id required", http.StatusBadRequest)
+	if err := s.IngestEvent(ev); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// IngestEvent applies one trace event to the store and fans out the derived
+// SSE events — the transport-agnostic core behind POST /ingest. In-process
+// hosts (embedded panels wired through a looper.TraceSink) call it directly,
+// skipping the HTTP hop. A non-nil error means the event was malformed and
+// was not applied.
+func (s *Server) IngestEvent(ev TraceEvent) error {
+	if ev.RunID == "" {
+		return fmt.Errorf("run_id required")
 	}
 
 	// appended, when non-nil, is the step persisted by a "step" event — emitted
@@ -183,8 +196,7 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 		// (no-op success) so the agent doesn't retry, but never
 		// persist the noise.
 		if d.Kind == string(StepKindStreamingChunk) {
-			w.WriteHeader(http.StatusNoContent)
-			return
+			return nil // no-op success so old agents don't retry
 		}
 		step := TimelineStep{
 			Kind:             StepKind(d.Kind),
@@ -262,8 +274,7 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 		structural = true
 
 	default:
-		http.Error(w, "unknown event type: "+ev.Type, http.StatusBadRequest)
-		return
+		return fmt.Errorf("unknown event type: %s", ev.Type)
 	}
 
 	// Propagate liveness up the run tree. Every event refreshes LastSeenAt on
@@ -314,5 +325,5 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 		s.publishRunsChanged()
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	return nil
 }

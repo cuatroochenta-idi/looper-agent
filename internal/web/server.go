@@ -1,7 +1,8 @@
 package web
 
 import (
-	"io"
+	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -24,10 +25,11 @@ const stuckRunSweepInterval = 30 * time.Second
 // Server hosts the debug panel. Construct with NewServer, attach a RunFunc
 // with SetRunner, then mount Handler() on any HTTP listener.
 type Server struct {
-	store   *Store
-	hub     *Hub
-	runner  RunFunc
-	persist Persistence // durable backend; nil = in-memory only
+	store    *Store
+	hub      *Hub
+	runner   RunFunc
+	persist  Persistence // durable backend; nil = in-memory only
+	basePath string      // public mount path of the SPA; "" or "/" = root
 }
 
 // Hub exposes the pub/sub bus so callers can publish or subscribe explicitly.
@@ -60,6 +62,15 @@ func WithStoreDir(dir string) ServerOption {
 		}
 		s.persist = p
 	}
+}
+
+// WithBasePath declares the public path the panel is mounted under (e.g.
+// "/admin/looper/"). serveIndex injects it as window.__LOOPER_BASE__ plus a
+// <base> tag, and the SPA builds every asset URL, API call, SSE stream, and
+// client route from it. Hosts mount Handler() behind an http.StripPrefix of
+// the same value. Empty (or "/") means served at root.
+func WithBasePath(base string) ServerOption {
+	return func(s *Server) { s.basePath = base }
 }
 
 // NewServer returns a server ready to serve HTTP. If a store directory is
@@ -163,16 +174,26 @@ func (s *Server) spaHandler() http.Handler {
 		log.Printf("warn: SPA embed unavailable: %v", err)
 		return http.NotFoundHandler()
 	}
+	// The index page is templated once: the configured base path is injected
+	// so the SPA (and its relative asset URLs, via <base>) work both at root
+	// and mounted under a host subpath.
+	index, err := fs.ReadFile(dist, "index.html")
+	if err != nil {
+		log.Printf("warn: SPA index.html missing from embed: %v", err)
+		return http.NotFoundHandler()
+	}
+	page := injectBasePath(index, s.basePath)
+
 	fileServer := http.FileServer(http.FS(dist))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/")
 		if p == "" {
-			serveIndex(w, r, dist)
+			serveIndex(w, page)
 			return
 		}
 		f, err := dist.Open(p)
 		if err != nil {
-			serveIndex(w, r, dist) // unknown path → client-side route
+			serveIndex(w, page) // unknown path → client-side route
 			return
 		}
 		_ = f.Close()
@@ -183,14 +204,30 @@ func (s *Server) spaHandler() http.Handler {
 	})
 }
 
-func serveIndex(w http.ResponseWriter, r *http.Request, dist fs.FS) {
-	f, err := dist.Open("index.html")
-	if err != nil {
-		http.Error(w, "index.html missing", http.StatusInternalServerError)
-		return
+// injectBasePath rewrites the SPA index page for a mount point: a <base> tag
+// resolves the bundle's relative asset URLs on deep client routes, and
+// window.__LOOPER_BASE__ tells the SPA where to aim API calls, SSE streams,
+// and its router. base is normalized to "/segment/.../" form; empty → "/".
+func injectBasePath(index []byte, base string) []byte {
+	b := "/" + strings.Trim(base, "/")
+	if b != "/" {
+		b += "/"
 	}
-	defer f.Close()
+	quoted, _ := json.Marshal(b) // safe JS string literal
+	tags := fmt.Sprintf("<base href=%s><script>window.__LOOPER_BASE__=%s;</script>", quoted, quoted)
+	if i := strings.Index(string(index), "<head>"); i >= 0 {
+		at := i + len("<head>")
+		out := make([]byte, 0, len(index)+len(tags))
+		out = append(out, index[:at]...)
+		out = append(out, tags...)
+		out = append(out, index[at:]...)
+		return out
+	}
+	return index
+}
+
+func serveIndex(w http.ResponseWriter, page []byte) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
-	_, _ = io.Copy(w, f)
+	_, _ = w.Write(page)
 }

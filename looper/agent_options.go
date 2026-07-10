@@ -143,6 +143,18 @@ func WithOTelInsecure() AgentOption {
 	}
 }
 
+// WithTraceSink routes this agent's trace events to an in-process sink
+// instead of the LOOPER_TRACE_ENDPOINT HTTP transport. Hosts that embed the
+// supervision panel in the same binary (the analytics package) pass the
+// panel here, so runs, steps, and costs land in the panel's store without a
+// network hop. When set, the env-based HTTP transport is ignored for this
+// agent. A nil sink leaves the env-based behavior untouched.
+func WithTraceSink(sink TraceSink) AgentOption {
+	return func(a *Agent) {
+		a.traceSink = sink
+	}
+}
+
 // WithCustomModelCost registers pricing for a non-official model (Ollama, OpenRouter, etc.).
 func WithCustomModelCost(model string, config telemetry.CostConfig) AgentOption {
 	return func(a *Agent) {
