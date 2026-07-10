@@ -64,18 +64,19 @@ func looksLikeToolError(content string) bool {
 
 // TurnNode aggregates everything that happened in one agentic turn.
 type TurnNode struct {
-	Index         int
-	StartAt       time.Time
-	LLMCall       *TimelineStep
-	ToolNodes     []ToolCallNode
-	Final         *TimelineStep
-	Error         *TimelineStep
-	Reasoning     string
-	AssistantText string
-	HasTokens     bool
-	InTokens      int
-	OutTokens     int
-	CachedToks    int
+	Index          int
+	StartAt        time.Time
+	LLMCall        *TimelineStep
+	ToolNodes      []ToolCallNode
+	Final          *TimelineStep
+	Error          *TimelineStep
+	Reasoning      string
+	AssistantText  string
+	HasTokens      bool
+	InTokens       int
+	OutTokens      int
+	CachedToks     int
+	CacheWriteToks int
 
 	// Provider / Model / Fallback summarise the LLM call that drove
 	// this turn. Populated from the StepKindLLMResponse event the
@@ -220,6 +221,9 @@ func BuildTimeline(steps []TimelineStep) RunTimeline {
 			}
 			if s.CachedTokens > t.CachedToks {
 				t.CachedToks = s.CachedTokens
+			}
+			if s.CacheWriteTokens > t.CacheWriteToks {
+				t.CacheWriteToks = s.CacheWriteTokens
 			}
 		}
 		// Provenance lifts from any step that carries it (most often

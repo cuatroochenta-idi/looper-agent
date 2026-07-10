@@ -2,80 +2,99 @@ package web
 
 import "sync"
 
-// Topic identifies a pub/sub channel inside the Hub.
+// Topic identifies a pub/sub channel in the Hub. The SSE endpoint maps the
+// ?topics= query parameter directly onto these values, so the strings are part
+// of the wire contract.
 type Topic string
 
 const (
-	// TopicSidebar is the firehose subscribed by the run list. We only publish
-	// on it when a card-visible field changed — run start, run finish, status
-	// flip — so transient per-step churn doesn't blow away the user's clicks.
-	TopicSidebar Topic = "sidebar"
-
-	// TopicChats fires on every chat-relevant event (run_start, step,
-	// run_end). The chat thread subscribes to it so streaming chunks render
-	// in the agent bubble as they arrive. Kept distinct from TopicSidebar so
-	// the runs sidebar doesn't get re-rendered on every token.
+	// TopicRuns carries list-level changes: runs_changed (coarse) and
+	// run_updated (row deltas).
+	TopicRuns Topic = "runs"
+	// TopicChats carries chat list/thread changes: chats_changed (coarse).
 	TopicChats Topic = "chats"
+	// TopicSummary carries the deltas that move dashboard tiles: run_updated.
+	TopicSummary Topic = "summary"
 )
 
-// TopicRun returns the topic identifier for a specific run ID. Subscribers
-// (e.g. the detail pane) see every event for that run, including each step.
+// TopicRun is the per-run detail topic ("run:<id>"). Subscribers receive
+// step_appended, chunk (live only), and run_updated for that specific run.
 func TopicRun(runID string) Topic { return Topic("run:" + runID) }
 
-// Hub is a tiny in-memory pub/sub. Subscribers receive a notification (the
-// channel just carries a token; payloads are pulled from the Store on tick).
-// Slow subscribers drop notifications rather than block publishers — the
-// next push will rebuild current state anyway, so loss is not catastrophic.
+// Event is one typed message on the bus. Name is the SSE event name; Data is
+// the payload, marshaled to the SSE data: line as JSON by the events endpoint.
+type Event struct {
+	Name string
+	Data any
+}
+
+// Hub is a tiny in-memory typed pub/sub. Each subscriber registers a set of
+// topics and receives every event published to ANY of them — exactly once,
+// even when one Publish names several topics the subscriber holds (dedup by
+// subscription identity, not by channel-per-topic).
 //
-// Publishers are responsible for naming every topic they care about; the Hub
-// does not fan out implicitly. Step-level publishers send only TopicRun(id);
-// structural events (run_start / run_end) also send TopicSidebar.
+// Delivery is non-blocking: a subscriber whose buffer is full drops the event.
+// Every event on the wire is safe to drop — clients recover by refetching the
+// REST snapshot — so a slow reader degrades to coarser updates, never a stall.
 type Hub struct {
 	mu   sync.Mutex
-	subs map[Topic]map[chan struct{}]bool
+	subs map[*subscription]struct{}
+}
+
+type subscription struct {
+	topics map[Topic]struct{}
+	ch     chan Event
 }
 
 // NewHub returns an empty Hub ready to use.
-func NewHub() *Hub {
-	return &Hub{subs: make(map[Topic]map[chan struct{}]bool)}
-}
+func NewHub() *Hub { return &Hub{subs: make(map[*subscription]struct{})} }
 
-// Subscribe registers a notification channel on the given topic. The returned
-// cancel func must be called when the subscriber goes away (typically on
-// SSE connection close).
-func (h *Hub) Subscribe(t Topic) (<-chan struct{}, func()) {
-	ch := make(chan struct{}, 4)
-	h.mu.Lock()
-	if h.subs[t] == nil {
-		h.subs[t] = make(map[chan struct{}]bool)
+// Subscribe registers a subscriber on the given topics and returns its event
+// channel plus a cancel func that must be called when the subscriber leaves
+// (typically on SSE connection close).
+func (h *Hub) Subscribe(topics ...Topic) (<-chan Event, func()) {
+	set := make(map[Topic]struct{}, len(topics))
+	for _, t := range topics {
+		set[t] = struct{}{}
 	}
-	h.subs[t][ch] = true
+	sub := &subscription{topics: set, ch: make(chan Event, 64)}
+	h.mu.Lock()
+	h.subs[sub] = struct{}{}
 	h.mu.Unlock()
+
 	cancel := func() {
 		h.mu.Lock()
-		if m := h.subs[t]; m != nil {
-			delete(m, ch)
-			if len(m) == 0 {
-				delete(h.subs, t)
-			}
-		}
+		delete(h.subs, sub)
 		h.mu.Unlock()
-		close(ch)
+		close(sub.ch)
 	}
-	return ch, cancel
+	return sub.ch, cancel
 }
 
-// Publish wakes every subscriber on the given topic. Non-blocking: if a
-// subscriber's buffer is full it skips that one.
-func (h *Hub) Publish(topics ...Topic) {
+// Publish delivers ev to every subscriber whose topic set intersects topics.
+// Each matching subscriber receives ev at most once. Non-blocking: a full
+// subscriber buffer drops the event. Holding the lock across the sends keeps
+// cancel (which deletes under the same lock before closing) from ever racing a
+// send onto a closed channel.
+func (h *Hub) Publish(ev Event, topics ...Topic) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, t := range topics {
-		for ch := range h.subs[t] {
-			select {
-			case ch <- struct{}{}:
-			default:
-			}
+	for sub := range h.subs {
+		if !sub.wants(topics) {
+			continue
+		}
+		select {
+		case sub.ch <- ev:
+		default:
 		}
 	}
+}
+
+func (s *subscription) wants(topics []Topic) bool {
+	for _, t := range topics {
+		if _, ok := s.topics[t]; ok {
+			return true
+		}
+	}
+	return false
 }

@@ -31,51 +31,57 @@ type runStartPayload struct {
 
 // stepPayload mirrors looper.StepData.
 type stepPayload struct {
-	Kind         string `json:"kind"`
-	Turn         int    `json:"turn"`
-	Content      string `json:"content,omitempty"`
-	ToolName     string `json:"tool_name,omitempty"`
-	ToolArgs     string `json:"tool_args,omitempty"`
-	ToolCallID   string `json:"tool_call_id,omitempty"`
-	Err          string `json:"err,omitempty"`
-	InputTokens  int    `json:"input_tokens,omitempty"`
-	OutputTokens int    `json:"output_tokens,omitempty"`
-	CachedTokens int    `json:"cached_tokens,omitempty"`
-	Provider     string `json:"provider,omitempty"`
-	Model        string `json:"model,omitempty"`
-	Fallback     bool   `json:"fallback,omitempty"`
-	APIKeySuffix string `json:"api_key_suffix,omitempty"`
+	Kind             string `json:"kind"`
+	Turn             int    `json:"turn"`
+	Content          string `json:"content,omitempty"`
+	ToolName         string `json:"tool_name,omitempty"`
+	ToolArgs         string `json:"tool_args,omitempty"`
+	ToolCallID       string `json:"tool_call_id,omitempty"`
+	Err              string `json:"err,omitempty"`
+	InputTokens      int    `json:"input_tokens,omitempty"`
+	OutputTokens     int    `json:"output_tokens,omitempty"`
+	CachedTokens     int    `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int    `json:"cache_write_tokens,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	Model            string `json:"model,omitempty"`
+	Fallback         bool   `json:"fallback,omitempty"`
+	APIKeySuffix     string `json:"api_key_suffix,omitempty"`
 }
 
 // providerStatsPayload mirrors looper.ProviderStatsData.
 type providerStatsPayload struct {
-	Provider      string  `json:"provider"`
-	Model         string  `json:"model"`
-	Calls         int     `json:"calls"`
-	FallbackCalls int     `json:"fallback_calls,omitempty"`
-	InputTokens   int     `json:"input_tokens,omitempty"`
-	OutputTokens  int     `json:"output_tokens,omitempty"`
-	CachedTokens  int     `json:"cached_tokens,omitempty"`
-	TotalUSD      float64 `json:"total_usd,omitempty"`
-	InputUSD      float64 `json:"input_usd,omitempty"`
-	OutputUSD     float64 `json:"output_usd,omitempty"`
-	CachedUSD     float64 `json:"cached_usd,omitempty"`
-	SavingsUSD    float64 `json:"savings_usd,omitempty"`
+	Provider         string  `json:"provider"`
+	Model            string  `json:"model"`
+	Calls            int     `json:"calls"`
+	FallbackCalls    int     `json:"fallback_calls,omitempty"`
+	InputTokens      int     `json:"input_tokens,omitempty"`
+	OutputTokens     int     `json:"output_tokens,omitempty"`
+	CachedTokens     int     `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int     `json:"cache_write_tokens,omitempty"`
+	TotalUSD         float64 `json:"total_usd,omitempty"`
+	InputUSD         float64 `json:"input_usd,omitempty"`
+	OutputUSD        float64 `json:"output_usd,omitempty"`
+	CachedUSD        float64 `json:"cached_usd,omitempty"`
+	CacheWriteUSD    float64 `json:"cache_write_usd,omitempty"`
+	SavingsUSD       float64 `json:"savings_usd,omitempty"`
+	Estimated        bool    `json:"estimated,omitempty"`
 }
 
 // runEndPayload mirrors looper.RunEndData.
 type runEndPayload struct {
-	Output        string                 `json:"output,omitempty"`
-	Status        string                 `json:"status"`
-	Turns         int                    `json:"turns"`
-	TotalUSD      float64                `json:"total_usd,omitempty"`
-	InputTokens   int                    `json:"input_tokens,omitempty"`
-	OutputTokens  int                    `json:"output_tokens,omitempty"`
-	CachedTokens  int                    `json:"cached_tokens,omitempty"`
-	EndedAt       string                 `json:"ended_at"`
-	Err           string                 `json:"err,omitempty"`
-	Providers     []providerStatsPayload `json:"providers,omitempty"`
-	FallbackCalls int                    `json:"fallback_calls,omitempty"`
+	Output           string                 `json:"output,omitempty"`
+	Status           string                 `json:"status"`
+	Turns            int                    `json:"turns"`
+	TotalUSD         float64                `json:"total_usd,omitempty"`
+	CostEstimated    bool                   `json:"cost_estimated,omitempty"`
+	InputTokens      int                    `json:"input_tokens,omitempty"`
+	OutputTokens     int                    `json:"output_tokens,omitempty"`
+	CachedTokens     int                    `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int                    `json:"cache_write_tokens,omitempty"`
+	EndedAt          string                 `json:"ended_at"`
+	Err              string                 `json:"err,omitempty"`
+	Providers        []providerStatsPayload `json:"providers,omitempty"`
+	FallbackCalls    int                    `json:"fallback_calls,omitempty"`
 }
 
 // apiIngest accepts a single TraceEvent per POST. The agent runtime sends
@@ -91,12 +97,12 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Notify scope: TopicRun(id) is hit on every event so the detail pane
-	// keeps streaming, but TopicSidebar only fires on structural changes
-	// (new run, finished run) — that way the user's card selection survives
-	// the 30+ step events of a single agent run. TopicChats fires on every
-	// event so the chat thread renders streaming tokens live.
-	topics := []Topic{TopicRun(ev.RunID), TopicChats}
+	// appended, when non-nil, is the step persisted by a "step" event — emitted
+	// to run:<id> subscribers via step_appended after liveness propagation.
+	var appended *TimelineStep
+	// structural is set by run_start / run_end: those flip the run list + chat
+	// list (a row appears or finalizes), so they fire the coarse changed events.
+	structural := false
 
 	switch ev.Type {
 	case "run_start":
@@ -166,7 +172,7 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 				Steps:            initialSteps,
 			})
 		}
-		topics = append(topics, TopicSidebar)
+		structural = true
 
 	case "step":
 		var d stepPayload
@@ -180,23 +186,26 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		s.store.AppendStep(ev.RunID, TimelineStep{
-			Kind:         StepKind(d.Kind),
-			Turn:         d.Turn,
-			Content:      d.Content,
-			ToolName:     d.ToolName,
-			ToolArgs:     d.ToolArgs,
-			ToolCallID:   d.ToolCallID,
-			Err:          d.Err,
-			At:           ev.Ts,
-			InputTokens:  d.InputTokens,
-			OutputTokens: d.OutputTokens,
-			CachedTokens: d.CachedTokens,
-			Provider:     d.Provider,
-			Model:        d.Model,
-			Fallback:     d.Fallback,
-			APIKeySuffix: d.APIKeySuffix,
-		})
+		step := TimelineStep{
+			Kind:             StepKind(d.Kind),
+			Turn:             d.Turn,
+			Content:          d.Content,
+			ToolName:         d.ToolName,
+			ToolArgs:         d.ToolArgs,
+			ToolCallID:       d.ToolCallID,
+			Err:              d.Err,
+			At:               ev.Ts,
+			InputTokens:      d.InputTokens,
+			OutputTokens:     d.OutputTokens,
+			CachedTokens:     d.CachedTokens,
+			CacheWriteTokens: d.CacheWriteTokens,
+			Provider:         d.Provider,
+			Model:            d.Model,
+			Fallback:         d.Fallback,
+			APIKeySuffix:     d.APIKeySuffix,
+		}
+		s.store.AppendStep(ev.RunID, step)
+		appended = &step
 
 	case "run_end":
 		var d runEndPayload
@@ -216,14 +225,16 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 		providers := make([]ProviderStat, 0, len(d.Providers))
 		for _, p := range d.Providers {
 			providers = append(providers, ProviderStat{
-				Provider:      p.Provider,
-				Model:         p.Model,
-				Calls:         p.Calls,
-				FallbackCalls: p.FallbackCalls,
-				InputTokens:   p.InputTokens,
-				OutputTokens:  p.OutputTokens,
-				CachedTokens:  p.CachedTokens,
-				TotalUSD:      p.TotalUSD,
+				Provider:         p.Provider,
+				Model:            p.Model,
+				Calls:            p.Calls,
+				FallbackCalls:    p.FallbackCalls,
+				InputTokens:      p.InputTokens,
+				OutputTokens:     p.OutputTokens,
+				CachedTokens:     p.CachedTokens,
+				CacheWriteTokens: p.CacheWriteTokens,
+				TotalUSD:         p.TotalUSD,
+				Estimated:        p.Estimated,
 			})
 		}
 		s.store.Update(ev.RunID, func(r *RunRecord) {
@@ -234,33 +245,37 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 			r.InputTokens = d.InputTokens
 			r.OutputTokens = d.OutputTokens
 			r.CachedTokens = d.CachedTokens
+			r.CacheWriteTokens = d.CacheWriteTokens
+			r.CostEstimated = d.CostEstimated
 			r.Tokens = d.InputTokens + d.OutputTokens
 			r.EndedAt = ended
 			r.Providers = providers
 			r.FallbackCalls = d.FallbackCalls
+			// Memory hygiene: strip any streaming/reasoning chunk steps from the
+			// live record now the run is final (no-op for wire-denoised runs).
+			r.Steps = stripChunkSteps(r.Steps)
 		})
-		// Snapshot to disk now that the run is final.
-		if run := s.store.Find(ev.RunID); run != nil {
-			_ = writeRunFile(s.storeDir, run)
+		// Snapshot to durable storage now that the run is final.
+		if run := s.store.Find(ev.RunID); run != nil && s.persist != nil {
+			_ = s.persist.SaveRun(run)
 		}
-		topics = append(topics, TopicSidebar)
+		structural = true
 
 	default:
 		http.Error(w, "unknown event type: "+ev.Type, http.StatusBadRequest)
 		return
 	}
 
-	// Propagate liveness up the run tree, then fan out to ancestor topics.
-	// Every event refreshes LastSeenAt on the emitting run AND all its
-	// ancestors, so the stuck-run sweeper treats a busy sub-agent as keeping
-	// its whole parent chain alive — a long-running child no longer makes the
-	// main run look stuck/failed. A parent's detail/chat-trace pane renders its
-	// sub-agents' traces inline but only listens on TopicRun(its own id), so we
-	// also publish each ancestor topic to re-render those panes. Cycle-guarded.
+	// Propagate liveness up the run tree. Every event refreshes LastSeenAt on
+	// the emitting run AND all its ancestors, so the stuck-run sweeper treats a
+	// busy sub-agent as keeping its whole parent chain alive — a long-running
+	// child no longer makes the main run look stuck/failed. Ancestors' subtree
+	// cost/last_seen changed too, so each gets a run_updated. Cycle-guarded.
 	liveAt := ev.Ts
 	if liveAt.IsZero() {
 		liveAt = time.Now()
 	}
+	var ancestors []string
 	seen := map[string]bool{}
 	for cur := ev.RunID; cur != ""; {
 		if seen[cur] {
@@ -280,11 +295,24 @@ func (s *Server) apiIngest(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if cur != ev.RunID {
-			topics = append(topics, TopicRun(cur))
+			ancestors = append(ancestors, cur)
 		}
 		cur = parent
 	}
 
-	s.hub.Publish(topics...)
+	// Fan out typed events. Every event is safe to drop — subscribers refetch a
+	// REST snapshot on a gap.
+	if appended != nil {
+		s.publishStepAppended(ev.RunID, *appended)
+	}
+	s.publishRunUpdated(ev.RunID, TopicRun(ev.RunID), TopicRuns, TopicSummary)
+	for _, id := range ancestors {
+		s.publishRunUpdated(id, TopicRun(id), TopicSummary)
+	}
+	s.publishChatsChanged()
+	if structural {
+		s.publishRunsChanged()
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -18,6 +18,11 @@ import (
 // streams events to it via plain JSON POST. Empty disables tracing.
 const EnvTraceEndpoint = "LOOPER_TRACE_ENDPOINT"
 
+// EnvIngestToken carries the bearer token the panel's /ingest endpoint
+// requires when the panel runs with auth enabled. Empty (the default) sends
+// no Authorization header — matching an auth-less panel.
+const EnvIngestToken = "LOOPER_INGEST_TOKEN"
+
 // EnvSessionID groups multiple agent.Run() calls from the same process into a
 // single session in the debug panel. Typically injected by `looper serve --`
 // when it execs a wrapped child; manually settable too.
@@ -85,10 +90,11 @@ type StepData struct {
 	ToolName     string `json:"tool_name,omitempty"`
 	ToolArgs     string `json:"tool_args,omitempty"`
 	ToolCallID   string `json:"tool_call_id,omitempty"`
-	Err          string `json:"err,omitempty"`
-	InputTokens  int    `json:"input_tokens,omitempty"`
-	OutputTokens int    `json:"output_tokens,omitempty"`
-	CachedTokens int    `json:"cached_tokens,omitempty"`
+	Err              string `json:"err,omitempty"`
+	InputTokens      int    `json:"input_tokens,omitempty"`
+	OutputTokens     int    `json:"output_tokens,omitempty"`
+	CachedTokens     int    `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int    `json:"cache_write_tokens,omitempty"`
 
 	// Provider / Model: provenance for usage-bearing steps so trace
 	// consumers can attribute each turn to the right (provider, model).
@@ -109,31 +115,36 @@ type StepData struct {
 
 // ProviderStatsData mirrors loop.ProviderStats for wire transport.
 type ProviderStatsData struct {
-	Provider      string  `json:"provider"`
-	Model         string  `json:"model"`
-	Calls         int     `json:"calls"`
-	FallbackCalls int     `json:"fallback_calls,omitempty"`
-	InputTokens   int     `json:"input_tokens,omitempty"`
-	OutputTokens  int     `json:"output_tokens,omitempty"`
-	CachedTokens  int     `json:"cached_tokens,omitempty"`
-	TotalUSD      float64 `json:"total_usd,omitempty"`
-	InputUSD      float64 `json:"input_usd,omitempty"`
-	OutputUSD     float64 `json:"output_usd,omitempty"`
-	CachedUSD     float64 `json:"cached_usd,omitempty"`
-	SavingsUSD    float64 `json:"savings_usd,omitempty"`
+	Provider         string  `json:"provider"`
+	Model            string  `json:"model"`
+	Calls            int     `json:"calls"`
+	FallbackCalls    int     `json:"fallback_calls,omitempty"`
+	InputTokens      int     `json:"input_tokens,omitempty"`
+	OutputTokens     int     `json:"output_tokens,omitempty"`
+	CachedTokens     int     `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int     `json:"cache_write_tokens,omitempty"`
+	TotalUSD         float64 `json:"total_usd,omitempty"`
+	InputUSD         float64 `json:"input_usd,omitempty"`
+	OutputUSD        float64 `json:"output_usd,omitempty"`
+	CachedUSD        float64 `json:"cached_usd,omitempty"`
+	CacheWriteUSD    float64 `json:"cache_write_usd,omitempty"`
+	SavingsUSD       float64 `json:"savings_usd,omitempty"`
+	Estimated        bool    `json:"estimated,omitempty"`
 }
 
 // RunEndData is the payload of a run_end event.
 type RunEndData struct {
-	Output       string  `json:"output,omitempty"`
-	Status       string  `json:"status"`
-	Turns        int     `json:"turns"`
-	TotalUSD     float64 `json:"total_usd,omitempty"`
-	InputTokens  int     `json:"input_tokens,omitempty"`
-	OutputTokens int     `json:"output_tokens,omitempty"`
-	CachedTokens int     `json:"cached_tokens,omitempty"`
-	EndedAt      string  `json:"ended_at"`
-	Err          string  `json:"err,omitempty"`
+	Output           string  `json:"output,omitempty"`
+	Status           string  `json:"status"`
+	Turns            int     `json:"turns"`
+	TotalUSD         float64 `json:"total_usd,omitempty"`
+	CostEstimated    bool    `json:"cost_estimated,omitempty"`
+	InputTokens      int     `json:"input_tokens,omitempty"`
+	OutputTokens     int     `json:"output_tokens,omitempty"`
+	CachedTokens     int     `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int     `json:"cache_write_tokens,omitempty"`
+	EndedAt          string  `json:"ended_at"`
+	Err              string  `json:"err,omitempty"`
 
 	// Providers is the per-(provider, model) breakdown when the run
 	// used a multiprovider chain. Empty when single-provider.
@@ -149,6 +160,7 @@ type RunEndData struct {
 // goroutine to keep agent.Run latency stable.
 type traceWriter struct {
 	endpoint         string
+	ingestToken      string // bearer for the panel's /ingest; empty = no auth
 	sessionID        string
 	parentRunID      string // empty if this is a top-level run
 	parentToolCallID string // empty if this run wasn't spawned from a tool call
@@ -178,6 +190,7 @@ func newTraceWriterFromEnv(ctx context.Context, sessionOverride string) *traceWr
 	}
 	tw := &traceWriter{
 		endpoint:         ep,
+		ingestToken:      strings.TrimSpace(os.Getenv(EnvIngestToken)),
 		sessionID:        sid,
 		parentRunID:      ParentRunIDFromContext(ctx),
 		parentToolCallID: loop.ParentToolCallIDFromContext(ctx),
@@ -201,6 +214,9 @@ func (tw *traceWriter) run() {
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if tw.ingestToken != "" {
+			req.Header.Set("Authorization", "Bearer "+tw.ingestToken)
+		}
 		resp, err := tw.client.Do(req)
 		if err == nil {
 			_ = resp.Body.Close()
@@ -266,6 +282,9 @@ func (tw *traceWriter) postInline(ev TraceEvent) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if tw.ingestToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tw.ingestToken)
+	}
 	resp, err := tw.client.Do(req)
 	if err == nil {
 		_ = resp.Body.Close()
@@ -317,6 +336,7 @@ func stepDataFrom(s loop.Step) StepData {
 		out.InputTokens = s.Usage.InputTokens
 		out.OutputTokens = s.Usage.OutputTokens
 		out.CachedTokens = s.Usage.CachedTokens
+		out.CacheWriteTokens = s.Usage.CacheWriteTokens
 	}
 	return out
 }
@@ -330,18 +350,21 @@ func providersFromLoop(in []loop.ProviderStats) []ProviderStatsData {
 	out := make([]ProviderStatsData, len(in))
 	for i, p := range in {
 		out[i] = ProviderStatsData{
-			Provider:      p.Provider,
-			Model:         p.Model,
-			Calls:         p.Calls,
-			FallbackCalls: p.FallbackCalls,
-			InputTokens:   p.Usage.InputTokens,
-			OutputTokens:  p.Usage.OutputTokens,
-			CachedTokens:  p.Usage.CachedTokens,
-			TotalUSD:      p.Cost.TotalUSD,
-			InputUSD:      p.Cost.InputUSD,
-			OutputUSD:     p.Cost.OutputUSD,
-			CachedUSD:     p.Cost.CachedUSD,
-			SavingsUSD:    p.Cost.SavingsUSD,
+			Provider:         p.Provider,
+			Model:            p.Model,
+			Calls:            p.Calls,
+			FallbackCalls:    p.FallbackCalls,
+			InputTokens:      p.Usage.InputTokens,
+			OutputTokens:     p.Usage.OutputTokens,
+			CachedTokens:     p.Usage.CachedTokens,
+			CacheWriteTokens: p.Usage.CacheWriteTokens,
+			TotalUSD:         p.Cost.TotalUSD,
+			InputUSD:         p.Cost.InputUSD,
+			OutputUSD:        p.Cost.OutputUSD,
+			CachedUSD:        p.Cost.CachedUSD,
+			CacheWriteUSD:    p.Cost.CacheWriteUSD,
+			SavingsUSD:       p.Cost.SavingsUSD,
+			Estimated:        p.Cost.Estimated,
 		}
 	}
 	return out

@@ -14,9 +14,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/cuatroochenta-idi/looper-agent/looper"
+	"github.com/cuatroochenta-idi/looper-agent/internal/config"
+	"github.com/cuatroochenta-idi/looper-agent/internal/store/postgres"
 	"github.com/cuatroochenta-idi/looper-agent/internal/web"
 	"github.com/cuatroochenta-idi/looper-agent/loop"
+	"github.com/cuatroochenta-idi/looper-agent/looper"
 	"github.com/cuatroochenta-idi/looper-agent/provider"
 	"github.com/cuatroochenta-idi/looper-agent/provider/anthropic"
 	"github.com/cuatroochenta-idi/looper-agent/provider/google"
@@ -41,27 +43,97 @@ func serveCmd(args []string) {
 	flagArgs, childArgs := splitDoubleDash(args)
 
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	port := fs.Int("port", 9090, "Web UI port")
-	storeDir := fs.String("store", ".looper", "Trace store directory (created if missing)")
+	configPath := fs.String("config", "", "Path to looper.json (default: ./looper.json or $LOOPER_CONFIG)")
+	portFlag := fs.Int("port", config.DefaultPort, "Web UI port")
+	storeFlag := fs.String("store", config.DefaultStoreDir, "Trace store directory (created if missing)")
+	dbFlag := fs.String("db", "", "PostgreSQL DSN for run persistence (or env LOOPER_DB); overrides --store")
 	fs.Parse(flagArgs)
 
-	srv, err := web.NewServer(web.WithStoreDir(*storeDir))
+	// Precedence: flags > env > file > defaults. config.Load resolves
+	// env+file+defaults; flags are applied on top ONLY when actually passed, so
+	// an unset flag never clobbers a file/env value with its default.
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
+	storeSet := false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "port":
+			cfg.Port = *portFlag
+		case "store":
+			cfg.StoreDir = *storeFlag
+			storeSet = true
+		case "db":
+			cfg.DB = *dbFlag
+		}
+	})
+
+	// cfg.DB (flag/env/file) selects the Postgres backend and wins over --store.
+	var persistOpt web.ServerOption
+	storageLabel := ""
+	if cfg.DB != "" {
+		if storeSet {
+			log.Printf("warn: both db and --store set; db wins (ignoring --store %q)", cfg.StoreDir)
+		}
+		pg, err := postgres.NewPostgres(context.Background(), cfg.DB)
+		if err != nil {
+			log.Fatalf("Failed to open postgres store: %v", err)
+		}
+		persistOpt = web.WithPersistence(pg)
+		storageLabel = "postgres"
+	} else {
+		persistOpt = web.WithStoreDir(cfg.StoreDir)
+		storageLabel = "folder " + cfg.StoreDir
+	}
+
+	// Custom model costs feed the shared cost model (custom > built-in matrix).
+	if len(cfg.ModelCosts) > 0 {
+		costModel.WithCustomCosts(cfg.ModelCosts)
+	}
+
+	srv, err := web.NewServer(persistOpt)
 	if err != nil {
 		log.Fatalf("Failed to create web server: %v", err)
 	}
 	srv.SetRunner(buildRunner())
 
-	addr := fmt.Sprintf(":%d", *port)
-	ingest := fmt.Sprintf("http://localhost:%d/ingest", *port)
+	// Auth layer: nil-safe when disabled (Middleware is a pass-through). The
+	// three auth endpoints and /ingest bearer check are enforced by Middleware.
+	var auth *web.Auth
+	if cfg.AuthEnabled() {
+		a := cfg.Auth
+		auth = web.NewAuth(a.Username, a.Password, a.SessionSecret, a.IngestToken).
+			WithSecureCookies(false) // set true only when served behind HTTPS
+	}
+	root := http.NewServeMux()
+	// Auth routes mount unconditionally: every handler is nil-receiver-safe,
+	// and the SPA always probes GET /api/me to decide whether to show the
+	// login screen — without this route it would receive the SPA fallback
+	// HTML instead of {"auth_enabled":false,...}.
+	root.HandleFunc("POST /api/login", auth.LoginHandler)
+	root.HandleFunc("POST /api/logout", auth.LogoutHandler)
+	root.HandleFunc("GET /api/me", auth.MeHandler)
+	root.Handle("/", srv.Handler())
+	handler := auth.Middleware(root) // nil auth => unwrapped root
+
+	addr := fmt.Sprintf(":%d", cfg.Port)
+	ingest := fmt.Sprintf("http://localhost:%d/ingest", cfg.Port)
 
 	log.Printf("Looper Agent UI : http://localhost%s", addr)
 	log.Printf("Trace ingest    : %s", ingest)
-	log.Printf("Store directory : %s", *storeDir)
+	log.Printf("Storage         : %s", storageLabel)
 	log.Printf("Provider        : %s", providerLabel())
+	if auth != nil {
+		log.Printf("Auth            : enabled; ingest bearer token: %s", auth.IngestToken())
+		if auth.EphemeralSessionKey() {
+			log.Printf("warning: no auth.session_secret set — sessions will not survive a restart (set session_secret in looper.json to persist)")
+		}
+	}
 
 	httpServer := &http.Server{
 		Addr:    addr,
-		Handler: srv.Handler(),
+		Handler: handler,
 		// No WriteTimeout: it would kill the long-lived SSE streams. Each SSE
 		// write is individually bounded inside the web package instead.
 		ReadHeaderTimeout: 10 * time.Second,
@@ -114,6 +186,11 @@ func serveCmd(args []string) {
 		"LOOPER_SESSION_ID="+sessionID,
 		"LOOPER_DEBUG=true",
 	)
+	// When auth is on, /ingest requires the bearer token; hand it to the child
+	// tracer so its POSTs authenticate without manual configuration.
+	if auth != nil {
+		cmd.Env = append(cmd.Env, "LOOPER_INGEST_TOKEN="+auth.IngestToken())
+	}
 	if err := cmd.Start(); err != nil {
 		shutdown(httpServer)
 		log.Fatalf("Failed to start child: %v", err)
@@ -280,9 +357,6 @@ func buildRunner() web.RunFunc {
 		steps := make(chan web.StepEvent, 32)
 		summary := make(chan web.RunSummary, 1)
 
-		providerName := providerLabel()
-		modelName := p.Model()
-
 		go func() {
 			defer close(steps)
 			defer close(summary)
@@ -308,20 +382,20 @@ func buildRunner() web.RunFunc {
 			}
 
 			res := iter.Result()
-			breakdown := costModel.Calculate(providerName, modelName, telemetry.Usage{
-				InputTokens:  res.Usage.InputTokens,
-				OutputTokens: res.Usage.OutputTokens,
-				CachedTokens: res.Usage.CachedTokens,
-			})
-
+			// res.Cost already went through the precision cascade
+			// (API-reported cost per call, then pricing tables) with
+			// per-(provider, model) attribution — recomputing here from
+			// aggregate tokens would discard both.
 			summary <- web.RunSummary{
-				Output:       res.Output,
-				Status:       res.Status,
-				Turns:        res.Turns,
-				TotalUSD:     breakdown.TotalUSD,
-				InputTokens:  res.Usage.InputTokens,
-				OutputTokens: res.Usage.OutputTokens,
-				CachedTokens: res.Usage.CachedTokens,
+				Output:           res.Output,
+				Status:           res.Status,
+				Turns:            res.Turns,
+				TotalUSD:         res.Cost.TotalUSD,
+				CostEstimated:    res.Cost.Estimated,
+				InputTokens:      res.Usage.InputTokens,
+				OutputTokens:     res.Usage.OutputTokens,
+				CachedTokens:     res.Usage.CachedTokens,
+				CacheWriteTokens: res.Usage.CacheWriteTokens,
 			}
 		}()
 
@@ -348,6 +422,7 @@ func toWebStep(s loop.Step) web.StepEvent {
 		out.InputTokens = s.Usage.InputTokens
 		out.OutputTokens = s.Usage.OutputTokens
 		out.CachedTokens = s.Usage.CachedTokens
+		out.CacheWriteTokens = s.Usage.CacheWriteTokens
 	}
 	switch s.Type {
 	case loop.StepLLMCall:

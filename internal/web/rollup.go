@@ -19,6 +19,11 @@ type CostRollup struct {
 	SubTokens  int
 	SubCount   int // number of descendant runs (transitive)
 	SubRunning int // descendant runs still in the "running" state (transitive)
+
+	// Estimated is true when ANY run in the subtree (self included) carries
+	// a table-estimated cost — a subtree total is only as precise as its
+	// least precise contributor.
+	Estimated bool
 }
 
 // TotalUSD is own + sub-agent USD.
@@ -61,16 +66,17 @@ func buildRollups(all []*RunRecord, childIndex map[string][]*RunRecord) map[stri
 		// Cycle guard: a run reached while already on the stack contributes
 		// only its own figures, breaking the loop without double-counting.
 		if visiting[r.ID] {
-			return CostRollup{SelfUSD: r.TotalUSD, SelfTokens: r.Tokens}
+			return CostRollup{SelfUSD: r.TotalUSD, SelfTokens: r.Tokens, Estimated: r.CostEstimated}
 		}
 		visiting[r.ID] = true
-		c := CostRollup{SelfUSD: r.TotalUSD, SelfTokens: r.Tokens}
+		c := CostRollup{SelfUSD: r.TotalUSD, SelfTokens: r.Tokens, Estimated: r.CostEstimated}
 		for _, child := range childIndex[r.ID] {
 			cc := walk(child)
 			c.SubUSD += cc.TotalUSD()
 			c.SubTokens += cc.TotalTokens()
 			c.SubCount += 1 + cc.SubCount
 			c.SubRunning += cc.SubRunning
+			c.Estimated = c.Estimated || cc.Estimated
 			if child.Status == RunRunning {
 				c.SubRunning++
 			}

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" style="background:#0a0d12">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LooperAgent</title>
+    <meta name="color-scheme" content="dark light" />
+    <script>
+      // Pre-paint theme resolution to avoid a flash of the wrong theme.
+      (function () {
+        try {
+          var t = localStorage.getItem("looper-theme");
+          if (!t) t = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+          document.documentElement.setAttribute("data-theme", t);
+          document.documentElement.style.background = t === "light" ? "#f6f7f9" : "#0a0d12";
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-BQh1O2w0.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BKuWO82D.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

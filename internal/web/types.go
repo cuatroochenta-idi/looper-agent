@@ -1,8 +1,9 @@
-// Package web implements the Looper Agent debug panel: a read-only viewer
-// of agent runs persisted in-memory. The UI is built with a-h/templ
-// components on the server side and reactive bindings via datastar on the
-// client. Step events emitted by the framework loop are converted into
-// TimelineStep records and rendered as a hierarchical trace.
+// Package web implements the Looper Agent debug panel backend: an in-memory
+// store of agent runs exposed over a JSON REST API (/api/state/*) and a typed
+// JSON SSE stream (/api/events). A SolidJS SPA (embedded via internal/web/ui)
+// renders it; the server ships no HTML view layer. Step events emitted by the
+// framework loop — or ingested over POST /ingest — are converted into
+// TimelineStep records and grouped into a hierarchical timeline per request.
 package web
 
 import (
@@ -41,16 +42,17 @@ const (
 
 // StepEvent is the per-step record the web UI consumes from a runner.
 type StepEvent struct {
-	Kind         StepKind
-	Turn         int
-	Content      string
-	ToolName     string
-	ToolArgs     string
-	ToolCallID   string
-	Err          string
-	InputTokens  int
-	OutputTokens int
-	CachedTokens int
+	Kind             StepKind
+	Turn             int
+	Content          string
+	ToolName         string
+	ToolArgs         string
+	ToolCallID       string
+	Err              string
+	InputTokens      int
+	OutputTokens     int
+	CachedTokens     int
+	CacheWriteTokens int
 
 	// Provider / Model / Fallback / APIKeySuffix mirror the loop.Step
 	// provenance fields. Populated on usage-bearing steps and on every
@@ -64,14 +66,16 @@ type StepEvent struct {
 
 // RunSummary is the final aggregate returned once a run finishes.
 type RunSummary struct {
-	Output       string
-	Status       string
-	Turns        int
-	TotalUSD     float64
-	InputTokens  int
-	OutputTokens int
-	CachedTokens int
-	Err          error
+	Output           string
+	Status           string
+	Turns            int
+	TotalUSD         float64
+	CostEstimated    bool
+	InputTokens      int
+	OutputTokens     int
+	CachedTokens     int
+	CacheWriteTokens int
+	Err              error
 }
 
 // RunFunc is the contract between the web UI and the framework.
@@ -95,17 +99,18 @@ const (
 
 // TimelineStep is a single step persisted on a run for the detail view.
 type TimelineStep struct {
-	Kind         StepKind
-	Turn         int
-	Content      string
-	ToolName     string
-	ToolArgs     string
-	ToolCallID   string
-	Err          string
-	At           time.Time
-	InputTokens  int
-	OutputTokens int
-	CachedTokens int
+	Kind             StepKind
+	Turn             int
+	Content          string
+	ToolName         string
+	ToolArgs         string
+	ToolCallID       string
+	Err              string
+	At               time.Time
+	InputTokens      int
+	OutputTokens     int
+	CachedTokens     int
+	CacheWriteTokens int
 
 	// Provider / Model / Fallback are populated on usage-bearing steps
 	// (StepKindLLMResponse, StepKindToolCall, StepKindFinal) so the
@@ -123,17 +128,22 @@ type TimelineStep struct {
 }
 
 // ProviderStat is the per-(Provider, Model) breakdown shown in the run
-// header. Mirrors looper.ProviderStatsData but lives in the UI layer
-// so the templ files don't import the framework's wire types directly.
+// header. Mirrors looper.ProviderStatsData but lives in the web layer so the
+// API doesn't import the framework's wire types directly.
 type ProviderStat struct {
-	Provider      string  `json:"provider"`
-	Model         string  `json:"model"`
-	Calls         int     `json:"calls"`
-	FallbackCalls int     `json:"fallback_calls,omitempty"`
-	InputTokens   int     `json:"input_tokens,omitempty"`
-	OutputTokens  int     `json:"output_tokens,omitempty"`
-	CachedTokens  int     `json:"cached_tokens,omitempty"`
-	TotalUSD      float64 `json:"total_usd,omitempty"`
+	Provider         string  `json:"provider"`
+	Model            string  `json:"model"`
+	Calls            int     `json:"calls"`
+	FallbackCalls    int     `json:"fallback_calls,omitempty"`
+	InputTokens      int     `json:"input_tokens,omitempty"`
+	OutputTokens     int     `json:"output_tokens,omitempty"`
+	CachedTokens     int     `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int     `json:"cache_write_tokens,omitempty"`
+	TotalUSD         float64 `json:"total_usd,omitempty"`
+
+	// Estimated is true when this entry's cost came from pricing tables
+	// rather than an API-reported figure.
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 // RunRecord is the in-memory snapshot of an agent run.
@@ -148,10 +158,15 @@ type RunRecord struct {
 	Status           RunStatus `json:"status"`
 	Turns            int       `json:"turns"`
 	TotalUSD         float64   `json:"total_usd"`
+	// CostEstimated is true when TotalUSD was derived from pricing tables
+	// rather than API-reported billing (i.e. any contributing call was
+	// estimated). Lets the UI mark estimated figures with a "~".
+	CostEstimated    bool      `json:"cost_estimated,omitempty"`
 	Tokens           int       `json:"tokens"`
 	InputTokens      int       `json:"input_tokens"`
 	OutputTokens     int       `json:"output_tokens"`
 	CachedTokens     int       `json:"cached_tokens"`
+	CacheWriteTokens int       `json:"cache_write_tokens,omitempty"`
 	StartedAt        time.Time `json:"started_at"`
 	EndedAt          time.Time `json:"ended_at,omitzero"`
 	// LastSeenAt is the timestamp of the most recent event anywhere in this

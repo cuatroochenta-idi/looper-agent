@@ -1,9 +1,14 @@
 package web
 
 import (
+	"io"
+	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/cuatroochenta-idi/looper-agent/internal/web/ui"
 )
 
 // stuckRunMaxIdle is the cap on how long a run may stay "running" with no
@@ -19,10 +24,10 @@ const stuckRunSweepInterval = 30 * time.Second
 // Server hosts the debug panel. Construct with NewServer, attach a RunFunc
 // with SetRunner, then mount Handler() on any HTTP listener.
 type Server struct {
-	store    *Store
-	hub      *Hub
-	runner   RunFunc
-	storeDir string // on-disk persistence root, e.g. ".looper"
+	store   *Store
+	hub     *Hub
+	runner  RunFunc
+	persist Persistence // durable backend; nil = in-memory only
 }
 
 // Hub exposes the pub/sub bus so callers can publish or subscribe explicitly.
@@ -31,11 +36,30 @@ func (s *Server) Hub() *Hub { return s.hub }
 // ServerOption configures a Server at construction time.
 type ServerOption func(*Server)
 
-// WithStoreDir sets the directory used to persist completed runs as JSON.
-// On startup, existing files in that directory are loaded into the store.
-// An empty string disables persistence.
+// WithPersistence sets the durable backend for finalized runs. A nil argument
+// keeps the panel in-memory only. See internal/store/postgres for the SQL
+// backend; folderPersistence (via WithStoreDir) is the default.
+func WithPersistence(p Persistence) ServerOption {
+	return func(s *Server) { s.persist = p }
+}
+
+// WithStoreDir sets the directory used to persist completed runs as JSON —
+// sugar for WithPersistence with a folder backend. On startup, existing files
+// in that directory are loaded into the store. An empty string disables
+// persistence (in-memory only).
 func WithStoreDir(dir string) ServerOption {
-	return func(s *Server) { s.storeDir = dir }
+	return func(s *Server) {
+		if dir == "" {
+			s.persist = nil
+			return
+		}
+		p, err := NewFolderPersistence(dir)
+		if err != nil {
+			log.Printf("warn: store dir setup: %v", err)
+			return
+		}
+		s.persist = p
+	}
 }
 
 // NewServer returns a server ready to serve HTTP. If a store directory is
@@ -49,17 +73,19 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 	for _, opt := range opts {
 		opt(s)
 	}
-	if s.storeDir != "" {
-		if err := ensureStoreDir(s.storeDir); err != nil {
-			log.Printf("warn: store dir setup: %v", err)
-		}
-		n, err := loadRunsFromDisk(s.storeDir, s.store)
+	if s.persist != nil {
+		runs, err := s.persist.LoadRuns()
 		if err != nil {
-			log.Printf("warn: failed to hydrate runs from %s: %v", s.storeDir, err)
-		} else if n > 0 {
-			log.Printf("Loaded %d runs from %s", n, s.storeDir)
+			log.Printf("warn: failed to hydrate runs: %v", err)
+		} else {
+			for _, r := range runs {
+				s.store.Add(r)
+			}
+			if len(runs) > 0 {
+				log.Printf("Loaded %d runs", len(runs))
+			}
 		}
-		// Any run that came back from disk in "running" state belongs to a
+		// Any run that came back from storage in "running" state belongs to a
 		// previous process that's now gone — finalize immediately instead of
 		// waiting for the first sweep tick.
 		_ = s.store.SweepStuckRuns(0, time.Now())
@@ -68,9 +94,8 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 	return s, nil
 }
 
-// runStuckRunSweeper periodically calls SweepStuckRuns and publishes hub
-// notifications for any run that was finalized so the sidebar + detail
-// pane update in real time.
+// runStuckRunSweeper periodically calls SweepStuckRuns and publishes typed
+// events for any run that was finalized so the SPA updates in real time.
 func (s *Server) runStuckRunSweeper() {
 	ticker := time.NewTicker(stuckRunSweepInterval)
 	defer ticker.Stop()
@@ -79,17 +104,16 @@ func (s *Server) runStuckRunSweeper() {
 		if len(finalized) == 0 {
 			continue
 		}
-		topics := make([]Topic, 0, len(finalized)+2)
-		topics = append(topics, TopicSidebar, TopicChats)
-		for _, id := range finalized {
-			topics = append(topics, TopicRun(id))
-		}
 		// Publish first — waking the UI must not wait on disk I/O.
-		s.hub.Publish(topics...)
-		if s.storeDir != "" {
+		for _, id := range finalized {
+			s.publishRunUpdated(id, TopicRun(id), TopicRuns, TopicSummary)
+		}
+		s.publishRunsChanged()
+		s.publishChatsChanged()
+		if s.persist != nil {
 			for _, id := range finalized {
 				if r := s.store.Find(id); r != nil {
-					_ = writeRunFile(s.storeDir, r)
+					_ = s.persist.SaveRun(r)
 				}
 			}
 		}
@@ -97,7 +121,7 @@ func (s *Server) runStuckRunSweeper() {
 }
 
 // SetRunner wires the agent runner used by POST /api/run. If unset, the
-// endpoint returns an error event instead of executing anything.
+// endpoint returns an error instead of executing anything.
 func (s *Server) SetRunner(fn RunFunc) { s.runner = fn }
 
 // Store exposes the underlying run store (used by tests and integrations).
@@ -107,41 +131,66 @@ func (s *Server) Store() *Store { return s.store }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// ── Pages ────────────────────────────────────────────────────────────────
-	// {$} pins the dashboard to the literal root path (Go 1.22+ semantics) so
-	// any unmatched URL falls through to the 404 below, instead of silently
-	// serving the dashboard from a stale URL.
-	mux.HandleFunc("GET /{$}", s.handleDashboard)
-	mux.HandleFunc("GET /runs", s.handleRunsPage)
-	mux.HandleFunc("GET /runs/{id}", s.handleRunPage)
-	mux.HandleFunc("GET /chats", s.handleChatsPage)
-
-	// ── HTML fragments (datastar patches them into the DOM) ─────────────────
-	// One-shot fragments for cold loads / fallback polls.
-	mux.HandleFunc("GET /partials/sidebar", s.partialSidebar)
-	mux.HandleFunc("GET /partials/runs/{id}/pane", s.partialDetailPane)
-	mux.HandleFunc("GET /partials/dashboard", s.partialDashboard)
-	mux.HandleFunc("GET /partials/chat-sidebar", s.partialChatSidebar)
-	mux.HandleFunc("GET /partials/chat-thread", s.partialChatThread)
-	mux.HandleFunc("GET /partials/chat-trace/{id}", s.partialChatTrace)
-	mux.HandleFunc("GET /partials/time-refresh/{since}", s.partialTimeRefresh)
-	// Long-lived SSE streams: server pushes a fresh fragment to every
-	// connected client when the underlying state changes. This replaces
-	// polling for real-time UX.
-	mux.HandleFunc("GET /sse/sidebar", s.sseSidebar)
-	mux.HandleFunc("GET /sse/runs/{id}", s.sseDetailPane)
-	mux.HandleFunc("GET /sse/dashboard", s.sseDashboard)
-	mux.HandleFunc("GET /sse/chat-sidebar", s.sseChatSidebar)
-	mux.HandleFunc("GET /sse/chat-thread", s.sseChatThread)
-	mux.HandleFunc("GET /sse/chat-trace/{id}", s.sseChatTrace)
-
-	// ── JSON / control ───────────────────────────────────────────────────────
+	// ── JSON REST ──────────────────────────────────────────────────────────────
+	mux.HandleFunc("GET /api/state/summary", s.apiSummary)
+	mux.HandleFunc("GET /api/state/runs", s.apiRuns)
+	mux.HandleFunc("GET /api/state/runs/{id}", s.apiRunDetail)
+	mux.HandleFunc("GET /api/state/chats", s.apiChats)
+	mux.HandleFunc("GET /api/state/chats/{key}", s.apiChatDetail)
+	mux.HandleFunc("GET /api/state/costs", s.apiCosts)
 	mux.HandleFunc("POST /api/run", s.apiRun)
-	mux.HandleFunc("GET /api/runs", s.apiListRuns)
-	mux.HandleFunc("GET /api/costs", s.apiCosts)
-	// Trace ingestion endpoint for external agents. Receives one event per
-	// POST (run_start / step / run_end). See agent.go in the root package.
+
+	// ── Typed JSON SSE ─────────────────────────────────────────────────────────
+	mux.HandleFunc("GET /api/events", s.handleEvents)
+
+	// ── Trace ingestion (external agents). Wire format unchanged. ──────────────
 	mux.HandleFunc("POST /ingest", s.apiIngest)
 
+	// ── SPA (client-side routing; index.html fallback) ─────────────────────────
+	mux.Handle("GET /", s.spaHandler())
+
 	return mux
+}
+
+// spaHandler serves the embedded SPA bundle. Hashed assets get an immutable
+// cache header; any GET path that isn't a real file falls back to index.html so
+// the client-side router can handle it. /api and /ingest are matched by more
+// specific patterns and never reach here.
+func (s *Server) spaHandler() http.Handler {
+	dist, err := fs.Sub(ui.Dist, "dist")
+	if err != nil {
+		// The embed always contains dist/; a failure here is a build-time bug.
+		log.Printf("warn: SPA embed unavailable: %v", err)
+		return http.NotFoundHandler()
+	}
+	fileServer := http.FileServer(http.FS(dist))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, "/")
+		if p == "" {
+			serveIndex(w, r, dist)
+			return
+		}
+		f, err := dist.Open(p)
+		if err != nil {
+			serveIndex(w, r, dist) // unknown path → client-side route
+			return
+		}
+		_ = f.Close()
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
+		fileServer.ServeHTTP(w, r)
+	})
+}
+
+func serveIndex(w http.ResponseWriter, r *http.Request, dist fs.FS) {
+	f, err := dist.Open("index.html")
+	if err != nil {
+		http.Error(w, "index.html missing", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = io.Copy(w, f)
 }

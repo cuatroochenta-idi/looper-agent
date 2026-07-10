@@ -3,20 +3,24 @@
 # ==============================================================================
 #
 # Quick start:
-#   make tools          # one-time: install templ CLI if missing
-#   make serve          # generate + build + run web panel on :9090
+#   make serve          # build + run web panel on :9090 (placeholder UI)
+#   make release        # build the real SolidJS UI in, then compile the CLI
+#   make ui-dev         # live Vite dev server for iterating on the UI
 #
-# Common dev loop:
-#   make watch          # in one terminal: regenerate *_templ.go on save
-#   make serve          # in another terminal: build & run
+# The panel UI (internal/web/ui/dist) is embedded at build time via //go:embed.
+# The built SPA bundle is committed at release time so `go install` / module
+# consumers get the real UI; between releases a placeholder keeps plain builds
+# working WITHOUT the JS toolchain (Bun); the real SolidJS SPA bundle is built
+# separately from ui/ by `make ui-build` and folded into the binary by
+# `make release`. Plain `build` never depends on Bun.
 #
 # See `make help` for the full list of targets.
 # ==============================================================================
 
 # ── Toolchain ────────────────────────────────────────────────────────────────
 GO            ?= go
-TEMPL         ?= templ
 DOCKER        ?= docker
+BUN           ?= bun
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 BINARY        := looper
@@ -24,9 +28,9 @@ BIN_DIR       := bin
 CMD_PATH      := ./cmd/looper
 WEB_PKG       := ./internal/web
 EXAMPLES_DIR  := ./examples
-
-# ── Pinned versions ──────────────────────────────────────────────────────────
-TEMPL_VERSION := v0.3.1020
+UI_DIR        := ui
+UI_DIST       := ui/dist
+WEB_DIST      := internal/web/ui/dist
 
 # ── Runtime flags ────────────────────────────────────────────────────────────
 PORT          ?= 9090
@@ -42,29 +46,48 @@ help: ## Show available targets
 	@awk 'BEGIN { FS = ":.*?## " } /^[a-zA-Z_.-]+:.*?## / { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@printf "\nUse \`make example NAME=04_multi_provider\` to run a specific example.\n\n"
 
-# ── Codegen ──────────────────────────────────────────────────────────────────
-.PHONY: generate
-generate: ## Compile *.templ → *_templ.go (idempotent)
-	@$(TEMPL) generate $(WEB_PKG)
-
-.PHONY: watch
-watch: ## Watch *.templ files and regenerate on change (dev loop)
-	@$(TEMPL) generate --watch $(WEB_PKG)
-
 # ── Build ────────────────────────────────────────────────────────────────────
 .PHONY: build
-build: generate ## Generate templ + compile the CLI to bin/looper
+build: ## Compile the CLI to bin/looper
 	@mkdir -p $(BIN_DIR)
 	$(GO) build $(GOFLAGS) -ldflags='$(LDFLAGS)' -o $(BIN_DIR)/$(BINARY) $(CMD_PATH)
 	@echo "→ $(BIN_DIR)/$(BINARY) built"
 
 .PHONY: build-all
-build-all: generate ## Build everything in the module (smoke check)
+build-all: ## Build everything in the module (smoke check)
 	$(GO) build $(GOFLAGS) ./...
 
 .PHONY: install
-install: generate ## Install the CLI to $GOPATH/bin
+install: ## Install the CLI to $GOPATH/bin
 	$(GO) install $(GOFLAGS) $(CMD_PATH)
+
+# ── UI (Bun) ─────────────────────────────────────────────────────────────────
+# The SolidJS panel lives in ui/. Bun is the ONLY supported package manager /
+# task runner here — never npm/pnpm. These targets are the bridge that folds the
+# built SPA into internal/web/ui/dist so the Go binary can embed it.
+
+.PHONY: ui-install
+ui-install: ## Install the UI dependencies with Bun
+	cd $(UI_DIR) && $(BUN) install
+
+.PHONY: ui-build
+ui-build: ui-install ## Build the SolidJS SPA and sync it into internal/web/ui/dist
+	cd $(UI_DIR) && $(BUN) run build
+	@rm -rf $(WEB_DIST)
+	@mkdir -p $(WEB_DIST)
+	cp -R $(UI_DIST)/. $(WEB_DIST)/
+	@echo "→ synced $(UI_DIST)/ → $(WEB_DIST)/ (commit at release so go-install users get the real UI)"
+
+.PHONY: ui-dev
+ui-dev: ## Run the Vite dev server (proxies /api,/ingest to :$(PORT) — start `make serve` too)
+	cd $(UI_DIR) && $(BUN) run dev
+
+.PHONY: ui-clean
+ui-clean: ## Restore the committed placeholder in internal/web/ui/dist
+	git checkout -- $(WEB_DIST)
+
+.PHONY: release
+release: ui-build build ## Full CLI bundle with the real UI embedded (ui-build + build)
 
 # ── Run ──────────────────────────────────────────────────────────────────────
 # `serve` and `example` autoload .env.local if it exists so API keys and
@@ -116,21 +139,20 @@ debug: build ## Run an example with the looper panel as debugger  ·  make debug
 
 # ── Quality ──────────────────────────────────────────────────────────────────
 .PHONY: test
-test: generate ## Run all unit tests
+test: ## Run all unit tests
 	$(GO) test $(GOFLAGS) ./...
 
 .PHONY: test-race
-test-race: generate ## Run tests with the race detector
+test-race: ## Run tests with the race detector
 	$(GO) test -race ./...
 
 .PHONY: vet
-vet: generate ## go vet ./...
+vet: ## go vet ./...
 	$(GO) vet ./...
 
 .PHONY: fmt
-fmt: ## Format Go + templ sources in-place
+fmt: ## Format Go sources in-place
 	$(GO) fmt ./...
-	$(TEMPL) fmt $(WEB_PKG)
 
 .PHONY: tidy
 tidy: ## Sync go.mod / go.sum
@@ -139,22 +161,22 @@ tidy: ## Sync go.mod / go.sum
 .PHONY: check
 check: vet test ## vet + test (the default CI gate)
 
-# ── Tooling ──────────────────────────────────────────────────────────────────
-.PHONY: tools
-tools: ## Install dev tools (templ CLI) at pinned versions
-	$(GO) install github.com/a-h/templ/cmd/templ@$(TEMPL_VERSION)
-	@echo "→ tools installed under $(shell go env GOPATH)/bin"
+# ── Database migrations (Atlas) ──────────────────────────────────────────────
+ATLAS         ?= atlas
+PG_MIGRATIONS := internal/store/postgres/migrations
+PG_SCHEMA     := internal/store/postgres/schema.sql
 
-.PHONY: tools-check
-tools-check: ## Verify templ CLI matches the pinned version
-	@got=$$($(TEMPL) version 2>&1 | tr -d 'v'); \
-	want=$$(echo $(TEMPL_VERSION) | tr -d 'v'); \
-	if [ "$$got" = "$$want" ]; then \
-		echo "✓ templ $$got"; \
-	else \
-		echo "✗ templ version mismatch (have $$got, want $$want) — run 'make tools'" >&2; \
-		exit 1; \
-	fi
+.PHONY: db-diff
+db-diff: ## Author a new Postgres migration from schema.sql (needs atlas + docker)
+	@if [ -z "$(NAME)" ]; then echo "usage: make db-diff NAME=<migration_name>" >&2; exit 1; fi
+	$(ATLAS) migrate diff $(NAME) \
+		--dir "file://$(PG_MIGRATIONS)" \
+		--to "file://$(PG_SCHEMA)" \
+		--dev-url "docker://postgres/17/dev"
+
+.PHONY: db-hash
+db-hash: ## Recompute atlas.sum after hand-editing a migration
+	$(ATLAS) migrate hash --dir "file://$(PG_MIGRATIONS)"
 
 # ── OTel collector ───────────────────────────────────────────────────────────
 .PHONY: jaeger
@@ -170,14 +192,6 @@ jaeger: ## Boot a local Jaeger all-in-one (OTLP :4317, UI :16686)
 clean: ## Remove the binary
 	rm -rf $(BIN_DIR)
 
-.PHONY: clean-all
-clean-all: clean ## Remove the binary AND generated *_templ.go files
-	@find $(WEB_PKG) -name '*_templ.go' -delete -print | sed 's/^/   ✗ /'
-
 # ── Convenience ──────────────────────────────────────────────────────────────
 .PHONY: deps
-deps: tidy tools ## Sync go.mod + install dev tools
-
-.PHONY: dev
-dev: ## Quick reminder of the dev loop
-	@printf "Terminal 1: %s\nTerminal 2: %s\n" "make watch" "make serve"
+deps: tidy ## Sync go.mod / go.sum
