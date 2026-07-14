@@ -286,3 +286,77 @@ func allToolsFor(t *testing.T, base []*tool.Tool, lz skill.LazySkill) []*tool.To
 	reg.Add(newLoadSkillTool([]skill.LazySkill{lz}))
 	return reg.Tools()
 }
+
+// ─── (m) Two skills registering the SAME tool name → gating emits it ONCE ─────
+
+// multiToolLazySkill is a LazySkill that registers an arbitrary set of tool
+// names, so a test can make two skills share a name — the shape that produced
+// the duplicate function declaration Gemini rejects (INVALID_ARGUMENT).
+type multiToolLazySkill struct {
+	skill.Lazy
+	name  string
+	tools []string
+}
+
+func (s multiToolLazySkill) Name() string    { return s.name }
+func (s multiToolLazySkill) Title() string   { return s.name }
+func (s multiToolLazySkill) Summary() string { return s.name + " summary" }
+func (s multiToolLazySkill) RegisterTools(reg *tool.ToolRegistry) {
+	for _, tn := range s.tools {
+		reg.Add(tool.MustNewTool(struct{}{},
+			func(_ context.Context, _ struct{}) (string, error) { return "ok", nil },
+			tool.ToolConfig{Name: tn, Description: tn},
+		))
+	}
+}
+func (s multiToolLazySkill) PromptFragment() string { return s.name + " fragment" }
+
+// TestLazyGating_DedupsSameNamedToolAcrossSkills reproduces the real-world bug:
+// two lazy skills each register a tool with the same name ("shared"), so the
+// main registry (`all`) holds two instances of it. When either skill is active
+// the name is allowed, and without name-dedup the gate emits BOTH copies —
+// which Gemini rejects as a duplicate function declaration while OpenAI
+// silently tolerates it. The gate must emit each name at most once.
+func TestLazyGating_DedupsSameNamedToolAcrossSkills(t *testing.T) {
+	a := multiToolLazySkill{name: "flow-a", tools: []string{"shared", "only_a"}}
+	b := multiToolLazySkill{name: "flow-b", tools: []string{"shared", "only_b"}}
+	lazies := []skill.LazySkill{a, b}
+
+	// Mirror NewAgent: every lazy skill registers into the shared registry, so
+	// "shared" ends up in `all` twice.
+	lazyTools := map[string][]*tool.Tool{}
+	reg := tool.NewToolRegistry()
+	for _, lz := range lazies {
+		tmp := tool.NewToolRegistry()
+		lz.RegisterTools(tmp)
+		lazyTools[lz.Name()] = tmp.Tools()
+		for _, tl := range tmp.Tools() {
+			reg.Add(tl)
+		}
+	}
+	reg.Add(newLoadSkillTool(lazies))
+	all := reg.Tools()
+
+	gate := buildLazyGating(nil, lazyTools, lazies, all)
+
+	// Activate only flow-a. "shared" is still registered by flow-b too, so
+	// `all` holds two copies of it.
+	h := message.NewHistory()
+	h.AddUserMessage("go")
+	h.AddAssistantMessage("", []message.ToolCall{loadSkillCall("flow-a")})
+	h.AddToolResult("call-1", loadSkillToolName, "loaded", false)
+
+	counts := map[string]int{}
+	for _, tl := range gate(context.Background(), h) {
+		counts[tl.Name()]++
+	}
+	if counts["shared"] != 1 {
+		t.Fatalf("shared tool must be advertised exactly once (duplicate function declaration otherwise); got %d", counts["shared"])
+	}
+	if counts["only_a"] != 1 {
+		t.Fatalf("only_a (active flow-a) must be present once; got %d", counts["only_a"])
+	}
+	if counts["only_b"] != 0 {
+		t.Fatalf("only_b (inactive flow-b) must be absent; got %d", counts["only_b"])
+	}
+}

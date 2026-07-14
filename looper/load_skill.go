@@ -147,9 +147,17 @@ func buildLazyGating(
 			}
 		}
 
+		// Dedup by name: a tool can be registered by more than one skill (e.g.
+		// two flows sharing an access tool), so `all` may hold several
+		// instances of the same name. The provider tool array must be
+		// name-unique — Gemini rejects duplicate function declarations
+		// (INVALID_ARGUMENT) where OpenAI silently tolerates them. Emit the
+		// first instance in registry order and skip later same-named ones.
 		out := make([]*tool.Tool, 0, len(allowed))
+		emitted := make(map[string]bool, len(allowed))
 		for _, t := range all {
-			if allowed[t.Name()] {
+			if allowed[t.Name()] && !emitted[t.Name()] {
+				emitted[t.Name()] = true
 				out = append(out, t)
 			}
 		}
