@@ -124,3 +124,34 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("tool step fidelity lost: %+v", got.Steps[1])
 	}
 }
+
+// TestLoadRunsSince asserts the incremental hydrator read: only rows with
+// last_seen_at at or after the cursor, chronological order preserved.
+func TestLoadRunsSince(t *testing.T) {
+	pg := requirePG(t)
+	base := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	runs := []*web.RunRecord{
+		{ID: "since-old", Status: web.RunCompleted, StartedAt: base, LastSeenAt: base},
+		{ID: "since-mid", Status: web.RunCompleted, StartedAt: base.Add(time.Hour), LastSeenAt: base.Add(time.Hour)},
+		{ID: "since-new", Status: web.RunRunning, StartedAt: base.Add(2 * time.Hour), LastSeenAt: base.Add(2 * time.Hour)},
+	}
+	for _, r := range runs {
+		if err := pg.SaveRun(r); err != nil {
+			t.Fatalf("SaveRun %s: %v", r.ID, err)
+		}
+	}
+	got, err := pg.LoadRunsSince(base.Add(30 * time.Minute))
+	if err != nil {
+		t.Fatalf("LoadRunsSince: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "since-mid" || got[1].ID != "since-new" {
+		t.Fatalf("LoadRunsSince returned %d rows (want since-mid, since-new in order)", len(got))
+	}
+	all, err := pg.LoadRunsSince(time.Time{})
+	if err != nil {
+		t.Fatalf("LoadRunsSince(zero): %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("LoadRunsSince(zero) len = %d, want 3", len(all))
+	}
+}

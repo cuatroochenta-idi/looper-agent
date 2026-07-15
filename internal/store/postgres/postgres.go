@@ -98,8 +98,20 @@ func (p *Postgres) SaveRun(r *web.RunRecord) error {
 // LoadRuns returns every stored run in chronological order, reconstructed from
 // the jsonb record column (the scalar columns are query aids, not read back).
 func (p *Postgres) LoadRuns() ([]*web.RunRecord, error) {
-	rows, err := p.pool.Query(context.Background(),
-		`SELECT record FROM looper_runs ORDER BY started_at ASC`)
+	return p.queryRuns(`SELECT record FROM looper_runs ORDER BY started_at ASC`)
+}
+
+// LoadRunsSince returns the runs whose last_seen_at is at or after since, in
+// chronological order — the incremental read behind the cross-replica
+// hydrator (see looper_runs_last_seen_at_idx).
+func (p *Postgres) LoadRunsSince(since time.Time) ([]*web.RunRecord, error) {
+	return p.queryRuns(
+		`SELECT record FROM looper_runs WHERE last_seen_at >= $1 ORDER BY started_at ASC`,
+		since)
+}
+
+func (p *Postgres) queryRuns(sql string, args ...any) ([]*web.RunRecord, error) {
+	rows, err := p.pool.Query(context.Background(), sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: load runs: %w", err)
 	}

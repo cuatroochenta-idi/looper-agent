@@ -62,3 +62,38 @@ func TestFolderPersistenceRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestFolderPersistenceLoadRunsSince covers the incremental read used by the
+// cross-replica hydrator: only runs seen at or after the cursor come back.
+func TestFolderPersistenceLoadRunsSince(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".looper")
+	p, err := NewFolderPersistence(dir)
+	if err != nil {
+		t.Fatalf("NewFolderPersistence: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	base := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	old := &RunRecord{ID: "old", Status: RunCompleted, StartedAt: base, LastSeenAt: base}
+	recent := &RunRecord{ID: "recent", Status: RunRunning, StartedAt: base.Add(time.Hour), LastSeenAt: base.Add(time.Hour)}
+	for _, r := range []*RunRecord{old, recent} {
+		if err := p.SaveRun(r); err != nil {
+			t.Fatalf("SaveRun %s: %v", r.ID, err)
+		}
+	}
+
+	runs, err := p.LoadRunsSince(base.Add(30 * time.Minute))
+	if err != nil {
+		t.Fatalf("LoadRunsSince: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != "recent" {
+		t.Fatalf("LoadRunsSince returned %d runs, want only 'recent'", len(runs))
+	}
+	all, err := p.LoadRunsSince(time.Time{})
+	if err != nil {
+		t.Fatalf("LoadRunsSince(zero): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("LoadRunsSince(zero) len = %d, want 2", len(all))
+	}
+}

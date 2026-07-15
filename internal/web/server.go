@@ -22,6 +22,21 @@ const stuckRunMaxIdle = 10 * time.Minute
 // stuckRunSweepInterval is how often the background sweeper runs.
 const stuckRunSweepInterval = 30 * time.Second
 
+// bootSweepMaxIdle is the idle threshold applied to hydrated "running" runs at
+// boot. It must NOT be zero: with a shared store (multi-replica panels) a run
+// hydrated in "running" state may be live on another replica right now — only
+// runs with no liveness signal for this window are treated as orphans of a
+// dead process. Write-through keeps LastSeenAt fresh well within it.
+const bootSweepMaxIdle = 15 * time.Second
+
+// hydrateInterval is how often the hydrator re-reads the shared persistence
+// for runs touched by other replicas; hydrateOverlap is the cursor slack that
+// absorbs clock skew and writes committed between reads.
+const (
+	hydrateInterval = 3 * time.Second
+	hydrateOverlap  = 10 * time.Second
+)
+
 // Server hosts the debug panel. Construct with NewServer, attach a RunFunc
 // with SetRunner, then mount Handler() on any HTTP listener.
 type Server struct {
@@ -96,13 +111,71 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 				log.Printf("Loaded %d runs", len(runs))
 			}
 		}
-		// Any run that came back from storage in "running" state belongs to a
-		// previous process that's now gone — finalize immediately instead of
-		// waiting for the first sweep tick.
-		_ = s.store.SweepStuckRuns(0, time.Now())
+		// A hydrated "running" run may be live on ANOTHER replica sharing this
+		// store — only purge ones with no recent liveness signal (orphans of a
+		// dead process). Never sweep with 0 here: that killed sibling pods'
+		// live runs at every boot.
+		_ = s.store.SweepStuckRuns(bootSweepMaxIdle, time.Now())
+		go s.runHydrator()
 	}
 	go s.runStuckRunSweeper()
 	return s, nil
+}
+
+// runHydrator keeps this replica's in-memory store converged with the shared
+// persistence: every tick it pulls runs other replicas touched since the
+// cursor and merges the fresher snapshots (see hydrateOnce).
+func (s *Server) runHydrator() {
+	cursor := time.Now().Add(-hydrateOverlap)
+	ticker := time.NewTicker(hydrateInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		next := time.Now().Add(-hydrateOverlap)
+		s.hydrateOnce(cursor)
+		cursor = next
+	}
+}
+
+// hydrateOnce merges persisted snapshots seen since the cursor into the
+// in-memory store. A snapshot only replaces the local record when it is
+// strictly fresher (or finalizes a still-running local view), so a live run
+// owned by THIS replica — whose in-memory record is always at least as fresh
+// as its own write-through — is never clobbered mid-stream.
+func (s *Server) hydrateOnce(since time.Time) {
+	runs, err := s.persist.LoadRunsSince(since)
+	if err != nil {
+		log.Printf("warn: hydrate from persistence failed: %v", err)
+		return
+	}
+	var addedAny bool
+	var changed []string
+	for _, in := range runs {
+		existing := s.store.Find(in.ID)
+		if existing == nil {
+			s.store.Add(in.Clone())
+			addedAny = true
+			changed = append(changed, in.ID)
+			continue
+		}
+		fresher := in.LastSeenAt.After(existing.LastSeenAt) ||
+			(existing.EndedAt.IsZero() && !in.EndedAt.IsZero() && !in.LastSeenAt.Before(existing.LastSeenAt))
+		if !fresher {
+			continue
+		}
+		clone := in.Clone()
+		s.store.Update(in.ID, func(r *RunRecord) { *r = *clone })
+		changed = append(changed, in.ID)
+	}
+	if len(changed) == 0 {
+		return
+	}
+	for _, id := range changed {
+		s.publishRunUpdated(id, TopicRun(id), TopicRuns, TopicSummary)
+	}
+	if addedAny {
+		s.publishRunsChanged()
+	}
+	s.publishChatsChanged()
 }
 
 // runStuckRunSweeper periodically calls SweepStuckRuns and publishes typed

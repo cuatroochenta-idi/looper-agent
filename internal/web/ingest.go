@@ -116,6 +116,10 @@ func (s *Server) IngestEvent(ev TraceEvent) error {
 	// structural is set by run_start / run_end: those flip the run list + chat
 	// list (a row appears or finalizes), so they fire the coarse changed events.
 	structural := false
+	// persistWorthy gates the write-through snapshot at the end: chunk-only
+	// events don't change the persistable (denoised) shape, so writing them
+	// would be redundant I/O on the shared store.
+	persistWorthy := true
 
 	switch ev.Type {
 	case "run_start":
@@ -216,6 +220,9 @@ func (s *Server) IngestEvent(ev TraceEvent) error {
 			Fallback:         d.Fallback,
 			APIKeySuffix:     d.APIKeySuffix,
 		}
+		if step.Kind == StepKindReasoning {
+			persistWorthy = false
+		}
 		s.store.AppendStep(ev.RunID, step)
 		appended = &step
 
@@ -267,10 +274,6 @@ func (s *Server) IngestEvent(ev TraceEvent) error {
 			// live record now the run is final (no-op for wire-denoised runs).
 			r.Steps = stripChunkSteps(r.Steps)
 		})
-		// Snapshot to durable storage now that the run is final.
-		if run := s.store.Find(ev.RunID); run != nil && s.persist != nil {
-			_ = s.persist.SaveRun(run)
-		}
 		structural = true
 
 	default:
@@ -309,6 +312,21 @@ func (s *Server) IngestEvent(ev TraceEvent) error {
 			ancestors = append(ancestors, cur)
 		}
 		cur = parent
+	}
+
+	// Write-through: snapshot the event's run AND its ancestors (their
+	// LastSeenAt just changed) so other replicas hydrating from the shared
+	// store see live runs with fresh liveness — without this, a sibling pod's
+	// sweeper would finalize a parent as stuck while its sub-agent works.
+	if s.persist != nil && persistWorthy {
+		if r := s.store.Find(ev.RunID); r != nil {
+			_ = s.persist.SaveRun(r)
+		}
+		for _, id := range ancestors {
+			if r := s.store.Find(id); r != nil {
+				_ = s.persist.SaveRun(r)
+			}
+		}
 	}
 
 	// Fan out typed events. Every event is safe to drop — subscribers refetch a

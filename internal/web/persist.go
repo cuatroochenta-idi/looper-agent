@@ -1,20 +1,30 @@
 package web
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
-// Persistence is the durable backing store for finalized runs. The in-memory
-// Store stays the hot cache serving every read; Persistence only mirrors run
-// snapshots so a restart can rehydrate them. A nil Persistence means the panel
-// runs in-memory only — runs vanish on exit.
+// Persistence is the durable backing store for run snapshots. The in-memory
+// Store stays the hot cache serving every read; Persistence is the shared
+// source of truth that lets other panel replicas hydrate runs (including ones
+// still running) and lets a restart recover history. A nil Persistence means
+// the panel runs in-memory only — runs vanish on exit.
 //
 // Backends live outside this package (e.g. internal/store/postgres) and import
 // web for RunRecord; web never imports them, so the seam stays cycle-free.
 type Persistence interface {
-	// SaveRun upserts a finalized run snapshot. Called on run_end and when the
-	// sweeper finalizes a stuck run — must be idempotent on RunRecord.ID.
+	// SaveRun upserts a run snapshot — on every meaningful ingest event
+	// (write-through, so other replicas can hydrate a run while it is still
+	// running) and when the sweeper finalizes a stuck run. Must be idempotent
+	// on RunRecord.ID.
 	SaveRun(r *RunRecord) error
 	// LoadRuns returns every persisted run in chronological (started_at) order.
 	LoadRuns() ([]*RunRecord, error)
+	// LoadRunsSince returns the runs whose LastSeenAt is at or after since, in
+	// chronological (started_at) order — the incremental read behind the
+	// cross-replica hydrator.
+	LoadRunsSince(since time.Time) ([]*RunRecord, error)
 	// Close releases any backend resources (pools, handles).
 	Close() error
 }
@@ -49,5 +59,19 @@ func NewFolderPersistence(dir string) (Persistence, error) {
 func (f *folderPersistence) SaveRun(r *RunRecord) error { return writeRunFile(f.dir, r) }
 
 func (f *folderPersistence) LoadRuns() ([]*RunRecord, error) { return loadRunsFromDisk(f.dir) }
+
+func (f *folderPersistence) LoadRunsSince(since time.Time) ([]*RunRecord, error) {
+	all, err := loadRunsFromDisk(f.dir)
+	if err != nil {
+		return nil, err
+	}
+	out := all[:0]
+	for _, r := range all {
+		if !r.LastSeenAt.Before(since) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
 
 func (f *folderPersistence) Close() error { return nil }
