@@ -54,7 +54,31 @@ type Provider struct {
 	// includeReasoning is the default for "surface reasoning deltas in
 	// StreamChunk.Reasoning". Per-request overrides win.
 	includeReasoning bool
+
+	// api selects which OpenAI API surface serves this provider's calls.
+	// The zero value (APIAuto) routes per call — see apiFor in responses.go.
+	api API
 }
+
+// API selects the OpenAI API surface a request goes through.
+type API string
+
+const (
+	// APIAuto (the default) picks per call: /v1/responses when a reasoning
+	// effort is resolved for the request AND the provider points at the
+	// real api.openai.com (baseURL unset); /v1/chat/completions otherwise.
+	// OpenAI rejects function tools + reasoning_effort on chat/completions
+	// for newer models (gpt-5.4, gpt-5.6) with a 400 that says to use
+	// /v1/responses — this rule follows that guidance without breaking
+	// OpenAI-compatible endpoints, which usually lack /v1/responses.
+	APIAuto API = ""
+
+	// APIChatCompletions forces the legacy /v1/chat/completions path.
+	APIChatCompletions API = "chat_completions"
+
+	// APIResponses forces the /v1/responses path.
+	APIResponses API = "responses"
+)
 
 // Option configures an OpenAI Provider.
 type Option func(*Provider)
@@ -104,6 +128,14 @@ func WithAPIKeys(keys ...string) Option {
 // Non-reasoning models silently ignore this.
 func WithReasoningEffort(e provider.ReasoningEffort) Option {
 	return func(p *Provider) { p.reasoningEffort = toSDKEffort(e) }
+}
+
+// WithAPI pins the API surface (chat completions vs responses) instead of
+// the per-call APIAuto routing. Use APIResponses to force the responses
+// path (e.g. against a fake server in tests, or when effort comes per
+// request), APIChatCompletions to keep reasoning models on the legacy path.
+func WithAPI(api API) Option {
+	return func(p *Provider) { p.api = api }
 }
 
 // WithIncludeReasoning controls whether reasoning_content deltas from
@@ -190,6 +222,13 @@ func (p *Provider) Model() string { return p.model }
 
 // Chat sends a non-streaming chat completion request.
 func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider.LLMResponse, error) {
+	// Route to /v1/responses when the resolved config calls for it (see
+	// apiFor). The chat/completions path below stays byte-identical for
+	// every request that doesn't.
+	if p.apiFor(p.resolveEffort(req.Reasoning)) == APIResponses {
+		return p.chatResponses(ctx, req)
+	}
+
 	params := p.translator.ToNative(req.SystemPrompt, req.Messages, req.Tools).(openai.ChatCompletionNewParams)
 
 	// Resolve the effective model BEFORE applying request-level config:
@@ -268,6 +307,11 @@ func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
 
 // ChatStream sends a streaming chat completion request.
 func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-chan provider.StreamChunk, error) {
+	// Same routing rule as Chat — see apiFor in responses.go.
+	if p.apiFor(p.resolveEffort(req.Reasoning)) == APIResponses {
+		return p.chatStreamResponses(ctx, req)
+	}
+
 	params := p.translator.ToNative(req.SystemPrompt, req.Messages, req.Tools).(openai.ChatCompletionNewParams)
 
 	model := req.Model

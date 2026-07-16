@@ -4,6 +4,37 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.7.4] — 2026-07-16
+
+### Added
+
+- **OpenAI Responses API path (`/v1/responses`).** The openai provider can
+  now serve calls through the Responses API, unblocking function tools +
+  `reasoning_effort` on gpt-5.4 / gpt-5.6 — OpenAI rejects that combination
+  on `/v1/chat/completions` with a 400 that points at `/v1/responses`.
+  - **Auto-routing.** Per call, the provider picks `/v1/responses` when a
+    reasoning effort is resolved for the request AND no custom base URL is
+    configured (i.e. the real api.openai.com — OpenAI-compatible endpoints
+    often lack `/v1/responses`). Every other request stays on
+    chat/completions with a byte-identical wire shape. The new
+    `WithAPI(APIResponses | APIChatCompletions)` option pins the surface
+    explicitly.
+  - **Stateless encrypted-reasoning replay.** Responses-path requests
+    always send `store:false` and `include: reasoning.encrypted_content`;
+    tool-call replies serialize their reasoning / message / function_call
+    output items into an opaque JSON blob on the first
+    `ToolCall.Signature` (marker key `looper_openai_responses`) and replay
+    it verbatim on the next turn of the tool loop — the Responses-API
+    analogue of Gemini's thoughtSignature round-trip. Foreign or missing
+    signatures fall back to plain function_call synthesis, so histories
+    recorded by the chat path (or other providers) keep working.
+  - **Streaming with the same contracts as the chat path.** Synchronous
+    first-event probe (pre-content HTTP failures surface as the function
+    return error, so Failover/Retry wrappers engage instead of staying
+    committed to a broken inner), per-chunk provenance stamping, and a
+    cumulative final chunk with mapped usage — failed/incomplete streams
+    still bill the usage they carried.
+
 ## [v1.7.1] — 2026-07-10
 
 ### Fixed
