@@ -206,6 +206,25 @@ func (cm *CostModel) Calculate(provider, model string, usage Usage) CostBreakdow
 // Returns (CostConfig{}, false) when nothing matches; the caller surfaces
 // the miss via warnMiss.
 func (cm *CostModel) lookup(provider, model string) (CostConfig, bool) {
+	// The raw id first, so a caller who registered pricing under the exact
+	// platform spelling ("us.anthropic.claude-opus-4-8") still wins.
+	if c, ok := cm.lookupExactID(provider, model); ok {
+		return c, true
+	}
+	// Then the same id with platform routing prefixes stripped, so Bedrock
+	// and inference-profile ids resolve to the first-party entry instead of
+	// falling through to $0.
+	if norm := normalizeModelID(model); norm != model {
+		if c, ok := cm.lookupExactID(provider, norm); ok {
+			return c, true
+		}
+	}
+	return CostConfig{}, false
+}
+
+// lookupExactID runs the custom-then-provider, exact-then-family cascade
+// for one spelling of a model id.
+func (cm *CostModel) lookupExactID(provider, model string) (CostConfig, bool) {
 	if c, ok := exact(cm.prices, "custom", model); ok {
 		return c, true
 	}
@@ -249,9 +268,14 @@ func longestFamily(table map[string]map[string]CostConfig, provider, model strin
 }
 
 // familyPrefix reports whether key is a family-level prefix of model. The
-// prefix must terminate at end-of-string or at a `-`/`.` boundary so that
-// "gpt-4" does not accidentally match "gpt-40" while "gpt-5" still matches
-// "gpt-5-2025-08-07" and "gpt-5.5".
+// prefix must terminate at end-of-string or at a `-`/`.`/`@` boundary so
+// that "gpt-4" does not accidentally match "gpt-40" while "gpt-5" still
+// matches "gpt-5-2025-08-07" and "gpt-5.5".
+//
+// `@` is the Vertex AI version separator ("claude-opus-4-5@20251101").
+// Without it that id skipped its own "claude-opus-4-5" entry and fell
+// through to the cheaper-to-match "claude-opus-4" key — billing Opus 4.5
+// at the Opus 4.0 rate, 3x too high.
 func familyPrefix(model, key string) bool {
 	if key == "" {
 		return false
@@ -263,10 +287,33 @@ func familyPrefix(model, key string) bool {
 		return true
 	}
 	switch model[len(key)] {
-	case '-', '.':
+	case '-', '.', '@':
 		return true
 	}
 	return false
+}
+
+// idPrefixes are the vendor/routing prefixes cloud platforms prepend to an
+// otherwise first-party model id. Bedrock uses "anthropic.<id>"; a Bedrock
+// cross-region inference profile prepends a geo on top of that
+// ("us.anthropic.<id>"). Stripping them lets one pricing entry serve the
+// first-party id and every platform spelling of it.
+var idPrefixes = []string{"us.", "eu.", "apac.", "us-gov.", "anthropic."}
+
+// normalizeModelID strips platform routing prefixes so a Bedrock or Vertex
+// id resolves to the same pricing entry as the first-party one. Returns
+// the input unchanged when there is nothing to strip.
+func normalizeModelID(model string) string {
+	for changed := true; changed; {
+		changed = false
+		for _, p := range idPrefixes {
+			if strings.HasPrefix(model, p) {
+				model = model[len(p):]
+				changed = true
+			}
+		}
+	}
+	return model
 }
 
 // warnMiss logs a one-time warning per (provider, model) pair so cost

@@ -10,10 +10,15 @@
 // as they do on the first-party API — the wire shape is identical, only the
 // transport differs.
 //
-// Model id: Bedrock prefixes the first-party id with "anthropic.", so
-// Opus 4.8 is "anthropic.claude-opus-4-8". The provider strips that prefix
-// when resolving model capabilities, so it correctly sends adaptive
-// thinking and drops the sampling parameters Opus 4.7+ rejects.
+// Model id: Bedrock prefixes the first-party id with "anthropic.", and
+// current Anthropic models additionally require a CROSS-REGION INFERENCE
+// PROFILE rather than the bare id — invoking "anthropic.claude-opus-4-8"
+// on on-demand throughput fails with "Retry your request with the ID or
+// ARN of an inference profile that contains this model". The profile id
+// adds a geo prefix, so in us-east-1 it is "us.anthropic.claude-opus-4-8"
+// (see inferenceProfile below). The provider strips both prefixes when
+// resolving model capabilities, so it still sends adaptive thinking and
+// drops the sampling parameters Opus 4.7+ rejects.
 //
 // Usage:
 //
@@ -110,7 +115,7 @@ func main() {
 			option.WithoutEnvironmentDefaults(),
 			bedrock.WithConfig(cfg),
 		),
-		anthropic.WithModel("anthropic.claude-opus-4-8"),
+		anthropic.WithModel(inferenceProfile(region, "anthropic.claude-opus-4-8")),
 		// max_tokens covers thinking AND the visible reply. At effort
 		// "high" Opus 4.8 can spend a 4k budget entirely on thinking and
 		// get truncated before it emits the tool call — leave real
@@ -120,9 +125,10 @@ func main() {
 		// that shape automatically from the model id. "low" suits a
 		// scoped lookup like this one and keeps the example fast.
 		anthropic.WithEffort("low"),
-		// Label the telemetry so Bedrock traffic is distinguishable from
-		// calls to api.anthropic.com in cost reports.
-		anthropic.WithProviderID("bedrock"),
+		// Note: WithProviderID("bedrock") would relabel the telemetry, but
+		// the cost registry is keyed by provider — a custom label has no
+		// pricing table and every call reports $0. Relabel only if you
+		// also register rates under that name.
 	)
 
 	stockTool := tool.MustNewTool(StockLookupIn{},
@@ -191,4 +197,36 @@ func dumpHistory(res *looper.RunResult) {
 		fmt.Fprintln(os.Stderr)
 	}
 	fmt.Fprintf(os.Stderr, "--- end history ---\n")
+}
+
+// inferenceProfile turns a Bedrock model id into a cross-region inference
+// profile id for the given region.
+//
+// Current Anthropic models are not invocable on Bedrock through on-demand
+// throughput with the bare model id — the API answers:
+//
+//	Invocation of model ID anthropic.claude-opus-4-8 with on-demand
+//	throughput isn't supported. Retry your request with the ID or ARN of
+//	an inference profile that contains this model.
+//
+// The profile id is the model id with a geo prefix ("us.anthropic.…"),
+// which routes across the regions in that geography. Provisioned
+// throughput is the alternative; it needs a reserved capacity commitment.
+func inferenceProfile(region, modelID string) string {
+	var geo string
+	switch {
+	case strings.HasPrefix(region, "us-gov-"):
+		geo = "us-gov."
+	case strings.HasPrefix(region, "us-"):
+		geo = "us."
+	case strings.HasPrefix(region, "eu-"):
+		geo = "eu."
+	case strings.HasPrefix(region, "ap-"):
+		geo = "apac."
+	default:
+		// Unknown geography — fall back to the bare id and let Bedrock
+		// report what it supports there.
+		return modelID
+	}
+	return geo + modelID
 }

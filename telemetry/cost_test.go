@@ -402,3 +402,53 @@ func TestCostModelPrefixShadowing(t *testing.T) {
 		})
 	}
 }
+
+// TestCostModelPlatformModelIDs covers the id spellings cloud platforms
+// use. Bedrock prefixes the first-party id with "anthropic.", a
+// cross-region inference profile adds a geo on top of that, and Vertex
+// separates the version with "@". All three used to resolve to $0 or —
+// worse, in Vertex's case — to a cheaper-to-match family key: an
+// "@"-versioned Opus 4.5 skipped its own entry and billed at the Opus 4.0
+// rate, 3x too high.
+func TestCostModelPlatformModelIDs(t *testing.T) {
+	cm := NewCostModel()
+	usage := Usage{InputTokens: 1_000_000} // isolates the input rate
+
+	tests := []struct {
+		model  string
+		wantIn float64
+	}{
+		{"claude-opus-4-8", 5.00},                // first-party
+		{"anthropic.claude-opus-4-8", 5.00},      // Bedrock
+		{"us.anthropic.claude-opus-4-8", 5.00},   // Bedrock inference profile
+		{"eu.anthropic.claude-opus-4-8", 5.00},   // ...other geographies
+		{"apac.anthropic.claude-sonnet-5", 3.00}, //
+		{"claude-opus-4-5@20251101", 5.00},       // Vertex — NOT the 15.00 4.0 rate
+		{"claude-opus-4-1@20250805", 15.00},      // Vertex, genuinely the old rate
+		{"us.anthropic.claude-opus-4-1", 15.00},  // prefix must not change the tier
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			got := cm.Calculate("anthropic", tt.model, usage)
+			if !almostEqual(got.TotalUSD, tt.wantIn, 0.0001) {
+				t.Errorf("input rate for %s = %.6f, want %.6f", tt.model, got.TotalUSD, tt.wantIn)
+			}
+		})
+	}
+}
+
+// An explicitly registered platform id must win over the normalized form,
+// so a caller with negotiated Bedrock rates is not overridden by the
+// first-party table.
+func TestCostModelExactPlatformIDWins(t *testing.T) {
+	cm := NewCostModel()
+	cm.UpdateCost("anthropic", "us.anthropic.claude-opus-4-8", CostConfig{
+		InputCostPer1MTokens: 4.00,
+	})
+
+	got := cm.Calculate("anthropic", "us.anthropic.claude-opus-4-8", Usage{InputTokens: 1_000_000})
+	if !almostEqual(got.TotalUSD, 4.00, 0.0001) {
+		t.Errorf("TotalUSD = %.6f, want the registered 4.00", got.TotalUSD)
+	}
+}

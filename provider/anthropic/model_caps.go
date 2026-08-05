@@ -78,11 +78,29 @@ var capsTable = map[string]modelCaps{
 // can override the whole decision with WithThinkingCompat.
 var defaultCaps = modelCaps{thinking: thinkingAdaptive, sampling: false, effort: true}
 
+// idPrefixes are the routing prefixes cloud platforms prepend to an
+// otherwise first-party model id: Bedrock uses "anthropic.<id>", and a
+// Bedrock cross-region inference profile prepends a geo on top of that
+// ("us.anthropic.<id>"). Newer models on Bedrock are only invocable
+// through an inference profile, so the geo form is the common one.
+var idPrefixes = []string{"us.", "eu.", "apac.", "us-gov.", "anthropic."}
+
 // lookupCaps resolves a model id to its capabilities via longest-prefix
-// match. Bedrock-style "anthropic."-prefixed ids are normalised first so a
-// Bedrock-fronted Claude resolves the same as the first-party id.
+// match. Platform routing prefixes are stripped first so a Bedrock-fronted
+// Claude resolves the same as the first-party id — otherwise an
+// inference-profile id falls through to defaultCaps and an older model
+// would be sent the wrong thinking shape.
 func lookupCaps(model string) modelCaps {
-	m := strings.TrimPrefix(model, "anthropic.")
+	m := model
+	for changed := true; changed; {
+		changed = false
+		for _, p := range idPrefixes {
+			if strings.HasPrefix(m, p) {
+				m = m[len(p):]
+				changed = true
+			}
+		}
+	}
 
 	var bestKey string
 	var best modelCaps

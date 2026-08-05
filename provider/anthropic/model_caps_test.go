@@ -259,3 +259,38 @@ func TestWithEffortAndCompatOverrides(t *testing.T) {
 		}
 	})
 }
+
+// TestLookupCapsInferenceProfileIDs guards the id shape Bedrock actually
+// requires: current models are only invocable through a cross-region
+// inference profile, whose id carries a geo prefix on top of the Bedrock
+// "anthropic." one. Without stripping both, an older model behind a
+// profile would fall through to defaultCaps and be sent adaptive thinking
+// — a hard 400 on a model that only takes budget_tokens.
+func TestLookupCapsInferenceProfileIDs(t *testing.T) {
+	tests := []struct {
+		model        string
+		wantThinking thinkingMode
+		wantSampling bool
+	}{
+		{"us.anthropic.claude-opus-4-8", thinkingAdaptive, false},
+		{"eu.anthropic.claude-opus-4-8", thinkingAdaptive, false},
+		{"apac.anthropic.claude-sonnet-5", thinkingAdaptive, false},
+		{"us-gov.anthropic.claude-opus-4-8", thinkingAdaptive, false},
+		// The prefix must not upgrade an older model's contract.
+		{"us.anthropic.claude-sonnet-4-5", thinkingLegacyBudget, true},
+		{"us.anthropic.claude-haiku-4-5", thinkingLegacyBudget, true},
+		{"eu.anthropic.claude-opus-4-6", thinkingAdaptive, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			got := lookupCaps(tt.model)
+			if got.thinking != tt.wantThinking {
+				t.Errorf("thinking = %v, want %v", got.thinking, tt.wantThinking)
+			}
+			if got.sampling != tt.wantSampling {
+				t.Errorf("sampling = %v, want %v", got.sampling, tt.wantSampling)
+			}
+		})
+	}
+}
