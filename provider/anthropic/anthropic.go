@@ -730,9 +730,7 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 				OfTool: &anthropic.ToolParam{
 					Name:        tl.Name(),
 					Description: anthropic.String(tl.Description()),
-					InputSchema: anthropic.ToolInputSchemaParam{
-						Properties: tl.SchemaMap(),
-					},
+					InputSchema: buildInputSchema(tl.SchemaMap()),
 				},
 			}
 		}

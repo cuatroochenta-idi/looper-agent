@@ -156,7 +156,8 @@ func main() {
 
 	var out StockReport
 	if err := looper.Decode(res, &out); err != nil {
-		fmt.Fprintf(os.Stderr, "decode failed: %v\nraw output: %s\n", err, res.Output)
+		fmt.Fprintf(os.Stderr, "decode failed: %v\nraw output: %q\n", err, res.Output)
+		dumpHistory(res)
 		os.Exit(1)
 	}
 
@@ -167,4 +168,27 @@ func main() {
 	fmt.Printf("Why:       %s\n", out.Reasoning)
 	fmt.Printf("\nCost:      $%.6f  (%d turns, %d in / %d out tokens)\n",
 		res.Cost.TotalUSD, res.Turns, res.Cost.InputTokens, res.Cost.OutputTokens)
+}
+
+// dumpHistory prints the full conversation when the run produces nothing
+// usable. An empty Output with status "completed" means the loop treated
+// some turn as the final answer; the history is the only place that shows
+// which turn that was and what the model actually sent — in particular
+// whether it called final_response with usable arguments.
+func dumpHistory(res *looper.RunResult) {
+	fmt.Fprintf(os.Stderr, "\n--- history (%d turns, status=%s) ---\n", res.Turns, res.Status)
+	for i, m := range res.History.Messages() {
+		fmt.Fprintf(os.Stderr, "[%d] type=%s", i, m.Type)
+		if m.Name != "" {
+			fmt.Fprintf(os.Stderr, " name=%s", m.Name)
+		}
+		if m.Content != "" {
+			fmt.Fprintf(os.Stderr, " content=%q", m.Content)
+		}
+		for _, tc := range m.ToolCalls {
+			fmt.Fprintf(os.Stderr, "\n      tool_call name=%s args=%s", tc.Name, string(tc.Arguments))
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+	fmt.Fprintf(os.Stderr, "--- end history ---\n")
 }

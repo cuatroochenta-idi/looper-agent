@@ -19,6 +19,27 @@ All notable changes to Looper Agent are documented here. The format follows
 
 ### Fixed
 
+- **Anthropic tool schemas were nested one level too deep, breaking every
+  tool call.** `ToolInputSchemaParam` *is* the schema object, but the
+  translator assigned the tool's entire JSON Schema to its `Properties`
+  field. The wire payload became:
+
+  ```json
+  "input_schema": {"type":"object","properties":{
+      "$schema":"…","type":"object","additionalProperties":false,
+      "properties":{"sku":{…}},"required":["sku"]}}
+  ```
+
+  so the model saw a tool whose parameters were named `$schema`, `type`,
+  `properties`, `required` and `additionalProperties`, with the real ones
+  buried a level down and no top-level `required` at all. Tools were
+  effectively uncallable, and for the framework-injected `final_response`
+  tool this produced a structured-output close with an empty `output` —
+  surfacing as `Decode: empty output (status="completed")`. Properties and
+  `required` now map to their own fields; other keywords
+  (`additionalProperties`, `$defs`, …) are forwarded via `ExtraFields`;
+  `$schema` is dropped.
+
 - **An empty API key no longer sends an empty `x-api-key` header**, which
   would invalidate a SigV4 signature. Providing a key is unchanged.
 
