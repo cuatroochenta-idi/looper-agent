@@ -1,24 +1,22 @@
 // Example: Claude Opus 4.8 on Amazon Bedrock — tool call + structured output.
 //
-// Bedrock authenticates with AWS SigV4 instead of an Anthropic API key, so
-// the provider is built with an EMPTY key plus bedrock.WithConfig, which
-// rewrites the request for the classic inference endpoint
-// (https://bedrock-runtime.<region>.amazonaws.com) and signs it.
-//
 // The agent looks up a (fake) inventory record through a tool, then returns
-// a typed Go struct via WithStructuredOutput. Both work on Bedrock exactly
-// as they do on the first-party API — the wire shape is identical, only the
-// transport differs.
+// a typed Go struct. Both work on Bedrock exactly as on the first-party
+// API — the wire shape is identical, only the transport differs.
 //
-// Model id: Bedrock prefixes the first-party id with "anthropic.", and
-// current Anthropic models additionally require a CROSS-REGION INFERENCE
-// PROFILE rather than the bare id — invoking "anthropic.claude-opus-4-8"
-// on on-demand throughput fails with "Retry your request with the ID or
-// ARN of an inference profile that contains this model". The profile id
-// adds a geo prefix, so in us-east-1 it is "us.anthropic.claude-opus-4-8"
-// (see inferenceProfile below). The provider strips both prefixes when
-// resolving model capabilities, so it still sends adaptive thinking and
-// drops the sampling parameters Opus 4.7+ rejects.
+// Three things are Bedrock-specific, all visible below:
+//
+//   - Auth is AWS SigV4, so the provider takes an EMPTY API key plus
+//     bedrock.WithConfig. It also needs option.WithoutEnvironmentDefaults(),
+//     or the SDK resolves its own credentials first and fails with "no
+//     Anthropic credentials found" before the request is ever signed.
+//   - Model ids are prefixed. Current Anthropic models are not invocable
+//     on on-demand throughput with the bare id — they need a cross-region
+//     inference profile, which adds a geo on top ("us.anthropic.…").
+//     See inferenceProfile.
+//   - The cost registry is keyed by provider, so leave the provider id
+//     alone: relabelling with WithProviderID("bedrock") means no pricing
+//     table and $0 on every call.
 //
 // Usage:
 //
@@ -26,10 +24,10 @@
 //	export AWS_SECRET_ACCESS_KEY=...
 //	export AWS_REGION=us-east-1              # optional, defaults to us-east-1
 //	# export AWS_SESSION_TOKEN=...           # only for temporary/STS creds
-//	go run examples/22_aws_bedrock_anthropic/main.go
+//	go run ./examples/22_aws_bedrock_anthropic
 //
-// Requires Bedrock model access for Claude Opus 4.8 to be enabled in that
-// region (AWS console → Bedrock → Model access) and an IAM policy allowing
+// Requires Bedrock model access for Claude Opus 4.8 in that region (AWS
+// console → Bedrock → Model access) and an IAM policy allowing
 // bedrock:InvokeModel.
 package main
 
@@ -90,9 +88,8 @@ func main() {
 	}
 
 	// Static credentials keep the example explicit about what Bedrock
-	// needs. In production prefer awsconfig.LoadDefaultConfig(ctx) on its
-	// own, which picks up instance roles, SSO, and the shared credentials
-	// file — no keys in the environment at all.
+	// needs. In production prefer awsconfig.LoadDefaultConfig(ctx) alone,
+	// which picks up instance roles, SSO, and the shared credentials file.
 	cfg, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion(region),
 		awsconfig.WithCredentialsProvider(
@@ -104,31 +101,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Empty API key: Bedrock authenticates with SigV4, and an empty
-	// x-api-key header would invalidate the signature.
 	p := anthropic.NewProvider("",
 		anthropic.WithRequestOptions(
-			// WithoutEnvironmentDefaults is REQUIRED here. Without it the
-			// SDK runs its own credential resolution first (ANTHROPIC_API_KEY,
-			// then the ant profile) and aborts with "no Anthropic credentials
-			// found" before the Bedrock middleware ever signs the request.
 			option.WithoutEnvironmentDefaults(),
 			bedrock.WithConfig(cfg),
 		),
 		anthropic.WithModel(inferenceProfile(region, "anthropic.claude-opus-4-8")),
-		// max_tokens covers thinking AND the visible reply. At effort
-		// "high" Opus 4.8 can spend a 4k budget entirely on thinking and
-		// get truncated before it emits the tool call — leave real
-		// headroom. Anthropic's guidance is 64k+ at xhigh/max.
+		// max_tokens covers thinking AND the visible reply, so a tight
+		// budget at high effort can be spent entirely on thinking and get
+		// truncated before the tool call. Anthropic suggests 64k+ at
+		// xhigh/max; "low" effort suits a scoped lookup like this one.
 		anthropic.WithMaxTokens(16384),
-		// Opus 4.8 takes adaptive thinking + effort; the provider picks
-		// that shape automatically from the model id. "low" suits a
-		// scoped lookup like this one and keeps the example fast.
 		anthropic.WithEffort("low"),
-		// Note: WithProviderID("bedrock") would relabel the telemetry, but
-		// the cost registry is keyed by provider — a custom label has no
-		// pricing table and every call reports $0. Relabel only if you
-		// also register rates under that name.
 	)
 
 	stockTool := tool.MustNewTool(StockLookupIn{},
@@ -163,7 +147,6 @@ func main() {
 	var out StockReport
 	if err := looper.Decode(res, &out); err != nil {
 		fmt.Fprintf(os.Stderr, "decode failed: %v\nraw output: %q\n", err, res.Output)
-		dumpHistory(res)
 		os.Exit(1)
 	}
 
@@ -176,57 +159,25 @@ func main() {
 		res.Cost.TotalUSD, res.Turns, res.Cost.InputTokens, res.Cost.OutputTokens)
 }
 
-// dumpHistory prints the full conversation when the run produces nothing
-// usable. An empty Output with status "completed" means the loop treated
-// some turn as the final answer; the history is the only place that shows
-// which turn that was and what the model actually sent — in particular
-// whether it called final_response with usable arguments.
-func dumpHistory(res *looper.RunResult) {
-	fmt.Fprintf(os.Stderr, "\n--- history (%d turns, status=%s) ---\n", res.Turns, res.Status)
-	for i, m := range res.History.Messages() {
-		fmt.Fprintf(os.Stderr, "[%d] type=%s", i, m.Type)
-		if m.Name != "" {
-			fmt.Fprintf(os.Stderr, " name=%s", m.Name)
-		}
-		if m.Content != "" {
-			fmt.Fprintf(os.Stderr, " content=%q", m.Content)
-		}
-		for _, tc := range m.ToolCalls {
-			fmt.Fprintf(os.Stderr, "\n      tool_call name=%s args=%s", tc.Name, string(tc.Arguments))
-		}
-		fmt.Fprintln(os.Stderr)
-	}
-	fmt.Fprintf(os.Stderr, "--- end history ---\n")
-}
-
 // inferenceProfile turns a Bedrock model id into a cross-region inference
-// profile id for the given region.
-//
-// Current Anthropic models are not invocable on Bedrock through on-demand
-// throughput with the bare model id — the API answers:
+// profile id for the given region, by prepending the geography that routes
+// it. Without this, Bedrock answers:
 //
 //	Invocation of model ID anthropic.claude-opus-4-8 with on-demand
 //	throughput isn't supported. Retry your request with the ID or ARN of
 //	an inference profile that contains this model.
-//
-// The profile id is the model id with a geo prefix ("us.anthropic.…"),
-// which routes across the regions in that geography. Provisioned
-// throughput is the alternative; it needs a reserved capacity commitment.
 func inferenceProfile(region, modelID string) string {
-	var geo string
 	switch {
 	case strings.HasPrefix(region, "us-gov-"):
-		geo = "us-gov."
+		return "us-gov." + modelID
 	case strings.HasPrefix(region, "us-"):
-		geo = "us."
+		return "us." + modelID
 	case strings.HasPrefix(region, "eu-"):
-		geo = "eu."
+		return "eu." + modelID
 	case strings.HasPrefix(region, "ap-"):
-		geo = "apac."
+		return "apac." + modelID
 	default:
-		// Unknown geography — fall back to the bare id and let Bedrock
-		// report what it supports there.
+		// Unknown geography — let Bedrock report what it supports there.
 		return modelID
 	}
-	return geo + modelID
 }
