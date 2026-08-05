@@ -841,6 +841,23 @@ func (t *Translator) FromNative(response any) (*provider.LLMResponse, error) {
 
 	result.Content = content
 
+	// A turn that yielded neither text nor a tool call is unusable, and the
+	// loop would otherwise treat "no tool calls" as a successful final
+	// answer and return an empty Output with status "completed" — the
+	// failure surfaces far from its cause. The stop reason is the only
+	// place that says why, and provider.LLMResponse has nowhere to carry
+	// it, so report it as an error here.
+	if content == "" && len(result.ToolCalls) == 0 {
+		switch msg.StopReason {
+		case "max_tokens":
+			return nil, fmt.Errorf("anthropic: response hit max_tokens (provider configured %d) before "+
+				"producing any text or tool call — with thinking enabled the budget covers thinking AND "+
+				"the reply, so raise WithMaxTokens or lower the effort level", t.maxTokens)
+		case "refusal":
+			return nil, fmt.Errorf("anthropic: request declined by safety classifiers (stop_reason=refusal)")
+		}
+	}
+
 	if msg.StopReason == "end_turn" && len(result.ToolCalls) == 0 {
 		result.IsFinal = true
 	}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -110,5 +111,77 @@ func TestAPIKeyStillSentWhenProvided(t *testing.T) {
 
 	if got := headers.Get("x-api-key"); got != "sk-ant-test-key" {
 		t.Errorf("x-api-key = %q, want the configured key", got)
+	}
+}
+
+// TestEmptyTurnSurfacesStopReason covers the failure mode that made an
+// under-budgeted Bedrock run look like a success: adaptive thinking eats
+// the whole max_tokens budget, the model is cut off before emitting any
+// text or tool call, and the loop then treats "no tool calls" as a final
+// answer and returns an empty Output with status "completed". The cause
+// is only visible in stop_reason, so the provider reports it as an error.
+func TestEmptyTurnSurfacesStopReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		stopReason string
+		wantErr    string
+	}{
+		{"truncated before any output", "max_tokens", "max_tokens"},
+		{"declined by classifiers", "refusal", "refusal"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				// Only a thinking block: no text, no tool_use — exactly
+				// what a truncated high-effort turn returns.
+				io.WriteString(w, `{
+					"id": "msg_1", "type": "message", "role": "assistant",
+					"model": "anthropic.claude-opus-4-8",
+					"stop_reason": "`+tt.stopReason+`",
+					"content": [{"type": "thinking", "thinking": "reasoning...", "signature": "sig"}],
+					"usage": {"input_tokens": 10, "output_tokens": 4096}
+				}`)
+			}))
+			defer srv.Close()
+
+			p := NewProvider("k", WithBaseURL(srv.URL), WithModel("anthropic.claude-opus-4-8"))
+			_, err := p.Chat(context.Background(), provider.LLMRequest{
+				Messages: []message.Message{{Type: message.MessageUser, Content: "hi"}},
+			})
+			if err == nil {
+				t.Fatal("want an error, got a silent empty success")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q should mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// A truncated turn that DID produce usable content is not an error — the
+// caller keeps the partial text.
+func TestTruncatedTurnWithContentIsNotAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"id": "msg_1", "type": "message", "role": "assistant",
+			"model": "anthropic.claude-opus-4-8", "stop_reason": "max_tokens",
+			"content": [{"type": "text", "text": "partial answer"}],
+			"usage": {"input_tokens": 10, "output_tokens": 4096}
+		}`)
+	}))
+	defer srv.Close()
+
+	p := NewProvider("k", WithBaseURL(srv.URL), WithModel("anthropic.claude-opus-4-8"))
+	res, err := p.Chat(context.Background(), provider.LLMRequest{
+		Messages: []message.Message{{Type: message.MessageUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("partial content must not error: %v", err)
+	}
+	if res.Content != "partial answer" {
+		t.Errorf("Content = %q, want the partial text", res.Content)
 	}
 }

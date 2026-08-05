@@ -22,6 +22,17 @@ All notable changes to Looper Agent are documented here. The format follows
 - **An empty API key no longer sends an empty `x-api-key` header**, which
   would invalidate a SigV4 signature. Providing a key is unchanged.
 
+- **A turn that produced nothing is no longer reported as a successful
+  empty run.** With thinking enabled, `max_tokens` covers thinking *and*
+  the reply, so an under-budgeted high-effort request can be cut off
+  before emitting any text or tool call. The response then carried no
+  content and no tool calls, and the loop treats "no tool calls" as a
+  final answer — so the run returned `status="completed"` with an empty
+  `Output`, and the real cause (`stop_reason`) was discarded by the
+  adapter. Those turns now fail with a message naming the stop reason and
+  the configured budget. A truncated turn that *did* produce content is
+  unaffected: the partial text is still returned.
+
 ### Notes
 
 - The Bedrock path additionally requires

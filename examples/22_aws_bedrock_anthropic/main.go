@@ -111,11 +111,15 @@ func main() {
 			bedrock.WithConfig(cfg),
 		),
 		anthropic.WithModel("anthropic.claude-opus-4-8"),
-		anthropic.WithMaxTokens(4096),
+		// max_tokens covers thinking AND the visible reply. At effort
+		// "high" Opus 4.8 can spend a 4k budget entirely on thinking and
+		// get truncated before it emits the tool call — leave real
+		// headroom. Anthropic's guidance is 64k+ at xhigh/max.
+		anthropic.WithMaxTokens(16384),
 		// Opus 4.8 takes adaptive thinking + effort; the provider picks
-		// that shape automatically from the model id. "high" is the API
-		// default — set it explicitly so the intent is visible.
-		anthropic.WithEffort("high"),
+		// that shape automatically from the model id. "low" suits a
+		// scoped lookup like this one and keeps the example fast.
+		anthropic.WithEffort("low"),
 		// Label the telemetry so Bedrock traffic is distinguishable from
 		// calls to api.anthropic.com in cost reports.
 		anthropic.WithProviderID("bedrock"),
