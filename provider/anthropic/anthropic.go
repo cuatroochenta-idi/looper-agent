@@ -54,6 +54,12 @@ type Provider struct {
 	// from the model id. Empty = auto-detect.
 	thinkingCompat ThinkingCompat
 
+	// requestOptions are extra SDK client options, applied after the
+	// provider's own. This is the seam for alternate backends — Bedrock
+	// SigV4, Vertex ADC — which authenticate with something other than an
+	// Anthropic API key. See WithRequestOptions.
+	requestOptions []option.RequestOption
+
 	// samplingOverride force-enables (true) or force-disables (false)
 	// temperature/top_p/top_k instead of deriving support from the model
 	// id. Nil = auto-detect.
@@ -179,6 +185,34 @@ func WithSamplingParams(enabled bool) Option {
 // Per-request ReasoningConfig.Effort overrides this.
 func WithEffort(e anthropic.OutputConfigEffort) Option {
 	return func(p *Provider) { p.effort = e }
+}
+
+// WithRequestOptions passes extra options straight to the underlying SDK
+// client. They are applied after the provider's own, so they win on
+// conflict (notably the base URL).
+//
+// This is how you point the provider at a non-first-party backend. For
+// Amazon Bedrock, pass an empty API key — auth is SigV4, and an empty
+// x-api-key header would invalidate the signature:
+//
+//	cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
+//	anthropic.NewProvider("",
+//	    anthropic.WithRequestOptions(
+//	        option.WithoutEnvironmentDefaults(),
+//	        bedrock.WithConfig(cfg),
+//	    ),
+//	    anthropic.WithModel("anthropic.claude-opus-4-8"),
+//	)
+//
+// option.WithoutEnvironmentDefaults is required on that path: without it
+// the SDK resolves its own credentials first and fails with "no Anthropic
+// credentials found" before the Bedrock middleware signs the request.
+//
+// Bedrock model ids carry an "anthropic." prefix; the provider strips it
+// when resolving model capabilities, so thinking and sampling parameters
+// are handled the same as for the first-party id.
+func WithRequestOptions(opts ...option.RequestOption) Option {
+	return func(p *Provider) { p.requestOptions = append(p.requestOptions, opts...) }
 }
 
 // WithIncludeReasoning controls whether thinking blocks are surfaced on
@@ -410,10 +444,19 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 	for _, opt := range opts {
 		opt(p)
 	}
-	clientOpts := []option.RequestOption{option.WithAPIKey(apiKey)}
+	var clientOpts []option.RequestOption
+	// An empty key is legitimate when auth comes from somewhere else —
+	// Bedrock SigV4, Vertex ADC, or a gateway that injects credentials.
+	// Sending an empty x-api-key header would break SigV4 signing.
+	if apiKey != "" {
+		clientOpts = append(clientOpts, option.WithAPIKey(apiKey))
+	}
 	if p.baseURL != "" {
 		clientOpts = append(clientOpts, option.WithBaseURL(p.baseURL))
 	}
+	// Caller-supplied options go last so they win over the defaults above —
+	// bedrock.WithConfig, for instance, sets its own base URL.
+	clientOpts = append(clientOpts, p.requestOptions...)
 	p.client = anthropic.NewClient(clientOpts...)
 	p.keySuffix = provider.APIKeySuffix(apiKey)
 	p.translator = &Translator{

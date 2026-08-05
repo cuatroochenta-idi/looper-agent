@@ -42,6 +42,7 @@ out of the box once a collector is reachable.
 | 14 | `14_dynamic_tools` | `WithDynamicTools` phase machine — hide / reveal tools per turn based on history |
 | 15 | `15_before_tool_hook` | `OnBeforeToolExecution` loop-detector — `params.Cancel(callID, reason)` on the 4th identical call |
 | 16 | `16_history_truncate` | `message.History.TruncateByTurns(n)` — tool-pair-aware pruning, no LLM call needed |
+| 22 | `22_aws_bedrock_anthropic` | Claude Opus 4.8 on **Amazon Bedrock** (SigV4, classic `bedrock-runtime` endpoint) — tool call + structured output |
 
 Run any of them with:
 

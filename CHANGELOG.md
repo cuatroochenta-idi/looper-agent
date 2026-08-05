@@ -4,6 +4,36 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+
+- **`WithRequestOptions` on the anthropic provider** — passes options
+  straight to the underlying SDK client, applied after the provider's own
+  so they win on conflict. This is the seam for backends that authenticate
+  with something other than an Anthropic API key.
+- **`examples/22_aws_bedrock_anthropic`** — Claude Opus 4.8 on Amazon
+  Bedrock (SigV4 against the classic `bedrock-runtime.<region>.amazonaws.com`
+  endpoint), with a tool call and structured output. Reads
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION`.
+
+### Fixed
+
+- **An empty API key no longer sends an empty `x-api-key` header**, which
+  would invalidate a SigV4 signature. Providing a key is unchanged.
+
+### Notes
+
+- The Bedrock path additionally requires
+  `option.WithoutEnvironmentDefaults()`: the SDK otherwise runs its own
+  credential resolution first and fails with "no Anthropic credentials
+  found" before the Bedrock middleware signs the request. Both the example
+  and the `WithRequestOptions` docs call this out.
+- Bedrock ids carry an `anthropic.` prefix. The capability lookup added in
+  v1.8.0 strips it, so `anthropic.claude-opus-4-8` correctly gets adaptive
+  thinking and has its sampling parameters dropped — covered by
+  `TestBedrockStyleRequestShape`.
+
 ## [v1.8.0] — 2026-08-05
 
 Provider-currency release: the Anthropic adapter could not talk to any
