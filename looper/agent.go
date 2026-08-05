@@ -275,9 +275,22 @@ func (a *Agent) Run(ctx context.Context, input string, opts ...RunOption) (*RunR
 	opts = append(opts, WithRunID(cfg.runID))
 
 	iter := a.Iterate(ctx, input, opts...)
-	for range iter.Next() { //nolint:revive // we only need side effects
+	// The iterator reports failures as StepError rather than by closing
+	// with an error, so draining without inspecting the steps swallows
+	// every provider error — a failed call would return a RunResult with
+	// an empty Output and status "completed", and the caller would only
+	// find out downstream when decoding produced nothing. Keep the first
+	// error: later steps are usually fallout from it.
+	var runErr error
+	for step := range iter.Next() {
+		if step.Type == loop.StepError && step.Error != nil && runErr == nil {
+			runErr = step.Error
+		}
 	}
 	res := iter.Result()
+	if runErr != nil {
+		return nil, runErr
+	}
 
 	return &RunResult{
 		Output:        res.Output,
