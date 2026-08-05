@@ -4,9 +4,21 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [v1.8.0] — 2026-08-05
 
-### Added
+Provider-currency release. The Anthropic adapter could not talk to any
+current Claude model, its tool schemas were malformed, `Agent.Run`
+discarded every provider error, and the cost registry was mispricing
+several families in both directions.
+
+> **Upgrade note — `Agent.Run` can now return an error where it used to
+> return `(result, nil)`.** It previously swallowed provider failures and
+> handed back an empty result with status `"completed"`. Callers that
+> ignore the error (`res, _ := agent.Run(...)`) will now dereference a nil
+> `res` on a failed call instead of silently reading an empty `Output`.
+> Check the error.
+
+### Added — Bedrock support
 
 - **`WithRequestOptions` on the anthropic provider** — passes options
   straight to the underlying SDK client, applied after the provider's own
@@ -17,7 +29,16 @@ All notable changes to Looper Agent are documented here. The format follows
   endpoint), with a tool call and structured output. Reads
   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION`.
 
-### Fixed
+### Fixed — adapter correctness
+
+- **`Agent.Run` swallowed every provider error.** It delegates to
+  `Iterate`, which reports failures as `StepError` steps rather than by
+  closing with an error, and `Run` drained the channel purely for side
+  effects before returning `nil` unconditionally. A failed call — a 400, a
+  timeout, an auth error — came back as a `RunResult` with an empty
+  `Output`, `Turns: 0` and status `"completed"`, with the cause discarded.
+  This affected **every provider**, not just Anthropic. `Run` now keeps the
+  first `StepError` and returns it.
 
 - **Anthropic tool schemas were nested one level too deep, breaking every
   tool call.** `ToolInputSchemaParam` *is* the schema object, but the
@@ -54,25 +75,32 @@ All notable changes to Looper Agent are documented here. The format follows
   the configured budget. A truncated turn that *did* produce content is
   unaffected: the partial text is still returned.
 
-### Notes
+- **Cloud-platform model ids resolved to `$0`, and Vertex ids were
+  overcharged 3x.** Bedrock spells the id `anthropic.<id>`, a cross-region
+  inference profile prepends a geo (`us.anthropic.<id>`), and Vertex
+  separates the version with `@`. None of those matched a pricing entry,
+  so all Bedrock traffic reported as free; worse, `@` was not a family
+  boundary, so `claude-opus-4-5@20251101` skipped its own entry and fell
+  through to `claude-opus-4` — the Opus 4.0 rate. Both the capability
+  lookup and the cost registry now normalise these shapes. An explicitly
+  registered platform id still wins, so negotiated rates are preserved.
+
+### Notes — Bedrock
 
 - The Bedrock path additionally requires
   `option.WithoutEnvironmentDefaults()`: the SDK otherwise runs its own
   credential resolution first and fails with "no Anthropic credentials
   found" before the Bedrock middleware signs the request. Both the example
   and the `WithRequestOptions` docs call this out.
-- Bedrock ids carry an `anthropic.` prefix. The capability lookup added in
-  v1.8.0 strips it, so `anthropic.claude-opus-4-8` correctly gets adaptive
-  thinking and has its sampling parameters dropped — covered by
-  `TestBedrockStyleRequestShape`.
+- **Current Anthropic models on Bedrock are not invocable with the bare
+  model id** on on-demand throughput — they require a cross-region
+  inference profile (`us.anthropic.claude-opus-4-8` in a `us-*` region).
+  Example 22 derives the geo prefix from `AWS_REGION`.
+- The cost registry is keyed by provider, so relabelling with
+  `WithProviderID("bedrock")` leaves calls with no pricing table and
+  reports `$0` unless rates are registered under that name.
 
-## [v1.8.0] — 2026-08-05
-
-Provider-currency release: the Anthropic adapter could not talk to any
-current Claude model, and the cost registry was mispricing several families
-in both directions.
-
-### Fixed
+### Fixed (provider currency)
 
 - **Anthropic adapter rejected by every current Claude model.** Two
   independent 400s:
@@ -110,7 +138,7 @@ in both directions.
   family prefix of `gemini-2.5-flash-lite`. Each lite tier now has its own
   entry.
 
-### Added
+### Added — pricing & options
 
 - **Claude 5 family pricing**: `claude-opus-5`, `claude-sonnet-5`,
   `claude-fable-5`, `claude-mythos-5`. These matched no prefix at all and
@@ -143,7 +171,7 @@ in both directions.
 - Default anthropic model is now `claude-sonnet-5`. The previous default
   (`claude-sonnet-4-20250514`) is deprecated and retires 2026-06-15.
 
-### Notes
+### Notes — pricing
 
 - Retired models still in the registry (`gemini-3-pro`, `gemini-3-flash`,
   `o1`, `o1-mini`, `o3-mini`) are no longer on their vendors' public
