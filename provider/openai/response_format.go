@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 
 	"github.com/cuatroochenta-idi/looper-agent/provider"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // SupportsResponseFormat advertises this provider's native structured-

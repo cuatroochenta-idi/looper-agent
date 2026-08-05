@@ -27,9 +27,9 @@ import (
 	"github.com/cuatroochenta-idi/looper-agent/message"
 	"github.com/cuatroochenta-idi/looper-agent/provider"
 
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/responses"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // Output item type discriminators shared by the response walk, the
@@ -443,16 +443,19 @@ func walkResponsesOutput(resp *responses.Response, includeReasoning bool) respon
 			out.ToolCalls = append(out.ToolCalls, message.ToolCall{
 				// The loop echoes this back as function_call_output's
 				// call_id — it must be CallID, NOT the item id.
-				ID:        item.CallID,
-				Name:      item.Name,
-				Arguments: json.RawMessage(item.Arguments),
+				ID:   item.CallID,
+				Name: item.Name,
+				// v3 widened Arguments to a union (function-call args are
+				// a JSON string; tool-search args are an object). Function
+				// calls always populate OfString.
+				Arguments: json.RawMessage(item.Arguments.OfString),
 			})
 			captured = append(captured, responsesSignatureItem{
 				Type:      outputItemTypeFunctionCall,
 				ID:        item.ID,
 				CallID:    item.CallID,
 				Name:      item.Name,
-				Arguments: item.Arguments,
+				Arguments: item.Arguments.OfString,
 			})
 		case outputItemTypeReasoning:
 			summaries := make([]string, 0, len(item.Summary))

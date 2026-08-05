@@ -13,6 +13,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 
 	"github.com/cuatroochenta-idi/looper-agent/message"
 	"github.com/cuatroochenta-idi/looper-agent/provider"
@@ -43,6 +44,20 @@ type Provider struct {
 	// budgetTokens=0 means "no extended thinking by default".
 	defaultBudgetTokens int
 	includeReasoning    bool
+
+	// effort is the default output_config.effort for models that accept it
+	// (Opus 4.5+, Sonnet 4.6+). Empty means "derive from the thinking
+	// budget / ReasoningConfig.Effort".
+	effort anthropic.OutputConfigEffort
+
+	// thinkingCompat pins the thinking wire format instead of deriving it
+	// from the model id. Empty = auto-detect.
+	thinkingCompat ThinkingCompat
+
+	// samplingOverride force-enables (true) or force-disables (false)
+	// temperature/top_p/top_k instead of deriving support from the model
+	// id. Nil = auto-detect.
+	samplingOverride *bool
 
 	// cacheBreakpoints is the set of named places to insert ephemeral
 	// cache_control markers. Empty map = no caching (legacy default).
@@ -119,6 +134,53 @@ func WithThinkingBudget(budgetTokens int) Option {
 	}
 }
 
+// ThinkingCompat pins which thinking wire format the provider sends,
+// bypassing model-id detection. Use it for gateways that proxy a model the
+// capability table doesn't recognise, or to hold a model on the legacy
+// shape during a migration.
+type ThinkingCompat string
+
+const (
+	// ThinkingCompatAuto derives the format from the model id. Default.
+	ThinkingCompatAuto ThinkingCompat = ""
+
+	// ThinkingCompatBudget always sends {"type":"enabled","budget_tokens":N}.
+	// Rejected with a 400 by Opus 4.7 and every model after it.
+	ThinkingCompatBudget ThinkingCompat = "budget"
+
+	// ThinkingCompatAdaptive always sends {"type":"adaptive"} and controls
+	// depth with output_config.effort.
+	ThinkingCompatAdaptive ThinkingCompat = "adaptive"
+
+	// ThinkingCompatAlwaysOn never sends a thinking field. Required by
+	// Fable 5 / Mythos, which 400 on any explicit thinking config.
+	ThinkingCompatAlwaysOn ThinkingCompat = "always_on"
+)
+
+// WithThinkingCompat pins the thinking wire format. Leave unset to detect
+// it from the model id, which is correct for every first-party Claude model.
+func WithThinkingCompat(c ThinkingCompat) Option {
+	return func(p *Provider) { p.thinkingCompat = c }
+}
+
+// WithSamplingParams force-enables or force-disables temperature / top_p /
+// top_k. Leave unset to derive support from the model id: Opus 4.7 onward,
+// Opus 5, Sonnet 5 and Fable 5 removed those parameters and reject a
+// non-default value with a 400, so the provider drops them there.
+func WithSamplingParams(enabled bool) Option {
+	return func(p *Provider) { p.samplingOverride = &enabled }
+}
+
+// WithEffort sets the default output_config.effort for models that accept
+// it. This is the replacement for a thinking token budget on Opus 4.7+ —
+// it accepts the full Anthropic ladder, including the "xhigh" and "max"
+// levels that the provider-neutral ReasoningEffort enum can't express.
+//
+// Per-request ReasoningConfig.Effort overrides this.
+func WithEffort(e anthropic.OutputConfigEffort) Option {
+	return func(p *Provider) { p.effort = e }
+}
+
 // WithIncludeReasoning controls whether thinking blocks are surfaced on
 // StreamChunk.Reasoning / LLMResponse.Reasoning. When false the deltas
 // are still consumed (Anthropic always sends them when thinking is on)
@@ -190,6 +252,133 @@ func (p *Provider) resolveBudget(rc *provider.ReasoningConfig) int {
 	return effortToBudget(rc.Effort)
 }
 
+// budgetToEffort maps a thinking token budget onto the effort ladder. Used
+// when a caller asked for a concrete budget but the target model dropped
+// budget_tokens — the tier is the closest surviving expression of intent.
+// It is the inverse of effortToBudget.
+func budgetToEffort(b int) anthropic.OutputConfigEffort {
+	switch {
+	case b <= 0:
+		return ""
+	case b <= 1024:
+		return anthropic.OutputConfigEffortLow
+	case b <= 4096:
+		return anthropic.OutputConfigEffortMedium
+	default:
+		return anthropic.OutputConfigEffortHigh
+	}
+}
+
+// mapEffort translates the provider-neutral effort enum to Anthropic's.
+// "minimal" is OpenAI-specific and collapses to "low" here.
+func mapEffort(e provider.ReasoningEffort) anthropic.OutputConfigEffort {
+	switch e {
+	case provider.ReasoningEffortMinimal, provider.ReasoningEffortLow:
+		return anthropic.OutputConfigEffortLow
+	case provider.ReasoningEffortMedium:
+		return anthropic.OutputConfigEffortMedium
+	case provider.ReasoningEffortHigh:
+		return anthropic.OutputConfigEffortHigh
+	}
+	return ""
+}
+
+// resolveEffort picks the effective effort level for this call. Explicit
+// per-request effort wins, then a per-request budget mapped onto the
+// ladder, then the provider-level WithEffort, then the provider-level
+// thinking budget mapped onto the ladder.
+func (p *Provider) resolveEffort(rc *provider.ReasoningConfig) anthropic.OutputConfigEffort {
+	if rc != nil {
+		if e := mapEffort(rc.Effort); e != "" {
+			return e
+		}
+		if rc.BudgetTokens > 0 {
+			return budgetToEffort(rc.BudgetTokens)
+		}
+	}
+	if p.effort != "" {
+		return p.effort
+	}
+	return budgetToEffort(p.defaultBudgetTokens)
+}
+
+// wantsThinking reports whether the caller asked for thinking at all. On
+// adaptive models this gates whether the thinking field is sent; models
+// that think by default (Opus 5, Fable 5) still think when it is omitted.
+func (p *Provider) wantsThinking(rc *provider.ReasoningConfig) bool {
+	if rc != nil {
+		return rc.Effort != provider.ReasoningEffortNone || rc.BudgetTokens > 0
+	}
+	return p.defaultBudgetTokens > 0 || p.effort != ""
+}
+
+// resolveCaps returns the capabilities for a model, with provider-level
+// overrides applied.
+func (p *Provider) resolveCaps(model string) modelCaps {
+	caps := lookupCaps(model)
+	switch p.thinkingCompat {
+	case ThinkingCompatBudget:
+		caps.thinking = thinkingLegacyBudget
+	case ThinkingCompatAdaptive:
+		caps.thinking = thinkingAdaptive
+	case ThinkingCompatAlwaysOn:
+		caps.thinking = thinkingAlwaysOn
+	}
+	if p.samplingOverride != nil {
+		caps.sampling = *p.samplingOverride
+	}
+	return caps
+}
+
+// applyModelParams reconciles the request with what the target model
+// actually accepts: the right thinking shape, effort where supported, and
+// sampling parameters stripped where they were removed from the API.
+//
+// Every branch here exists because the alternative is a 400, not a
+// silently-ignored field.
+func (p *Provider) applyModelParams(params *anthropic.MessageNewParams, rc *provider.ReasoningConfig) {
+	caps := p.resolveCaps(string(params.Model))
+
+	// Sampling params were removed on Opus 4.7+, Opus 5, Sonnet 5 and
+	// Fable 5. The translator sets Temperature unconditionally, so clear
+	// it (and its siblings) rather than letting the request fail.
+	if !caps.sampling {
+		params.Temperature = param.Opt[float64]{}
+		params.TopP = param.Opt[float64]{}
+		params.TopK = param.Opt[int64]{}
+	}
+
+	if caps.effort {
+		if e := p.resolveEffort(rc); e != "" {
+			params.OutputConfig.Effort = e
+		}
+	}
+
+	switch caps.thinking {
+	case thinkingAlwaysOn:
+		// Thinking is always on and not configurable; any explicit
+		// thinking field — including {"type":"disabled"} — is a 400.
+
+	case thinkingAdaptive:
+		if !p.wantsThinking(rc) {
+			return
+		}
+		adaptive := anthropic.ThinkingConfigAdaptiveParam{}
+		// Default display is "omitted" on 4.7+, which streams thinking
+		// blocks with empty text. Ask for summaries when the caller
+		// actually wants to surface reasoning.
+		if p.shouldIncludeReasoning(rc) {
+			adaptive.Display = anthropic.ThinkingConfigAdaptiveDisplaySummarized
+		}
+		params.Thinking = anthropic.ThinkingConfigParamUnion{OfAdaptive: &adaptive}
+
+	case thinkingLegacyBudget:
+		if budget := p.resolveBudget(rc); budget > 0 {
+			params.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(budget))
+		}
+	}
+}
+
 func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
 	if rc != nil {
 		return rc.IncludeInOutput
@@ -200,7 +389,11 @@ func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
 // NewProvider creates an Anthropic provider.
 func NewProvider(apiKey string, opts ...Option) *Provider {
 	p := &Provider{
-		model:      anthropic.ModelClaudeSonnet4_20250514,
+		// claude-sonnet-5 has no typed constant in this SDK version; the
+		// Model type is a string alias, so the literal id is the supported
+		// form. The previous default (Sonnet 4) is deprecated and retires
+		// on 2026-06-15.
+		model:      "claude-sonnet-5",
 		providerID: "anthropic",
 		config:     &provider.CacheConfig{Strategy: provider.CacheAuto},
 		// Anthropic REQUIRES max_tokens on every request — omitting it
@@ -250,12 +443,12 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	if req.Temperature != 0 {
 		params.Temperature = anthropic.Float(req.Temperature)
 	}
-	if budget := p.resolveBudget(req.Reasoning); budget > 0 {
-		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(budget))
-	}
 	if tc := buildToolChoiceParams(req.ToolChoice); tc != nil && len(req.Tools) > 0 {
 		params.ToolChoice = *tc
 	}
+	// Must run after Model / Temperature are final — it keys off the
+	// resolved model id and strips params that model would reject.
+	p.applyModelParams(&params, req.Reasoning)
 
 	resp, err := p.client.Messages.New(ctx, params)
 	if err != nil {
@@ -303,12 +496,12 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 	if req.Temperature != 0 {
 		params.Temperature = anthropic.Float(req.Temperature)
 	}
-	if budget := p.resolveBudget(req.Reasoning); budget > 0 {
-		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(budget))
-	}
 	if tc := buildToolChoiceParams(req.ToolChoice); tc != nil && len(req.Tools) > 0 {
 		params.ToolChoice = *tc
 	}
+	// Must run after Model / Temperature are final — it keys off the
+	// resolved model id and strips params that model would reject.
+	p.applyModelParams(&params, req.Reasoning)
 
 	includeReasoning := p.shouldIncludeReasoning(req.Reasoning)
 	stream := p.client.Messages.NewStreaming(ctx, params)

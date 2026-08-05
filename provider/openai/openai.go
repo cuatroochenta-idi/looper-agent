@@ -18,9 +18,9 @@ import (
 	"github.com/cuatroochenta-idi/looper-agent/provider"
 	"github.com/cuatroochenta-idi/looper-agent/tool"
 
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // Provider implements provider.LLMProvider for OpenAI.
@@ -591,13 +591,17 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 						OfString: openai.String(msg.Content),
 					}
 				}
-				params.ToolCalls = make([]openai.ChatCompletionMessageToolCallParam, len(msg.ToolCalls))
+				// v3 made tool calls a union (function vs custom tools);
+				// the framework only emits function calls.
+				params.ToolCalls = make([]openai.ChatCompletionMessageToolCallUnionParam, len(msg.ToolCalls))
 				for i, tc := range msg.ToolCalls {
-					params.ToolCalls[i] = openai.ChatCompletionMessageToolCallParam{
-						ID: tc.ID,
-						Function: openai.ChatCompletionMessageToolCallFunctionParam{
-							Name:      tc.Name,
-							Arguments: string(tc.Arguments),
+					params.ToolCalls[i] = openai.ChatCompletionMessageToolCallUnionParam{
+						OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+							ID: tc.ID,
+							Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+								Name:      tc.Name,
+								Arguments: string(tc.Arguments),
+							},
 						},
 					}
 				}
@@ -613,16 +617,18 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 	}
 
 	// Convert tools
-	var openaiTools []openai.ChatCompletionToolParam
+	var openaiTools []openai.ChatCompletionToolUnionParam
 	if len(tools) > 0 {
-		openaiTools = make([]openai.ChatCompletionToolParam, len(tools))
+		openaiTools = make([]openai.ChatCompletionToolUnionParam, len(tools))
 		for i, tl := range tools {
-			openaiTools[i] = openai.ChatCompletionToolParam{
-				Type: "function",
-				Function: shared.FunctionDefinitionParam{
-					Name:        tl.Name(),
-					Description: openai.String(tl.Description()),
-					Parameters:  shared.FunctionParameters(tl.SchemaMap()),
+			openaiTools[i] = openai.ChatCompletionToolUnionParam{
+				OfFunction: &openai.ChatCompletionFunctionToolParam{
+					Type: "function",
+					Function: shared.FunctionDefinitionParam{
+						Name:        tl.Name(),
+						Description: openai.String(tl.Description()),
+						Parameters:  shared.FunctionParameters(tl.SchemaMap()),
+					},
 				},
 			}
 		}

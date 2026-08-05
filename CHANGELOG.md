@@ -4,6 +4,93 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.8.0] — 2026-08-05
+
+Provider-currency release: the Anthropic adapter could not talk to any
+current Claude model, and the cost registry was mispricing several families
+in both directions.
+
+### Fixed
+
+- **Anthropic adapter rejected by every current Claude model.** Two
+  independent 400s:
+  - The provider only ever emitted extended thinking as
+    `{"type":"enabled","budget_tokens":N}`. That shape was **removed** in
+    Claude Opus 4.7 and is rejected by Opus 4.7/4.8, Opus 5, Sonnet 5 and
+    Fable 5. The provider now selects the wire format from the model id —
+    `adaptive` + `output_config.effort` on 4.6+, no thinking field at all
+    on Fable 5 / Mythos (which reject even `{"type":"disabled"}`), and the
+    legacy budget on 4.5 and older.
+  - `Temperature` was written unconditionally by the translator, so any
+    call to a model that dropped sampling parameters failed. `temperature`
+    / `top_p` / `top_k` are now stripped on models that removed them.
+
+  Both are resolved by longest-prefix match on the model id, so dated
+  (`claude-opus-4-7-20260301`), Bedrock (`anthropic.claude-opus-5`) and
+  Vertex (`claude-opus-4-5@20251101`) id shapes all resolve correctly. An
+  unrecognised id follows the current contract rather than the legacy one.
+
+- **Cost registry overcharged the entire Opus 4.6–4.8 line by 3x.** Opus
+  pricing is not flat across the 4.x line: 4.0/4.1 bill at $15/$75 while
+  4.5 onward dropped to $5/$25. The bare `claude-opus-4` family key was a
+  legal prefix of every later minor, so `claude-opus-4-8` inherited the
+  4.0 rate. Silent — the lookup matched, so no missing-entry warning fired.
+
+- **Other mispriced entries**, each verified against the provider's
+  published rates: `gpt-5.6-luna` ($1.00/$6.00 → $0.20/$1.20, a 5x
+  overcharge), `gpt-5.6-terra` ($2.50/$15.00 → $2.00/$12.00), `o4-mini`
+  cached rate, `gemini-2.5-flash` ($0.15/$0.60 → $0.30/$2.50, a ~4x
+  *under*charge), `gemini-2.5-pro` cached rate, and `gemini-3.1-pro`
+  ($1.25/$10.00 → $2.00/$12.00).
+
+- **`-lite` Gemini tiers inherited their base tier's price.** Same
+  prefix-shadowing class as the Opus bug: `gemini-2.5-flash` is a legal
+  family prefix of `gemini-2.5-flash-lite`. Each lite tier now has its own
+  entry.
+
+### Added
+
+- **Claude 5 family pricing**: `claude-opus-5`, `claude-sonnet-5`,
+  `claude-fable-5`, `claude-mythos-5`. These matched no prefix at all and
+  were reporting **$0.00** per call.
+- Pricing for `claude-opus-4-5/-4-6/-4-7/-4-8`, `gpt-5.5`,
+  `gemini-3.6-flash`, and the `-lite` tiers.
+- `WithEffort(level)` on the anthropic provider — sets
+  `output_config.effort`, including the `xhigh` / `max` levels the
+  provider-neutral `ReasoningEffort` enum cannot express. A per-request
+  `ReasoningConfig.Effort` still wins; a `BudgetTokens` request is mapped
+  onto the effort ladder on models that dropped budgets.
+- `WithThinkingCompat` / `WithSamplingParams` — escape hatches to pin the
+  wire format for gateways proxying an unrecognised model.
+- Adaptive thinking now sets `display: "summarized"` when reasoning is
+  surfaced. The API default is `"omitted"` on 4.7+, which streams thinking
+  blocks with empty text.
+- `TestCostModelPrefixShadowing` locks every family/sibling pricing pair
+  that can shadow, so this class of bug fails a test rather than a bill.
+
+### Changed
+
+- **`github.com/openai/openai-go` v1.12.0 → v3.50.0** (two majors; the
+  import path is now `/v3`). `ChatCompletionToolParam` and
+  `ChatCompletionMessageToolCallParam` became unions to accommodate custom
+  tools, the named tool-choice constructor was removed, Responses-API
+  `Arguments` widened to a union, and stream `Delta` is now a plain string.
+- `github.com/anthropics/anthropic-sdk-go` v1.42.0 → v1.61.0.
+- `google.golang.org/genai` v1.56.0 → v1.66.0.
+- `github.com/mark3labs/mcp-go` v0.54.0 → v0.57.0.
+- Default anthropic model is now `claude-sonnet-5`. The previous default
+  (`claude-sonnet-4-20250514`) is deprecated and retires 2026-06-15.
+
+### Notes
+
+- Retired models still in the registry (`gemini-3-pro`, `gemini-3-flash`,
+  `o1`, `o1-mini`, `o3-mini`) are no longer on their vendors' public
+  pricing pages. Their rates are marked UNVERIFIED in-code and left in
+  place so existing callers keep a non-zero estimate — override with
+  `UpdateCost` if you still route to them.
+- Sonnet 5's introductory $2/$10 pricing ran through 2026-08-31; the
+  registry carries the $3/$15 list rate.
+
 ## [v1.7.4] — 2026-07-16
 
 ### Added

@@ -66,7 +66,7 @@ func TestCostModelCalculate(t *testing.T) {
 			provider:    "google",
 			model:       "gemini-2.5-flash",
 			usage:       Usage{InputTokens: 100_000, OutputTokens: 10_000, CachedTokens: 0},
-			wantTotal:   0.021, // 100k/1M*0.15 + 10k/1M*0.60 = 0.015 + 0.006 = 0.021
+			wantTotal:   0.055, // 100k/1M*0.30 + 10k/1M*2.50 = 0.030 + 0.025 = 0.055
 			wantCached:  0,
 			wantSavings: 0,
 		},
@@ -204,9 +204,12 @@ func TestCostModelFamilyPrefixLookup(t *testing.T) {
 			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000},
 		},
 		{
-			name:      "openai gpt-5.5 inherits gpt-5 pricing across dot boundary",
+			// gpt-5.4 has no entry of its own, so it exercises the `.`
+			// family boundary. (gpt-5.5 does have its own entry now — it
+			// prices well above gpt-5, so inheriting would undercharge.)
+			name:      "openai gpt-5.4 inherits gpt-5 pricing across dot boundary",
 			provider:  "openai",
-			model:     "gpt-5.5",
+			model:     "gpt-5.4",
 			familyKey: "gpt-5",
 			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
 		},
@@ -218,9 +221,19 @@ func TestCostModelFamilyPrefixLookup(t *testing.T) {
 			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
 		},
 		{
-			name:      "anthropic claude-opus-4-7 inherits opus-4 family",
+			// The dated id must resolve to its OWN minor ("claude-opus-4-7"),
+			// not to the bare "claude-opus-4" key — opus pricing is not flat
+			// across the 4.x line. See TestCostModelPrefixShadowing.
+			name:      "anthropic dated claude-opus-4-7 resolves to its minor",
 			provider:  "anthropic",
 			model:     "claude-opus-4-7-20260301",
+			familyKey: "claude-opus-4-7",
+			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
+		},
+		{
+			name:      "anthropic dated claude-opus-4-1 falls back to opus-4 family",
+			provider:  "anthropic",
+			model:     "claude-opus-4-1-20250805",
 			familyKey: "claude-opus-4",
 			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
 		},
@@ -311,8 +324,8 @@ func TestCostModelGPT56Tiers(t *testing.T) {
 	}{
 		// 1M in + 1M out at the official July-2026 rates.
 		{"gpt-5.6-sol", 35.00},
-		{"gpt-5.6-terra", 17.50},
-		{"gpt-5.6-luna", 7.00},
+		{"gpt-5.6-terra", 14.00},
+		{"gpt-5.6-luna", 1.40},
 		// Dated suffix inherits its tier via longest-family-prefix.
 		{"gpt-5.6-sol-2026-07-09", 35.00},
 	}
@@ -333,5 +346,59 @@ func TestCostModelGPT56Tiers(t *testing.T) {
 	want := 0.50*0.5 + 6.25*0.5 // cached half + cache-write half
 	if diff := cw.TotalUSD - want; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("sol cache buckets: TotalUSD = %v, want %v", cw.TotalUSD, want)
+	}
+}
+
+// TestCostModelPrefixShadowing locks the pricing pairs where a shorter
+// family key is a legal prefix of a more expensive (or cheaper) sibling.
+// Each pair regressed at least once: the bare "claude-opus-4" key used to
+// swallow 4.5 through 4.8 and bill them at 3x their real rate, and the
+// base flash tiers used to swallow their "-lite" variants.
+func TestCostModelPrefixShadowing(t *testing.T) {
+	cm := NewCostModel()
+	// 1M input, 0 output — isolates the input rate.
+	usage := Usage{InputTokens: 1_000_000}
+
+	tests := []struct {
+		provider string
+		model    string
+		wantIn   float64
+	}{
+		// Opus is NOT flat across 4.x: 4.0/4.1 bill at 15, 4.5+ at 5.
+		{"anthropic", "claude-opus-4-8", 5.00},
+		{"anthropic", "claude-opus-4-7", 5.00},
+		{"anthropic", "claude-opus-4-6", 5.00},
+		{"anthropic", "claude-opus-4-5", 5.00},
+		{"anthropic", "claude-opus-4-1", 15.00},
+		{"anthropic", "claude-opus-4", 15.00},
+		// Claude 5 family must not fall through to a 4.x key.
+		{"anthropic", "claude-opus-5", 5.00},
+		{"anthropic", "claude-sonnet-5", 3.00},
+		{"anthropic", "claude-fable-5", 10.00},
+		{"anthropic", "claude-mythos-5", 10.00},
+		// "gpt-5" is a prefix of "gpt-5.5" and the 5.6 tiers.
+		{"openai", "gpt-5", 1.25},
+		{"openai", "gpt-5.5", 5.00},
+		{"openai", "gpt-5.6-sol", 5.00},
+		{"openai", "gpt-5.6-terra", 2.00},
+		{"openai", "gpt-5.6-luna", 0.20},
+		// Each flash tier is a prefix of its own "-lite" variant.
+		{"google", "gemini-2.5-flash", 0.30},
+		{"google", "gemini-2.5-flash-lite", 0.10},
+		{"google", "gemini-3.5-flash", 1.50},
+		{"google", "gemini-3.5-flash-lite", 0.30},
+		{"google", "gemini-3.6-flash", 1.50},
+		{"google", "gemini-3.1-pro", 2.00},
+		{"google", "gemini-3.1-flash-lite", 0.25},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.provider+"/"+tt.model, func(t *testing.T) {
+			got := cm.Calculate(tt.provider, tt.model, usage)
+			if !almostEqual(got.TotalUSD, tt.wantIn, 0.0001) {
+				t.Errorf("input rate for %s = %.6f, want %.6f",
+					tt.model, got.TotalUSD, tt.wantIn)
+			}
+		})
 	}
 }

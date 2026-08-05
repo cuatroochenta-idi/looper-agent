@@ -3,8 +3,8 @@ package openai
 import (
 	"strings"
 
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // applyMaxTokens writes the per-request output cap to either MaxTokens

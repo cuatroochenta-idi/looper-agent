@@ -1,8 +1,8 @@
 package openai
 
 import (
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/packages/param"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
 
 	"github.com/cuatroochenta-idi/looper-agent/provider"
 )
@@ -30,9 +30,13 @@ func buildToolChoiceParams(c provider.ToolChoice) *openai.ChatCompletionToolChoi
 		u := openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: param.NewOpt("none")}
 		return &u
 	case provider.ToolChoiceKindSpecific:
-		u := openai.ChatCompletionToolChoiceOptionParamOfChatCompletionNamedToolChoice(
-			openai.ChatCompletionNamedToolChoiceFunctionParam{Name: c.Name},
-		)
+		// v3 dropped the ParamOf… constructor and split the named-choice
+		// variant into function vs custom tools.
+		u := openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfFunctionToolChoice: &openai.ChatCompletionNamedToolChoiceParam{
+				Function: openai.ChatCompletionNamedToolChoiceFunctionParam{Name: c.Name},
+			},
+		}
 		return &u
 	}
 	return nil

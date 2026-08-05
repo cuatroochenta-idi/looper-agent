@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/cuatroochenta-idi/looper-agent/provider"
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 )
 
 const minimalSchemaJSON = `{

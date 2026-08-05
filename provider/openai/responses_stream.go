@@ -13,7 +13,7 @@ import (
 
 	"github.com/cuatroochenta-idi/looper-agent/provider"
 
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3/responses"
 )
 
 // Stream event type discriminators handled by chatStreamResponses. The
@@ -79,12 +79,12 @@ func (p *Provider) chatStreamResponses(ctx context.Context, req provider.LLMRequ
 		handleEvent := func(ev responses.ResponseStreamEventUnion) {
 			switch ev.Type {
 			case eventTypeOutputTextDelta:
-				if d := ev.Delta.OfString; d != "" {
+				if d := ev.Delta; d != "" {
 					contentBuilder += d
 					ch <- provider.StreamChunk{Content: d, ProviderID: p.providerID, ModelID: model, APIKeySuffix: keySuffix}
 				}
 			case eventTypeReasoningSummaryTextDelta:
-				if d := ev.Delta.OfString; d != "" && includeReasoning {
+				if d := ev.Delta; d != "" && includeReasoning {
 					ch <- provider.StreamChunk{Reasoning: d, ProviderID: p.providerID, ModelID: model, APIKeySuffix: keySuffix}
 				}
 			case eventTypeResponseCompleted:

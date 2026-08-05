@@ -147,7 +147,7 @@ import (
 )
 
 openai.NewProvider(apiKey, openai.WithModel("gpt-4o-mini"))
-anthropic.NewProvider(apiKey, anthropic.WithModel("claude-sonnet-4-..."))
+anthropic.NewProvider(apiKey, anthropic.WithModel("claude-opus-5"))
 google.NewProvider(apiKey, google.WithModel("gemini-flash-latest"))
 ```
 
@@ -158,9 +158,28 @@ Common per-provider options: `WithModel`, `WithMaxTokens`, `WithTemperature`.
 | Option | Provider | Effect |
 |--------|----------|--------|
 | `WithCacheBreakpoints("system", "tools")` | anthropic | Real `cache_control` markers on the last system block + last tool definition. Hit rate visible via `res.Cost.CachedTokens`. |
-| `WithThinkingBudget(n)` / `WithIncludeThoughts(b)` | anthropic, google | Extended-thinking config. Gemini caveat: budget covers both hidden reasoning AND visible tokens — use `WithThinkingBudget(0)` if you're capping output and want all of it to be visible. |
+| `WithThinkingBudget(n)` / `WithIncludeThoughts(b)` | anthropic, google | Extended-thinking config. Gemini caveat: budget covers both hidden reasoning AND visible tokens — use `WithThinkingBudget(0)` if you're capping output and want all of it to be visible. On Anthropic the budget is mapped onto `effort` for models that dropped `budget_tokens` (see below). |
+| `WithEffort(level)` | anthropic | Sets `output_config.effort` — the replacement for a thinking budget on Claude Opus 4.7+. Accepts the full ladder including `xhigh` / `max`, which the provider-neutral `ReasoningEffort` enum can't express. |
+| `WithThinkingCompat(c)` / `WithSamplingParams(b)` | anthropic | Escape hatches for gateways that proxy an unrecognised model. Both auto-detect from the model id by default; you shouldn't need them for first-party Claude models. |
 | `WithBaseURL(url)` | openai | Point at LM Studio / Ollama / Azure / any OpenAI-compatible endpoint. |
 | `WithIncludeReasoning(b)` | all 3 | Surface reasoning deltas via `StepReasoningChunk`. |
+
+**Anthropic thinking is model-dependent, and the provider handles it for
+you.** The wire contract changed twice across the Claude 4.x line, and
+sending the wrong shape is a hard 400, not an ignored field:
+
+| Models | Thinking | Sampling params |
+|--------|----------|-----------------|
+| Fable 5, Mythos | always on, not configurable | rejected |
+| Opus 5, Sonnet 5, Opus 4.8, Opus 4.7 | `adaptive` + `effort` | rejected |
+| Opus 4.6, Sonnet 4.6 | `adaptive` + `effort` | accepted |
+| Opus 4.5 and older | `budget_tokens` | accepted |
+
+The provider resolves this from the model id (longest-prefix match, so dated
+and Bedrock/Vertex id shapes work too), picks the right thinking shape, and
+drops `temperature` / `top_p` / `top_k` on models that removed them. An
+unrecognised id follows the current contract; override with
+`WithThinkingCompat` / `WithSamplingParams` if you proxy something exotic.
 
 **Cross-provider config** (works on any provider through `LLMRequest`):
 
