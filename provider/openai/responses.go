@@ -42,14 +42,16 @@ const (
 )
 
 // apiFor picks the API surface for one call: an explicit WithAPI always
-// wins; APIAuto routes to Responses only when an effort is resolved for
-// this request AND baseURL is unset (the real api.openai.com —
-// OpenAI-compatible endpoints often lack /v1/responses entirely).
-func (p *Provider) apiFor(eff shared.ReasoningEffort) API {
+// wins; APIAuto routes to Responses whenever baseURL is unset (the real
+// api.openai.com) and to chat/completions otherwise — OpenAI-compatible
+// endpoints often lack /v1/responses entirely. The effort is deliberately
+// not part of the rule: gpt-5.6 reasons by default even when no effort is
+// sent, and chat/completions rejects function tools for it either way.
+func (p *Provider) apiFor() API {
 	if p.api != APIAuto {
 		return p.api
 	}
-	if eff != "" && p.baseURL == "" {
+	if p.baseURL == "" {
 		return APIResponses
 	}
 	return APIChatCompletions

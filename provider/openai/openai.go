@@ -64,13 +64,14 @@ type Provider struct {
 type API string
 
 const (
-	// APIAuto (the default) picks per call: /v1/responses when a reasoning
-	// effort is resolved for the request AND the provider points at the
-	// real api.openai.com (baseURL unset); /v1/chat/completions otherwise.
-	// OpenAI rejects function tools + reasoning_effort on chat/completions
-	// for newer models (gpt-5.4, gpt-5.6) with a 400 that says to use
-	// /v1/responses — this rule follows that guidance without breaking
-	// OpenAI-compatible endpoints, which usually lack /v1/responses.
+	// APIAuto (the default) picks per call: /v1/responses when the provider
+	// points at the real api.openai.com (baseURL unset); /v1/chat/completions
+	// otherwise. OpenAI rejects function tools on chat/completions for the
+	// gpt-5.6 family with a 400 that says to use /v1/responses — and it does
+	// so whether or not the request names a reasoning effort, because the
+	// model reasons by default. Routing by endpoint follows that guidance
+	// without breaking OpenAI-compatible endpoints, which usually lack
+	// /v1/responses.
 	APIAuto API = ""
 
 	// APIChatCompletions forces the legacy /v1/chat/completions path.
@@ -225,7 +226,7 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	// Route to /v1/responses when the resolved config calls for it (see
 	// apiFor). The chat/completions path below stays byte-identical for
 	// every request that doesn't.
-	if p.apiFor(p.resolveEffort(req.Reasoning)) == APIResponses {
+	if p.apiFor() == APIResponses {
 		return p.chatResponses(ctx, req)
 	}
 
@@ -308,7 +309,7 @@ func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
 // ChatStream sends a streaming chat completion request.
 func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-chan provider.StreamChunk, error) {
 	// Same routing rule as Chat — see apiFor in responses.go.
-	if p.apiFor(p.resolveEffort(req.Reasoning)) == APIResponses {
+	if p.apiFor() == APIResponses {
 		return p.chatStreamResponses(ctx, req)
 	}
 

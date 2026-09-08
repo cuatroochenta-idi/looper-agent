@@ -4,6 +4,21 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.8.1] — 2026-09-08
+
+### Fixed
+
+- **`APIAuto` on the OpenAI provider now routes by endpoint, not by
+  effort.** It only chose `/v1/responses` when the request carried a
+  reasoning effort, so a provider built with no effort against
+  api.openai.com went through `/v1/chat/completions` — which rejects
+  function tools for the gpt-5.6 family with a 400 whether or not an
+  effort is sent, because the model reasons by default. With `baseURL`
+  unset every call now goes through `/v1/responses`; OpenAI-compatible
+  endpoints (`WithBaseURL`) keep `/v1/chat/completions`, and an explicit
+  `WithAPI` still wins. Callers that worked around this with
+  `WithAPI(APIResponses)` can drop it.
+
 ## [v1.8.0] — 2026-08-05
 
 Provider-currency release. The Anthropic adapter could not talk to any

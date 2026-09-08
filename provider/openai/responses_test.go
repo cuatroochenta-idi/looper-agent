@@ -434,30 +434,27 @@ func TestResponses_Routing(t *testing.T) {
 }
 
 // TestAPIFor covers the routing helper directly, including the
-// baseURL=="" arm that no httptest server can exercise: Auto only routes
-// to Responses against the real api.openai.com AND when an effort is in
-// play for the request.
+// baseURL=="" arm that no httptest server can exercise: Auto routes to
+// Responses against the real api.openai.com with or without an effort in
+// play (gpt-5.6 reasons by default, so chat/completions would refuse the
+// tools either way), and stays on chat/completions behind a base URL.
 func TestAPIFor(t *testing.T) {
 	cases := []struct {
-		name   string
-		opts   []Option
-		effort provider.ReasoningEffort
-		want   API
+		name string
+		opts []Option
+		want API
 	}{
-		{"auto_effort_no_baseurl", nil, provider.ReasoningEffortMedium, APIResponses},
-		{"auto_no_effort_no_baseurl", nil, provider.ReasoningEffortNone, APIChatCompletions},
-		{"auto_effort_with_baseurl", []Option{WithBaseURL("http://localhost:1")}, provider.ReasoningEffortMedium, APIChatCompletions},
-		{"explicit_responses_wins", []Option{WithAPI(APIResponses)}, provider.ReasoningEffortNone, APIResponses},
-		{"explicit_chat_wins", []Option{WithAPI(APIChatCompletions)}, provider.ReasoningEffortHigh, APIChatCompletions},
+		{"auto_no_baseurl_goes_responses", nil, APIResponses},
+		{"auto_effort_no_baseurl_goes_responses", []Option{WithReasoningEffort(provider.ReasoningEffortMedium)}, APIResponses},
+		{"auto_with_baseurl_stays_chat", []Option{WithBaseURL("http://localhost:1")}, APIChatCompletions},
+		{"auto_effort_with_baseurl_stays_chat", []Option{WithBaseURL("http://localhost:1"), WithReasoningEffort(provider.ReasoningEffortMedium)}, APIChatCompletions},
+		{"explicit_responses_wins", []Option{WithAPI(APIResponses)}, APIResponses},
+		{"explicit_chat_wins", []Option{WithAPI(APIChatCompletions), WithReasoningEffort(provider.ReasoningEffortHigh)}, APIChatCompletions},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			p := NewProvider("sk-test", c.opts...)
-			var rc *provider.ReasoningConfig
-			if c.effort != provider.ReasoningEffortNone {
-				rc = &provider.ReasoningConfig{Effort: c.effort}
-			}
-			if got := p.apiFor(p.resolveEffort(rc)); got != c.want {
+			if got := p.apiFor(); got != c.want {
 				t.Errorf("apiFor = %q, want %q", got, c.want)
 			}
 		})
