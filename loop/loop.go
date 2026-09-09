@@ -106,10 +106,13 @@ type Step struct {
 type RunResult struct {
 	Output  string
 	History *message.History
-	Cost    CostBreakdown
-	Usage   Usage
-	Turns   int
-	Status  string
+	// NewMessages is the run's append journal, independent of prompt compaction.
+	// A non-nil empty slice means no messages were added.
+	NewMessages []message.Message
+	Cost        CostBreakdown
+	Usage       Usage
+	Turns       int
+	Status      string
 
 	// Providers reports the per-(Provider, Model) breakdown. One entry
 	// per distinct (provider, model) that answered any LLM call in the
@@ -430,13 +433,20 @@ func NewAgentLoop(p provider.LLMProvider, systemPrompt func(context.Context) str
 }
 
 // Run executes the full agentic loop and returns the final result.
-func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*RunResult, error) {
+func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (result *RunResult, runErr error) {
 	cfg := l.resolveRunConfig(opts)
 
 	history := cfg.history
 	if history == nil {
 		history = message.NewHistory()
 	}
+	finishRecording := history.RecordAppends()
+	defer func() {
+		newMessages := finishRecording()
+		if result != nil {
+			result.NewMessages = newMessages
+		}
+	}()
 	// Skip the append when input is empty so callers can deliver the user
 	// turn pre-populated in History (e.g. a multi-modal Parts message via
 	// WithHistory). Always appending would inject a phantom empty user
@@ -489,7 +499,18 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 		// Memory management
 		if l.memoryMgr != nil {
 			if err := l.memoryMgr.Manage(ctx, history); err != nil {
-				log.Printf("loop: memory manager error: %v", err)
+				status = providerErrorStatus(err)
+				cost, providers, fc := finalizeBreakdown()
+				return &RunResult{
+					Output:        lastAttemptedOutput,
+					History:       history,
+					Cost:          cost,
+					Usage:         Usage{totalInputTokens, totalOutputTokens, totalCachedTokens, totalCacheWriteTokens},
+					Turns:         turn + 1,
+					Status:        status,
+					Providers:     providers,
+					FallbackCalls: fc,
+				}, fmt.Errorf("memory manager turn %d: %w", turn, err)
 			}
 		}
 
@@ -516,7 +537,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (*
 		// Call LLM
 		llmResp, err := l.provider.Chat(ctx, req)
 		if err != nil {
-			status = "error"
+			status = providerErrorStatus(err)
 			return nil, fmt.Errorf("llm call turn %d: %w", turn, err)
 		}
 
@@ -1209,16 +1230,17 @@ type Iterator struct {
 
 	// Result fields populated by run(). Safe to read after the steps channel
 	// is closed (channel close synchronizes the writer goroutine).
-	resMu        sync.RWMutex
-	output       string
-	status       string
-	turns        int
+	resMu            sync.RWMutex
+	output           string
+	status           string
+	turns            int
 	inputTokens      int
 	outputTokens     int
 	cachedTokens     int
 	cacheWriteTokens int
 	apiCost          float64
-	history      *message.History
+	history          *message.History
+	newMessages      []message.Message
 
 	// stats is the per-(provider, model) accumulator. Populated alongside
 	// inputTokens / outputTokens / cachedTokens on every LLM response or
@@ -1397,9 +1419,10 @@ func (it *Iterator) Result() RunResult {
 		cost = it.loop.calculateCost(provider.Usage{Cost: it.apiCost}, it.inputTokens, it.outputTokens, it.cachedTokens, it.cacheWriteTokens)
 	}
 	return RunResult{
-		Output:  it.output,
-		History: it.history,
-		Cost:    cost,
+		Output:      it.output,
+		History:     it.history,
+		NewMessages: append([]message.Message{}, it.newMessages...),
+		Cost:        cost,
 		Usage: Usage{
 			InputTokens:      it.inputTokens,
 			OutputTokens:     it.outputTokens,
@@ -1422,6 +1445,13 @@ func (it *Iterator) run(ctx context.Context) {
 	if history == nil {
 		history = message.NewHistory()
 	}
+	finishRecording := history.RecordAppends()
+	defer func() {
+		newMessages := finishRecording()
+		it.resMu.Lock()
+		it.newMessages = newMessages
+		it.resMu.Unlock()
+	}()
 	// Same rule as AgentLoop.Run: callers can deliver the user turn via
 	// WithHistory (e.g. multi-modal Parts) and pass an empty input. Don't
 	// inject a phantom empty user message in that case.
@@ -1474,7 +1504,11 @@ func (it *Iterator) run(ctx context.Context) {
 
 		// Memory
 		if it.loop.memoryMgr != nil {
-			it.loop.memoryMgr.Manage(ctx, history)
+			if err := it.loop.memoryMgr.Manage(ctx, history); err != nil {
+				it.recordProviderError(turn, err)
+				it.steps <- Step{Type: StepError, Error: err, Turn: turn}
+				return
+			}
 		}
 
 		// LLM Call
@@ -1504,6 +1538,7 @@ func (it *Iterator) run(ctx context.Context) {
 					// upstream already charged for the tokens it consumed,
 					// so a failed call must not read as free.
 					it.recordChunk(chunk)
+					it.recordProviderError(turn, chunk.Error)
 					it.steps <- Step{
 						Type:         StepError,
 						Error:        chunk.Error,
@@ -1694,10 +1729,19 @@ func (it *Iterator) run(ctx context.Context) {
 				}
 			}
 		} else {
+			// Budget exhaustion is final, not a signal to try the non-streaming API.
+			if providerErrorStatus(err) == "usage_exceeded" {
+				it.recordProviderError(turn, err)
+				it.steps <- Step{Type: StepError, Error: err, Turn: turn}
+				return
+			}
 			// Fallback to non-streaming
 			llmResp, err := it.loop.provider.Chat(ctx, req)
 			if err != nil {
-				it.recordError(turn)
+				if llmResp != nil {
+					it.recordResponse(llmResp)
+				}
+				it.recordProviderError(turn, err)
 				it.steps <- Step{Type: StepError, Error: err, Turn: turn}
 				return
 			}

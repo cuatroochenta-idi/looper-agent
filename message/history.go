@@ -14,8 +14,9 @@ import (
 // It is resolved per call and injected at translation time by each provider.
 // Only system messages added by hooks or middleware are persisted.
 type History struct {
-	mu       sync.RWMutex
-	messages []Message
+	mu         sync.RWMutex
+	messages   []Message
+	recordings map[*appendRecording]struct{}
 }
 
 // NewHistory creates an empty conversation history.
@@ -57,28 +58,28 @@ func (h *History) LastMessage() *Message {
 func (h *History) AddUserMessage(content string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.messages = append(h.messages, NewUserMessage(content))
+	h.appendLocked(NewUserMessage(content))
 }
 
 // AddUserMessageParts appends a multi-modal user message built from Parts.
 func (h *History) AddUserMessageParts(parts ...Part) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.messages = append(h.messages, NewUserMessageWithParts(parts...))
+	h.appendLocked(NewUserMessageWithParts(parts...))
 }
 
 // AddAssistantMessage appends an assistant message with optional tool calls.
 func (h *History) AddAssistantMessage(content string, toolCalls []ToolCall) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.messages = append(h.messages, NewAssistantMessage(content, toolCalls))
+	h.appendLocked(NewAssistantMessage(content, toolCalls))
 }
 
 // AddToolResult appends a tool result message.
 func (h *History) AddToolResult(callID, name, content string, isError bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.messages = append(h.messages, NewToolResult(callID, name, content, isError))
+	h.appendLocked(NewToolResult(callID, name, content, isError))
 }
 
 // AddSystemMessage appends a system message from hooks or middleware.
@@ -86,14 +87,14 @@ func (h *History) AddToolResult(callID, name, content string, isError bool) {
 func (h *History) AddSystemMessage(content string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.messages = append(h.messages, NewSystemMessage(content))
+	h.appendLocked(NewSystemMessage(content))
 }
 
 // AddMessage appends a pre-built message.
 func (h *History) AddMessage(msg Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.messages = append(h.messages, msg)
+	h.appendLocked(msg)
 }
 
 // Update applies a mutation function to the message at the given index.
@@ -102,7 +103,9 @@ func (h *History) Update(index int, fn func(m *Message)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if index >= 0 && index < len(h.messages) {
+		id := h.messages[index].ID
 		fn(&h.messages[index])
+		h.updateRecordingsLocked(id, &h.messages[index])
 	}
 }
 
@@ -113,6 +116,7 @@ func (h *History) Remove(index int) {
 	if index < 0 || index >= len(h.messages) {
 		return
 	}
+	h.updateRecordingsLocked(h.messages[index].ID, nil)
 	h.messages = append(h.messages[:index], h.messages[index+1:]...)
 }
 
@@ -243,7 +247,14 @@ func (h *History) MarshalJSON() ([]byte, error) {
 func (h *History) UnmarshalJSON(data []byte) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return json.Unmarshal(data, &h.messages)
+	// Decode into fresh storage. Reusing the old slice can overwrite nested
+	// Parts/tool arguments still referenced by an append recording or reader.
+	var messages []Message
+	if err := json.Unmarshal(data, &messages); err != nil {
+		return err
+	}
+	h.messages = messages
+	return nil
 }
 
 // UnmarshalHistory restores a History from serialized JSON.

@@ -517,6 +517,34 @@ mem := memory.NewSummarizer(
 )
 ```
 
+### Shared provider budget
+
+Use `SharedBudget` when one user request can fan out across agents, retries,
+or auxiliary provider calls and all of them must share the same limits:
+
+```go
+budget := provider.NewSharedBudget(provider.SharedBudgetLimits{
+    MaxRequests:    20,
+    MaxTotalTokens: 100_000,
+})
+ctx := provider.WithSharedBudget(context.Background(), budget)
+p := provider.NewBudgetProvider(baseProvider)
+```
+
+Pass the derived context through the whole request tree and use
+`NewBudgetProvider` for each provider entry point, including child and
+auxiliary agents. Requests are counted at the wrapper boundary; retries hidden
+inside an SDK are not individually visible. Token limits use reported usage,
+so requests already in flight can overshoot the limit. Zero limits are
+unlimited. A `SharedBudgetExceededError` is terminal and is classified as
+non-retryable; loop results use `Status == "usage_exceeded"`.
+
+`RunResult.NewMessages` is the append journal for one run. It contains messages
+added during that run, while `History` is the current prompt history. Memory
+compaction can rewrite `History` by replacing old messages with a summary, but
+that rewrite is not added to `NewMessages`; this keeps the journal suitable for
+resume and audit code without replaying summaries.
+
 ### `History.TruncateByTurns(n)`
 
 If you need raw truncation, `TruncateByTurns` is tool-pair-aware — the cut

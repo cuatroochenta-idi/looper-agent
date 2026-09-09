@@ -4,6 +4,22 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.9.0] — 2026-09-09
+
+### Added
+
+- Shared request budgets across agents, retries, and auxiliary provider calls.
+- `RunResult.NewMessages`, an append journal that survives prompt compaction.
+
+### Fixed
+
+- Token-budget memory now estimates message content and tool payload sizes,
+  preserves conversation anchors and complete tool groups, and reports an
+  error when a preserved anchor cannot fit the configured budget.
+- Memory-manager failures stop `Run` and `Iterator` before the provider,
+  preserve their cause and journal, and classify budget exhaustion as
+  `usage_exceeded` without retrying.
+
 ## [v1.8.1] — 2026-09-08
 
 ### Fixed

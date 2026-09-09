@@ -36,18 +36,18 @@ func itoa(n int) string {
 }
 
 // TestSummarizer_ReplacesOlderMessagesWithSummary asserts the core
-// behavior: when KeepLast=2 and history has 6 messages, the first 4 get
-// collapsed into a single system-message summary and the last 2 stay
-// verbatim.
+// behavior: when KeepLast=2 and history has 6 messages, the first user
+// anchors the conversation, the middle messages get collapsed into a single
+// system-message summary, and the last 2 stay verbatim.
 func TestSummarizer_ReplacesOlderMessagesWithSummary(t *testing.T) {
 	hist := buildHistory(6)
 
 	s := NewSummarizer(func(_ context.Context, msgs []message.Message) (string, error) {
-		// Confirm the function gets the OLDER messages, not the kept tail.
-		if len(msgs) != 4 {
-			t.Fatalf("summarize got %d msgs, expected 4 oldest", len(msgs))
+		// Confirm the function gets the middle messages, not the anchors or tail.
+		if len(msgs) != 3 {
+			t.Fatalf("summarize got %d msgs, expected 3 middle messages", len(msgs))
 		}
-		return "SUMMARY: " + msgs[0].Content + " ... " + msgs[3].Content, nil
+		return "SUMMARY: " + msgs[0].Content + " ... " + msgs[2].Content, nil
 	}, WithKeepLast(2))
 
 	if err := s.Summarize(context.Background(), hist); err != nil {
@@ -55,16 +55,16 @@ func TestSummarizer_ReplacesOlderMessagesWithSummary(t *testing.T) {
 	}
 
 	msgs := hist.Messages()
-	if len(msgs) != 3 {
-		t.Fatalf("expected 1 summary + 2 kept = 3 messages, got %d (%v)", len(msgs), msgs)
+	if len(msgs) != 4 {
+		t.Fatalf("expected 1 anchor + 1 summary + 2 kept = 4 messages, got %d (%v)", len(msgs), msgs)
 	}
-	if msgs[0].Type != message.MessageSystem {
-		t.Errorf("first message should be the summary as system, got %v", msgs[0].Type)
+	if msgs[1].Type != message.MessageSystem {
+		t.Errorf("second message should be the summary as system, got %v", msgs[1].Type)
 	}
-	if !strings.Contains(msgs[0].Content, "SUMMARY") {
-		t.Errorf("summary content lost, got %q", msgs[0].Content)
+	if !strings.Contains(msgs[1].Content, "SUMMARY") {
+		t.Errorf("summary content lost, got %q", msgs[1].Content)
 	}
-	if msgs[1].Content != "user-msg-4" || msgs[2].Content != "assistant-msg-5" {
+	if msgs[2].Content != "user-msg-4" || msgs[3].Content != "assistant-msg-5" {
 		t.Errorf("recent tail not preserved: %+v", msgs)
 	}
 }

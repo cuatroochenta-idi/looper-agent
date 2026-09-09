@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cuatroochenta-idi/looper-agent/memory"
 )
 
 // scriptedProvider returns errors / responses from a pre-baked sequence,
@@ -86,6 +88,13 @@ func TestRetryProvider_PermanentErrorNoRetry(t *testing.T) {
 	}
 	if inner.calls.Load() != 1 {
 		t.Errorf("permanent error should not retry, got %d attempts", inner.calls.Load())
+	}
+}
+
+func TestDefaultRetryClassifier_MemoryBudgetIsPermanent(t *testing.T) {
+	err := &memory.MemoryBudgetExceededError{Budget: 100, EstimatedTokens: 101}
+	if got := DefaultRetryClassifier(fmt.Errorf("timeout while compacting: %w", err)); got != Permanent {
+		t.Fatalf("memory budget error classified as %v, want permanent", got)
 	}
 }
 

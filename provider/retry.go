@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cuatroochenta-idi/looper-agent/memory"
 )
 
 // RetryDecision classifies whether an error from an underlying provider
@@ -287,6 +289,14 @@ func (p *RetryProvider) recordFailure() {
 // i/o timeout, "no such host" (DNS blip).
 // Permanent: everything else (4xx, malformed-request, model-not-found, ...).
 func DefaultRetryClassifier(err error) RetryDecision {
+	var memoryBudgetErr *memory.MemoryBudgetExceededError
+	if errors.As(err, &memoryBudgetErr) {
+		return Permanent
+	}
+	var budgetErr *SharedBudgetExceededError
+	if errors.As(err, &budgetErr) {
+		return Permanent
+	}
 	if err == nil {
 		return Permanent
 	}

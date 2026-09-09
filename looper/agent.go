@@ -288,20 +288,22 @@ func (a *Agent) Run(ctx context.Context, input string, opts ...RunOption) (*RunR
 		}
 	}
 	res := iter.Result()
-	if runErr != nil {
-		return nil, runErr
-	}
-
-	return &RunResult{
+	result := &RunResult{
 		Output:        res.Output,
 		History:       res.History,
+		NewMessages:   res.NewMessages,
 		Cost:          costBreakdownFromLoop(res.Cost),
 		Usage:         usageFromLoop(res.Usage),
 		Turns:         res.Turns,
 		Status:        res.Status,
 		Providers:     res.Providers,
 		FallbackCalls: res.FallbackCalls,
-	}, nil
+	}
+	if runErr != nil {
+		return result, runErr
+	}
+
+	return result, nil
 }
 
 // providerModel returns the model name from the configured provider for trace

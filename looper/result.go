@@ -15,6 +15,9 @@ type RunResult struct {
 	// Can be serialized and restored for later runs.
 	History *message.History
 
+	// NewMessages is the append journal produced by this run, independent of prompt compaction.
+	NewMessages []message.Message
+
 	// Cost provides a detailed cost breakdown for the entire run.
 	Cost CostBreakdown
 
