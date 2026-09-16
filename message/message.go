@@ -56,6 +56,19 @@ type Message struct {
 	Name      string         `json:"name,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
+
+	// Reasoning is the human-readable thinking text the model emitted
+	// before this assistant turn. Open-weights models reached through an
+	// OpenAI-compatible endpoint keep no server-side thinking state, so
+	// the plan is lost between tool steps unless it travels back with the
+	// history — this field is where the framework keeps it.
+	Reasoning string `json:"reasoning,omitempty"`
+
+	// ReasoningDetails is the provider's structured form of the same
+	// thinking (OpenRouter's `reasoning_details` array). Stored verbatim:
+	// entries can carry signatures or encrypted payloads that the upstream
+	// only accepts back byte-for-byte, so consumers must not re-encode it.
+	ReasoningDetails json.RawMessage `json:"reasoning_details,omitempty"`
 }
 
 // NewMessage creates a new text-only message with a unique ID and current
@@ -101,6 +114,16 @@ func NewUserMessageWithParts(parts ...Part) Message {
 func NewAssistantMessage(content string, toolCalls []ToolCall) Message {
 	m := NewMessage(MessageAssistant, content)
 	m.ToolCalls = toolCalls
+	return m
+}
+
+// NewAssistantMessageWithReasoning creates an assistant message that also
+// carries the turn's thinking. Either strand may be empty: `reasoning` is
+// the plain text, `details` the provider's structured array stored as-is.
+func NewAssistantMessageWithReasoning(content string, toolCalls []ToolCall, reasoning string, details json.RawMessage) Message {
+	m := NewAssistantMessage(content, toolCalls)
+	m.Reasoning = reasoning
+	m.ReasoningDetails = details
 	return m
 }
 

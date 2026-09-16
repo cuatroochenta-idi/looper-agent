@@ -300,6 +300,12 @@ func DefaultRetryClassifier(err error) RetryDecision {
 	if err == nil {
 		return Permanent
 	}
+	// A stream that went silent is the transient case par excellence: the
+	// request was accepted, nothing came back, and another attempt is the
+	// only way to learn whether the upstream is alive.
+	if errors.Is(err, ErrStreamIdle) {
+		return Transient
+	}
 	msg := strings.ToLower(err.Error())
 	transientNeedles := []string{
 		"500", "502", "503", "504",

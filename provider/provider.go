@@ -9,6 +9,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/cuatroochenta-idi/looper-agent/message"
 	"github.com/cuatroochenta-idi/looper-agent/tool"
@@ -127,10 +128,10 @@ const (
 type ReasoningEffort string
 
 const (
-	ReasoningEffortNone    ReasoningEffort = ""
-	ReasoningEffortLow     ReasoningEffort = "low"
-	ReasoningEffortMedium  ReasoningEffort = "medium"
-	ReasoningEffortHigh    ReasoningEffort = "high"
+	ReasoningEffortNone   ReasoningEffort = ""
+	ReasoningEffortLow    ReasoningEffort = "low"
+	ReasoningEffortMedium ReasoningEffort = "medium"
+	ReasoningEffortHigh   ReasoningEffort = "high"
 	// ReasoningEffortMinimal is OpenAI gpt-5 specific; non-OpenAI providers
 	// treat it as "low".
 	ReasoningEffortMinimal ReasoningEffort = "minimal"
@@ -163,6 +164,15 @@ type LLMResponse struct {
 	// asked for it via ReasoningConfig.IncludeInOutput and the model
 	// supports it. Empty otherwise.
 	Reasoning string
+
+	// ReasoningDetails is the provider's structured thinking payload,
+	// captured verbatim (OpenRouter's `reasoning_details` array). The loop
+	// stores it on the assistant message so a provider configured to echo
+	// reasoning replays it unchanged on the next request — upstreams may
+	// sign or encrypt these entries and only accept them byte-for-byte.
+	// Nil when the endpoint reported thinking as plain text only, or not
+	// at all.
+	ReasoningDetails json.RawMessage
 
 	// ToolCalls are tool invocations requested by the LLM.
 	ToolCalls []message.ToolCall
@@ -247,6 +257,13 @@ type StreamChunk struct {
 	// reasoning. Per-chunk: Content and Reasoning are mutually exclusive
 	// (a chunk carries one OR the other, never both).
 	Reasoning string
+
+	// ReasoningDetails carries the provider's structured thinking payload
+	// for the WHOLE call, already merged from the per-index deltas. It is
+	// set ONLY on the final chunk — intermediate chunks leave it nil,
+	// because a half-assembled array is not something the upstream would
+	// accept back. Nil when the endpoint streamed thinking as text only.
+	ReasoningDetails json.RawMessage
 
 	// ToolCalls are partial tool call data (accumulated across chunks).
 	ToolCalls []message.ToolCall

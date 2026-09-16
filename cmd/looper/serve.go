@@ -414,6 +414,9 @@ func toWebStep(s loop.Step) web.StepEvent {
 		Model:        s.ModelID,
 		Fallback:     s.Fallback,
 		APIKeySuffix: s.APIKeySuffix,
+		Reasoning:    s.Reasoning,
+		FirstChunkMs: s.FirstChunkMs,
+		LatencyMs:    s.LatencyMs,
 	}
 	if s.Error != nil {
 		out.Err = s.Error.Error()

@@ -27,11 +27,15 @@ import (
 type Provider struct {
 	model string
 	// client is a value type, not a pointer (openai.NewClient returns Client).
-	client      openai.Client
-	config      *provider.CacheConfig
-	translator  *Translator
-	maxTokens   int
-	temperature float64
+	client openai.Client
+	// requestOptions are extra SDK client options, applied after the
+	// provider's own (API key, base URL) so they win on conflict. See
+	// WithRequestOptions.
+	requestOptions []option.RequestOption
+	config         *provider.CacheConfig
+	translator     *Translator
+	maxTokens      int
+	temperature    float64
 
 	// providerID is the label stamped on every LLMResponse / StreamChunk
 	// so the trace UI and cost tables can attribute the call. Defaults to
@@ -54,6 +58,12 @@ type Provider struct {
 	// includeReasoning is the default for "surface reasoning deltas in
 	// StreamChunk.Reasoning". Per-request overrides win.
 	includeReasoning bool
+
+	// openModel configures thinking for an open-weights model behind an
+	// OpenAI-compatible endpoint. Nil (the default) leaves every wire byte
+	// exactly as it was; see open_model.go for the precedence rules
+	// against reasoningEffort / includeReasoning.
+	openModel *OpenModelReasoning
 
 	// api selects which OpenAI API surface serves this provider's calls.
 	// The zero value (APIAuto) routes per call — see apiFor in responses.go.
@@ -115,6 +125,17 @@ func WithTemperature(t float64) Option {
 // constructor at the end of NewProvider clobbered it.
 func WithBaseURL(url string) Option {
 	return func(p *Provider) { p.baseURL = url }
+}
+
+// WithRequestOptions passes extra options straight to the underlying SDK
+// client. They are applied after the provider's own (API key, base URL),
+// so they win on conflict. Use it to supply an http.Client — for example
+// one whose transport logs every HTTP attempt, which is the only way to
+// see the retries the SDK performs on its own (connection errors, 408,
+// 409, 429 and 5xx are retried twice with no log line) — or to change the
+// SDK's retry budget with option.WithMaxRetries.
+func WithRequestOptions(opts ...option.RequestOption) Option {
+	return func(p *Provider) { p.requestOptions = append(p.requestOptions, opts...) }
 }
 
 // WithAPIKeys sets multiple API keys for round-robin rotation.
@@ -208,12 +229,14 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 	if p.baseURL != "" {
 		clientOpts = append(clientOpts, option.WithBaseURL(p.baseURL))
 	}
+	clientOpts = append(clientOpts, p.requestOptions...)
 	p.client = openai.NewClient(clientOpts...)
 
 	p.translator = &Translator{
 		model:       p.model,
 		maxTokens:   p.maxTokens,
 		temperature: p.temperature,
+		openModel:   p.openModel,
 	}
 	return p
 }
@@ -251,9 +274,6 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	if req.Temperature != 0 {
 		params.Temperature = openai.Float(req.Temperature)
 	}
-	if eff := p.resolveEffort(req.Reasoning); eff != "" {
-		params.ReasoningEffort = eff
-	}
 	if tc := buildToolChoiceParams(req.ToolChoice); tc != nil && len(req.Tools) > 0 {
 		params.ToolChoice = *tc
 	}
@@ -262,9 +282,7 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	} else if rf != nil {
 		params.ResponseFormat = *rf
 	}
-	if len(req.ExtraParams) > 0 {
-		params.SetExtraFields(req.ExtraParams)
-	}
+	p.applyReasoningAndExtras(&params, req)
 
 	chat, err := p.client.Chat.Completions.New(ctx, params)
 	if err != nil {
@@ -277,9 +295,13 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	}
 	// reasoning_content is non-standard but emitted by LM Studio / DeepSeek /
 	// Qwen3 — peek into the raw JSON of the first choice's message.
-	if p.shouldIncludeReasoning(req.Reasoning) && len(chat.Choices) > 0 {
-		if r := extractReasoningField(chat.Choices[0].Message.RawJSON()); r != "" {
+	if len(chat.Choices) > 0 && (p.shouldIncludeReasoning(req.Reasoning) || p.openModel.captures()) {
+		raw := chat.Choices[0].Message.RawJSON()
+		if r := extractReasoningField(raw); r != "" {
 			resp.Reasoning = r
+		}
+		if p.openModel.captures() {
+			resp.ReasoningDetails = extractReasoningDetails(raw)
 		}
 	}
 	resp.ProviderID = p.providerID
@@ -298,12 +320,46 @@ func (p *Provider) resolveEffort(rc *provider.ReasoningConfig) shared.ReasoningE
 }
 
 // shouldIncludeReasoning is true when the caller (per-request or provider
-// default) asked for reasoning traces in the output.
+// default) asked for reasoning traces in the output. OpenModelReasoning.Trace
+// only ever turns surfacing on, so leaving it false keeps the older knobs in
+// charge.
 func (p *Provider) shouldIncludeReasoning(rc *provider.ReasoningConfig) bool {
+	if p.openModel != nil && p.openModel.Trace {
+		return true
+	}
 	if rc != nil {
 		return rc.IncludeInOutput
 	}
 	return p.includeReasoning
+}
+
+// applyReasoningAndExtras sets the thinking knobs and the caller's
+// ExtraParams on a chat-completions request. Both go through a single
+// SetExtraFields call because that setter REPLACES the extra-field map
+// rather than merging into it — two calls would silently drop the first.
+//
+// On the OpenRouter wire the effort travels inside the `reasoning` object
+// and the legacy top-level `reasoning_effort` is suppressed, so the request
+// can never name two different efforts.
+func (p *Provider) applyReasoningAndExtras(params *openai.ChatCompletionNewParams, req provider.LLMRequest) {
+	fallbackEffort := string(p.resolveEffort(req.Reasoning))
+
+	extra := make(map[string]any, len(req.ExtraParams)+1)
+	for k, v := range req.ExtraParams {
+		extra[k] = v
+	}
+
+	if p.openModel.usesOpenRouterWire() {
+		if obj := p.openModel.reasoningObject(fallbackEffort); obj != nil {
+			extra["reasoning"] = obj
+		}
+	} else if eff := p.openModel.effectiveEffort(fallbackEffort); eff != "" {
+		params.ReasoningEffort = shared.ReasoningEffort(eff)
+	}
+
+	if len(extra) > 0 {
+		params.SetExtraFields(extra)
+	}
 }
 
 // ChatStream sends a streaming chat completion request.
@@ -330,9 +386,6 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 	if req.Temperature != 0 {
 		params.Temperature = openai.Float(req.Temperature)
 	}
-	if eff := p.resolveEffort(req.Reasoning); eff != "" {
-		params.ReasoningEffort = eff
-	}
 	if tc := buildToolChoiceParams(req.ToolChoice); tc != nil && len(req.Tools) > 0 {
 		params.ToolChoice = *tc
 	}
@@ -341,23 +394,26 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 	} else if rf != nil {
 		params.ResponseFormat = *rf
 	}
-	if len(req.ExtraParams) > 0 {
-		params.SetExtraFields(req.ExtraParams)
-	}
+	p.applyReasoningAndExtras(&params, req)
 	// Request token usage in the streaming response — OpenAI omits it by default.
 	params.StreamOptions = openai.ChatCompletionStreamOptionsParam{
 		IncludeUsage: openai.Bool(true),
 	}
 
 	includeReasoning := p.shouldIncludeReasoning(req.Reasoning)
-	harmony := newHarmonyFilter(includeReasoning)
+	// The harmony filter has to keep parsing markers even when nobody wants
+	// the reasoning strand, so it gets the union of both gates: capture is
+	// for the history / echo-back, includeReasoning for the live deltas.
+	captureReasoning := p.openModel.captures()
+	harmony := newHarmonyFilter(includeReasoning || captureReasoning)
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 
-	// Synchronous first-chunk probe. The openai-go SDK defers the
-	// underlying HTTP request to the first stream.Next() call, so without
-	// this probe a pre-content failure (e.g. OpenRouter "No endpoints
-	// found for X" 404, auth 401, malformed request 400) gets buried in
-	// the final-chunk's Error field after we've already returned
+	// Synchronous first-chunk probe. NewStreaming issues the HTTP request
+	// (retries included) and returns at the response headers, but the
+	// SSE body is read lazily by stream.Next(), so without this probe a
+	// pre-content failure (e.g. OpenRouter "No endpoints found for X"
+	// 404, auth 401, malformed request 400) gets buried in the
+	// final-chunk's Error field after we've already returned
 	// (channel, nil) to the caller. Both FailoverProvider.ChatStream
 	// (failover.go) and RetryProvider.ChatStream (retry.go) gate their
 	// recovery on the function-return error and therefore stay
@@ -396,6 +452,14 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		// handling below) rather than a truncated response.
 		var sawFinish bool
 
+		// Thinking accumulators, filled only when the open-model config
+		// asked for capture. The text mirrors contentBuilder (the whole
+		// think for the call) and the merger reassembles the structured
+		// entries the endpoint split across deltas; both ride out on the
+		// final chunk.
+		var reasoningBuilder strings.Builder
+		var details detailsMerger
+
 		// Per-chunk handler. Factored out as a closure so the probed first
 		// chunk (above) and the rest of the stream go through the exact
 		// same branches — no risk of the two paths drifting.
@@ -406,12 +470,19 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 				// reasoning_content is a non-standard delta field used by
 				// LM Studio, DeepSeek-R1, Qwen3, etc. We read it off the
 				// raw JSON since the SDK schema doesn't expose it.
-				if r := extractReasoningField(delta.RawJSON()); r != "" {
+				rawDelta := delta.RawJSON()
+				if r := extractReasoningField(rawDelta); r != "" {
+					if captureReasoning {
+						reasoningBuilder.WriteString(r)
+					}
 					if includeReasoning {
 						ch <- provider.StreamChunk{Reasoning: r, ProviderID: p.providerID, ModelID: model, APIKeySuffix: keySuffix}
 					}
 					// Either way: skip the content-arm — many local
 					// models repeat the same text in both fields.
+				}
+				if captureReasoning {
+					details.feed(rawDelta)
 				}
 
 				// Text content delta — pipe through the Harmony filter,
@@ -423,8 +494,13 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 						contentBuilder += cText
 						ch <- provider.StreamChunk{Content: cText, ProviderID: p.providerID, ModelID: model, APIKeySuffix: keySuffix}
 					}
-					if rText != "" && includeReasoning {
-						ch <- provider.StreamChunk{Reasoning: rText, ProviderID: p.providerID, ModelID: model, APIKeySuffix: keySuffix}
+					if rText != "" {
+						if captureReasoning {
+							reasoningBuilder.WriteString(rText)
+						}
+						if includeReasoning {
+							ch <- provider.StreamChunk{Reasoning: rText, ProviderID: p.providerID, ModelID: model, APIKeySuffix: keySuffix}
+						}
 					}
 				}
 
@@ -475,6 +551,14 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		}
 
 		final := buildFinalChunk(contentBuilder, toolCallMap, finalChunk)
+		// The final chunk carries the WHOLE think for the call, the same
+		// contract Content follows. Only the open-model path populates it:
+		// WithIncludeReasoning on its own keeps emitting deltas and nothing
+		// else, exactly as before.
+		if captureReasoning {
+			final.Reasoning = reasoningBuilder.String()
+			final.ReasoningDetails = details.result()
+		}
 		// Surface stream errors so callers see HTTP 4xx/5xx, malformed SSE,
 		// connection drops, etc. Without this the agent silently sees an
 		// empty final chunk and looks "successful but mute." The pre-
@@ -565,6 +649,10 @@ type Translator struct {
 	model       string
 	maxTokens   int
 	temperature float64
+
+	// openModel decides whether assistant turns replay their thinking and
+	// under which field name. Nil for every provider that didn't opt in.
+	openModel *OpenModelReasoning
 }
 
 // ToNative converts universal messages to OpenAI's chat completion params.
@@ -606,11 +694,18 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 						},
 					}
 				}
+				if echo := t.openModel.echoFields(msg); echo != nil {
+					params.SetExtraFields(echo)
+				}
 				openaiMessages = append(openaiMessages, openai.ChatCompletionMessageParamUnion{
 					OfAssistant: &params,
 				})
 			} else {
-				openaiMessages = append(openaiMessages, openai.AssistantMessage(msg.Content))
+				am := openai.AssistantMessage(msg.Content)
+				if echo := t.openModel.echoFields(msg); echo != nil {
+					am.OfAssistant.SetExtraFields(echo)
+				}
+				openaiMessages = append(openaiMessages, am)
 			}
 		case message.MessageTool:
 			openaiMessages = append(openaiMessages, openai.ToolMessage(msg.Content, msg.ToolID))
@@ -686,9 +781,9 @@ func buildUserMessage(msg message.Message) openai.ChatCompletionMessageParamUnio
 			parts = append(parts, openai.ImageContentPart(
 				openai.ChatCompletionContentPartImageImageURLParam{URL: dataURL},
 			))
-		// PartFile / PartAudio fall through — only newer chat models accept
-		// them and the SDK requires extra plumbing; skip silently for now
-		// instead of refusing the whole message.
+			// PartFile / PartAudio fall through — only newer chat models accept
+			// them and the SDK requires extra plumbing; skip silently for now
+			// instead of refusing the whole message.
 		}
 	}
 	return openai.UserMessage(parts)

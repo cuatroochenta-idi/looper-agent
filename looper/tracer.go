@@ -111,6 +111,16 @@ type StepData struct {
 	// tell apart which of several rotating / chained keys answered.
 	// Empty for keyless providers and on non-LLM steps.
 	APIKeySuffix string `json:"api_key_suffix,omitempty"`
+
+	// Reasoning is the model's full thinking text for the turn, carried on
+	// the usage-bearing steps. Per-delta reasoning_chunk events are dropped
+	// before persistence, so this is the copy a stored trace keeps.
+	Reasoning string `json:"Reasoning,omitempty"`
+
+	// FirstChunkMs / LatencyMs are the LLM call's time-to-first-chunk and
+	// total duration, in milliseconds. Zero on non-LLM steps.
+	FirstChunkMs int64 `json:"first_chunk_ms,omitempty"`
+	LatencyMs    int64 `json:"latency_ms,omitempty"`
 }
 
 // ProviderStatsData mirrors loop.ProviderStats for wire transport.
@@ -348,6 +358,9 @@ func stepDataFrom(s loop.Step) StepData {
 		Model:        s.ModelID,
 		Fallback:     s.Fallback,
 		APIKeySuffix: s.APIKeySuffix,
+		Reasoning:    s.Reasoning,
+		FirstChunkMs: s.FirstChunkMs,
+		LatencyMs:    s.LatencyMs,
 	}
 	if s.Error != nil {
 		out.Err = s.Error.Error()

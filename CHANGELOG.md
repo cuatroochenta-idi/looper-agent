@@ -4,6 +4,77 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.9.1] — 2026-09-15
+
+Open-weights models were being made to think the same thought over and over.
+A measured build on `deepseek/deepseek-v4.1-flash` through OpenRouter spent
+751k output tokens across 185 calls (mean 4,057, peak 39k) where gpt-5.6 on
+the Responses API spent 121k across 121 (mean 701) — because the
+OpenAI-compatible provider threw the model's reasoning away between tool
+steps and the model re-derived its whole plan every time.
+
+### Added
+
+- **`openai.WithRequestOptions(opts...)`** — extra SDK client options for the
+  OpenAI-compatible provider, applied after the API key and base URL, the
+  same hook the Anthropic provider already had. It is the only way to hand
+  the SDK an `http.Client` (a transport that logs every HTTP attempt makes
+  the SDK's own silent retries visible) or to change its retry budget with
+  `option.WithMaxRetries`.
+- **`openai.WithOpenModelReasoning(cfg)`** — thinking for an open-weights
+  model behind an OpenAI-compatible endpoint, in one option: ask for it
+  (`Effort` / `MaxTokens` / `Enabled`), echo it back (`PassBack`), surface
+  it (`Trace`). `Wire` picks the dialect: `ReasoningWireOpenRouter` (request
+  `reasoning: {…}`, response `reasoning` + `reasoning_details`) or
+  `ReasoningWireReasoningContent` (request `reasoning_effort`, response and
+  echo-back `reasoning_content` — DeepSeek native, LM Studio, vLLM). Only
+  the chat-completions path honours it; the Responses API has its own
+  reasoning surface and ignores it.
+- **`message.Message.Reasoning` / `.ReasoningDetails`**, with
+  `NewAssistantMessageWithReasoning` and
+  `History.AddAssistantMessageWithReasoning`. The details array is stored
+  verbatim — entries carry signatures computed over those exact bytes.
+  Existing constructors leave both empty, so nothing new appears in a
+  history that never asked for reasoning.
+- **`provider.LLMResponse.ReasoningDetails` / `StreamChunk.ReasoningDetails`.**
+  On a stream the field is set only on the final chunk, already merged from
+  the per-`index` deltas; that final chunk's `Reasoning` now carries the
+  whole think for the call, the same contract `Content` follows.
+- **`provider.WithStreamIdleTimeout(inner, idle)`** — a silence watchdog for
+  streams. Every chunk resets the deadline, reasoning deltas included, so a
+  long think is not mistaken for a dead connection. Silence before the first
+  chunk fails the `ChatStream` call (the shape failover and retry recover
+  from); silence after it arrives as one final chunk wrapping the new
+  `provider.ErrStreamIdle`, which `DefaultRetryClassifier` reads as
+  `Transient`. Either way the upstream context is cancelled. `idle <= 0`
+  returns the inner unchanged.
+- **Per-call latency on the trace** — `loop.Step.FirstChunkMs` and
+  `.LatencyMs` (mirrored on `looper.StepData` and the web timeline), stamped
+  on each turn's usage-bearing steps. A provider that answers slowly and one
+  that stalls before its first token now look different in a stored run.
+
+### Fixed
+
+- **Reasoning deltas no longer reach the trace writer.** With reasoning
+  surfaced, one turn emits thousands of `reasoning_chunk` steps; forwarding
+  them filled the writer's queue and the response and tool_call events right
+  behind them were dropped under back-pressure. They are filtered at the
+  source like streaming chunks — the whole think travels on the response
+  step's `Reasoning`.
+
+- **Interleaved thinking survives tool steps.** `Translator.ToNative` now
+  replays a stored assistant turn's reasoning when `PassBack` is set —
+  `reasoning_details` verbatim and in index order on the OpenRouter wire,
+  `reasoning_content` on the other — on *every* assistant message, whether
+  or not it called a tool. DeepSeek returns 400 for a thinking-mode request
+  whose history drops it; other open models simply start over.
+- **Reasoning reaches the persisted trace.** The whole think now rides on
+  the turn's usage-bearing steps (`loop.Step.Reasoning`), so it survives
+  `stripChunkSteps`, which drops every per-delta `reasoning_chunk` before a
+  run is written to disk. Live UIs keep the deltas they always had.
+- **`reasoning` and caller `ExtraParams` no longer evict each other.** The
+  SDK's `SetExtraFields` replaces the extra-field map rather than merging,
+  so the two are now combined before the single call that sets them.
 ## [v1.9.0] — 2026-09-09
 
 ### Added

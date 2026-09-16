@@ -62,6 +62,13 @@ type StepEvent struct {
 	Model        string
 	Fallback     bool
 	APIKeySuffix string
+
+	// Reasoning is the model's full thinking text for the turn and
+	// FirstChunkMs / LatencyMs the LLM call's timings. Set on the
+	// usage-bearing steps only.
+	Reasoning    string
+	FirstChunkMs int64
+	LatencyMs    int64
 }
 
 // RunSummary is the final aggregate returned once a run finishes.
@@ -125,6 +132,17 @@ type TimelineStep struct {
 	// the live stream) on StepKindStreamingChunk. Empty for keyless
 	// providers and non-LLM steps.
 	APIKeySuffix string `json:",omitempty"`
+
+	// Reasoning is the turn's full thinking text. It rides on the
+	// usage-bearing steps rather than the per-delta reasoning_chunk
+	// events, which stripChunkSteps drops before a run is written out —
+	// so this is the copy a reloaded trace still has.
+	Reasoning string `json:",omitempty"`
+
+	// FirstChunkMs / LatencyMs are the backing LLM call's
+	// time-to-first-chunk and total duration, in milliseconds.
+	FirstChunkMs int64 `json:",omitempty"`
+	LatencyMs    int64 `json:",omitempty"`
 }
 
 // ProviderStat is the per-(Provider, Model) breakdown shown in the run

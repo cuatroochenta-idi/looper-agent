@@ -163,6 +163,70 @@ Common per-provider options: `WithModel`, `WithMaxTokens`, `WithTemperature`.
 | `WithThinkingCompat(c)` / `WithSamplingParams(b)` | anthropic | Escape hatches for gateways that proxy an unrecognised model. Both auto-detect from the model id by default; you shouldn't need them for first-party Claude models. |
 | `WithBaseURL(url)` | openai | Point at LM Studio / Ollama / Azure / any OpenAI-compatible endpoint. |
 | `WithIncludeReasoning(b)` | all 3 | Surface reasoning deltas via `StepReasoningChunk`. |
+| `WithOpenModelReasoning(cfg)` | openai | Thinking for an open-weights model behind an OpenAI-compatible endpoint: ask for it, keep it, echo it back. See below. |
+
+**Open-weights models need the client to carry their thinking.** OpenAI's
+Responses API keeps a model's reasoning server-side and Anthropic hands back
+signed blocks; an open model behind an OpenAI-compatible endpoint has
+neither. Replay the thinking with the history and the model continues where
+it left off — drop it and it re-derives its whole plan on every tool step,
+which on one measured build cost 751k output tokens against 121k for the
+same work on the Responses API. DeepSeek does not merely lose quality there:
+it answers 400.
+
+```go
+openai.NewProvider(key,
+    openai.WithBaseURL("https://openrouter.ai/api/v1"),
+    openai.WithModel("deepseek/deepseek-v4.1-flash"),
+    openai.WithOpenModelReasoning(openai.OpenModelReasoning{
+        Wire:      openai.ReasoningWireOpenRouter,
+        Effort:    provider.ReasoningEffortMedium,
+        MaxTokens: 8000,
+        PassBack:  true,  // echo reasoning_details back — the interleaved-thinking fix
+        Trace:     true,  // surface the think on StreamChunk.Reasoning and the trace step
+    }),
+)
+```
+
+Pick the `Wire` your endpoint speaks:
+
+| Wire | Request | Response / echo-back field | Spoken by |
+|------|---------|----------------------------|-----------|
+| `ReasoningWireOpenRouter` | `reasoning: {effort\|max_tokens\|enabled}` | `reasoning` (text) + `reasoning_details` (array, replayed verbatim and in order) | OpenRouter |
+| `ReasoningWireReasoningContent` | `reasoning_effort` | `reasoning_content` (string) | DeepSeek native, LM Studio, vLLM |
+
+Worth knowing before you tune it:
+
+- `PassBack` applies to **every** stored assistant turn, tool-calling or
+  not. A turn that carried no thinking sends no field.
+- `reasoning.max_tokens` only reaches Gemini- and Anthropic-style models.
+  DeepSeek ignores it, so there `Effort` is the only real lever, and its
+  scale is `low` / `high` / `max` (medium collapses to high, default high).
+  In thinking mode DeepSeek also ignores `temperature` and floors `top_p`.
+- Precedence against the older knobs: `Effort` wins where set and the older
+  knobs still resolve it where it is empty; `Trace` only ever turns
+  surfacing **on**. On the OpenRouter wire the effort always travels inside
+  the `reasoning` object and the legacy top-level `reasoning_effort` is
+  suppressed, so the request can never name two different efforts.
+- The whole thing is inert on the Responses API path, which has its own
+  first-class reasoning surface.
+
+**Stream idle watchdog.** A provider that accepts the request and then goes
+silent holds the turn open with no error, no failover and no log line.
+`provider.WithStreamIdleTimeout` wraps any provider with a per-stream
+deadline that every chunk resets — content, reasoning, tool fragments,
+usage — so a model streaming a three-minute think is never mistaken for a
+dead one:
+
+```go
+p := provider.WithStreamIdleTimeout(inner, 4*time.Minute) // <= 0 disables it
+```
+
+Silence before the first chunk fails the `ChatStream` call itself, which is
+the shape `FailoverProvider` / `RetryProvider` recover from; silence after
+it arrives as one final chunk whose `Error` wraps `provider.ErrStreamIdle`
+(classified `Transient`), since restarting mid-reply would duplicate tokens
+the caller already saw. Either way the upstream context is cancelled.
 
 **Anthropic thinking is model-dependent, and the provider handles it for
 you.** The wire contract changed twice across the Claude 4.x line, and
@@ -860,6 +924,12 @@ LOOPER_TRACE_ENDPOINT=http://localhost:9090/api/trace LOOPER_SESSION_ID=my-sessi
 The agent emits `Step` events (`StepLLMCall`, `StepStreamingChunk`,
 `StepReasoningChunk`, `StepToolCall`, `StepToolResult`, `StepFinalResponse`,
 `StepError`) — drive a live UI by ranging over `agent.Iterate(...)`.
+
+Each turn's usage-bearing steps (`StepLLMResponse`, `StepToolCall`,
+`StepFinalResponse`) also carry `Reasoning` — the whole think for that LLM
+call — plus `FirstChunkMs` and `LatencyMs`. The per-delta
+`StepReasoningChunk` events are for live UIs and are stripped before a run is
+written to disk, so this is the copy a reloaded trace still has.
 
 ### Run identifiers — grouping calls into conversations
 

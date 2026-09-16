@@ -82,6 +82,12 @@ type TurnView struct {
 	Error         string         `json:"error,omitempty"`
 	StartedAt     time.Time      `json:"started_at"`
 	EndedAt       time.Time      `json:"ended_at,omitzero"`
+
+	// FirstChunkMs / LatencyMs are the turn's LLM call timings in
+	// milliseconds — time to first chunk and total. Omitted on turns
+	// recorded before the loop measured them.
+	FirstChunkMs int64 `json:"first_chunk_ms,omitempty"`
+	LatencyMs    int64 `json:"latency_ms,omitempty"`
 }
 
 // UsageView is the per-turn / per-step token breakdown.
@@ -607,6 +613,8 @@ func (s *Server) runDetail(run *RunRecord, childIndex map[string][]*RunRecord, r
 			APIKeySuffix:  t.APIKeySuffix,
 			AssistantText: t.AssistantText,
 			Reasoning:     t.Reasoning,
+			FirstChunkMs:  t.FirstChunkMs,
+			LatencyMs:     t.LatencyMs,
 			StartedAt:     t.StartAt,
 			EndedAt:       t.EndAt(),
 			ToolCalls:     []ToolCallView{},
@@ -857,5 +865,8 @@ func timelineStepFrom(step StepEvent) TimelineStep {
 		Model:            step.Model,
 		Fallback:         step.Fallback,
 		APIKeySuffix:     step.APIKeySuffix,
+		Reasoning:        step.Reasoning,
+		FirstChunkMs:     step.FirstChunkMs,
+		LatencyMs:        step.LatencyMs,
 	}
 }

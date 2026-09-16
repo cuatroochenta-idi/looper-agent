@@ -315,7 +315,7 @@ type scriptedSuccess struct {
 	content string
 }
 
-func (p *scriptedSuccess) Model() string                 { return "scripted" }
+func (p *scriptedSuccess) Model() string                   { return "scripted" }
 func (p *scriptedSuccess) Translator() provider.Translator { return nil }
 func (p *scriptedSuccess) Chat(_ context.Context, _ provider.LLMRequest) (*provider.LLMResponse, error) {
 	return &provider.LLMResponse{Content: p.content}, nil

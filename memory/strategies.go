@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cuatroochenta-idi/looper-agent/message"
 )
@@ -37,6 +38,66 @@ type TokenBudget struct {
 	// Summarizer compresses old messages when the budget is exceeded.
 	// If nil, messages are simply truncated.
 	Summarizer *Summarizer
+
+	// Counter estimates the tokens in one message. The default is a
+	// deliberately conservative character-based estimate; it is not a
+	// tokenizer. Inject a model-specific counter when the caller has one.
+	Counter TokenCounter
+}
+
+// TokenCounter estimates the tokens represented by a message. It is a
+// function so applications can inject a tokenizer without coupling this
+// package to a provider or model.
+type TokenCounter func(message.Message) int
+
+// BudgetError reports that the required history cannot fit in a TokenBudget.
+// The original history is left untouched so callers can decide whether to
+// retry with a larger budget, a different summarizer, or a fresh session.
+type BudgetError struct {
+	Budget    int
+	Estimated int
+}
+
+func (e *BudgetError) Error() string {
+	return fmt.Sprintf("memory: history requires approximately %d tokens, budget is %d", e.Estimated, e.Budget)
+}
+
+// Retryable is intentionally false: retrying the same request cannot make an
+// oversized mandatory prefix fit.
+func (e *BudgetError) Retryable() bool { return false }
+
+// EstimateMessageTokens returns the default conservative estimate for one
+// message, including content, tool-call names/arguments, and tool results.
+func EstimateMessageTokens(m message.Message) int {
+	tokens := estimateText(m.Content) + estimateText(m.Name) + estimateText(m.ToolID)
+	for _, call := range m.ToolCalls {
+		tokens += estimateText(call.ID) + estimateText(call.Name)
+		tokens += estimateBytes(call.Arguments) + estimateBytes(call.Signature)
+	}
+	if tokens == 0 {
+		return 1
+	}
+	return tokens
+}
+
+func estimateText(text string) int {
+	if text == "" {
+		return 0
+	}
+	return estimateRunes(utf8.RuneCountInString(text))
+}
+
+func estimateBytes(raw []byte) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	return estimateRunes(utf8.RuneCount(raw))
+}
+
+func estimateRunes(n int) int {
+	// Two runes per token is intentionally conservative for prose and JSON;
+	// exact counts require a model tokenizer that this package does not own.
+	return (n + 1) / 2
 }
 
 // MemoryBudgetExceededError reports that the messages that must be retained
@@ -248,6 +309,198 @@ func conversationUnits(messages []message.Message, start int) [][]message.Messag
 	return units
 }
 
+type historyBlock struct {
+	messages  []message.Message
+	mandatory bool
+	prefix    bool
+	optional  bool
+}
+
+// compact retains all system messages, the first and latest user messages,
+// and complete assistant/tool-result blocks from the newest tail. Older
+// optional blocks are summarized when configured. The returned slice is a
+// valid provider history or a BudgetError; it never contains orphan tool
+// results.
+func (t *TokenBudget) compact(ctx context.Context, msgs []message.Message, counter TokenCounter) ([]message.Message, error) {
+	blocks := makeHistoryBlocks(msgs)
+	mandatory := flattenBlocks(blocks, func(b historyBlock) bool { return b.mandatory })
+	mandatoryTokens := estimateMessages(mandatory, counter)
+	if mandatoryTokens > t.Budget {
+		return nil, &BudgetError{Budget: t.Budget, Estimated: mandatoryTokens}
+	}
+
+	optionalIndexes := make([]int, 0, len(blocks))
+	for i, block := range blocks {
+		if block.optional {
+			optionalIndexes = append(optionalIndexes, i)
+		}
+	}
+
+	var summary string
+	selected := make(map[int]bool)
+	older := optionalIndexes
+	if t.Summarizer != nil {
+		keepMessages := t.Summarizer.KeepLast
+		if keepMessages <= 0 {
+			keepMessages = 6
+		}
+		kept := 0
+		older = nil
+		for i := len(optionalIndexes) - 1; i >= 0; i-- {
+			idx := optionalIndexes[i]
+			if kept < keepMessages {
+				selected[idx] = true
+				kept += len(blocks[idx].messages)
+				continue
+			}
+			older = append(older, idx)
+		}
+		// Preserve chronological order for the summarizer input.
+		for i, j := 0, len(older)-1; i < j; i, j = i+1, j-1 {
+			older[i], older[j] = older[j], older[i]
+		}
+		if len(older) > 0 {
+			oldMessages := flattenBlockIndexes(blocks, older)
+			var err error
+			summary, err = t.Summarizer.summarize(ctx, oldMessages)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Add newest optional blocks while preserving the mandatory prefix. If a
+	// whole block does not fit, omit it; dropping half a tool pair is forbidden.
+	if t.Summarizer != nil {
+		// The selected tail was chosen before the summary was generated. A large
+		// summary can leave room for fewer tail blocks, so prune oldest selected
+		// blocks until the postcondition holds.
+		for _, idx := range optionalIndexes {
+			if !selected[idx] {
+				continue
+			}
+			candidate := assembleBlocks(blocks, selected, summary)
+			if estimateMessages(candidate, counter) <= t.Budget {
+				break
+			}
+			delete(selected, idx)
+		}
+	} else {
+		for i := len(optionalIndexes) - 1; i >= 0; i-- {
+			idx := optionalIndexes[i]
+			selected[idx] = true
+			candidate := assembleBlocks(blocks, selected, summary)
+			if estimateMessages(candidate, counter) > t.Budget {
+				delete(selected, idx)
+			}
+		}
+	}
+	candidate := assembleBlocks(blocks, selected, summary)
+	if estimated := estimateMessages(candidate, counter); estimated > t.Budget {
+		return nil, &BudgetError{Budget: t.Budget, Estimated: estimated}
+	}
+	return candidate, nil
+}
+
+func estimateMessages(msgs []message.Message, counter TokenCounter) int {
+	total := 0
+	for _, msg := range msgs {
+		if n := counter(msg); n > 0 {
+			total += n
+		}
+	}
+	return total
+}
+
+func makeHistoryBlocks(msgs []message.Message) []historyBlock {
+	firstUser, lastUser := -1, -1
+	for i, msg := range msgs {
+		if msg.Type == message.MessageUser {
+			if firstUser == -1 {
+				firstUser = i
+			}
+			lastUser = i
+		}
+	}
+	prefixEnd := len(msgs)
+	if firstUser >= 0 {
+		prefixEnd = firstUser + 1
+	}
+	blocks := make([]historyBlock, 0, len(msgs))
+	for i := 0; i < len(msgs); i++ {
+		msg := msgs[i]
+		if msg.Type == message.MessageTool {
+			// An orphan result is unsafe to replay and is therefore discarded.
+			continue
+		}
+		block := historyBlock{messages: []message.Message{msg}}
+		if msg.Type == message.MessageAssistant && len(msg.ToolCalls) > 0 {
+			need := make(map[string]bool, len(msg.ToolCalls))
+			for _, call := range msg.ToolCalls {
+				need[call.ID] = true
+			}
+			j := i + 1
+			for j < len(msgs) && msgs[j].Type == message.MessageTool {
+				delete(need, msgs[j].ToolID)
+				block.messages = append(block.messages, msgs[j])
+				j++
+			}
+			if len(need) > 0 {
+				// A partial assistant call is unsafe even if its text is useful.
+				if i == firstUser || i == lastUser {
+					block.mandatory = true
+				}
+				i = j - 1
+				continue
+			}
+			i = j - 1
+		}
+		block.prefix = i < prefixEnd
+		block.mandatory = block.prefix || msg.Type == message.MessageSystem || i == firstUser || i == lastUser
+		block.optional = !block.mandatory
+		blocks = append(blocks, block)
+	}
+	return blocks
+}
+
+func flattenBlocks(blocks []historyBlock, keep func(historyBlock) bool) []message.Message {
+	var out []message.Message
+	for _, block := range blocks {
+		if keep(block) {
+			out = append(out, block.messages...)
+		}
+	}
+	return out
+}
+
+func flattenBlockIndexes(blocks []historyBlock, indexes []int) []message.Message {
+	var out []message.Message
+	for _, idx := range indexes {
+		out = append(out, blocks[idx].messages...)
+	}
+	return out
+}
+
+func assembleBlocks(blocks []historyBlock, selected map[int]bool, summary string) []message.Message {
+	var out []message.Message
+	inserted := false
+	for i, block := range blocks {
+		if !inserted && !block.prefix {
+			if summary != "" {
+				out = append(out, message.NewSystemMessage(summary))
+			}
+			inserted = true
+		}
+		if block.mandatory || selected[i] {
+			out = append(out, block.messages...)
+		}
+	}
+	if !inserted && summary != "" {
+		out = append(out, message.NewSystemMessage(summary))
+	}
+	return out
+}
+
 // SummarizeFunc produces a single summary string from a slice of older
 // messages. Implementations typically call out to an LLM but can be any
 // pure function for testing or non-AI summarisers.
@@ -334,16 +587,9 @@ func (s *Summarizer) Summarize(ctx context.Context, history *message.History) er
 		older = append(older, msgs[prefixEnd:tailStart]...)
 	}
 
-	summary, err := s.Fn(ctx, older)
+	summary, err := s.summarize(ctx, older)
 	if err != nil {
 		return err
-	}
-	summary = strings.TrimSpace(summary)
-	if summary == "" {
-		return fmt.Errorf("summarizer: empty summary produced")
-	}
-	if s.SummaryPrompt != "" {
-		summary = s.SummaryPrompt + "\n" + summary
 	}
 
 	// Rebuild history: preserved anchors, one current summary, then the
@@ -356,4 +602,19 @@ func (s *Summarizer) Summarize(ctx context.Context, history *message.History) er
 		return fmt.Errorf("summarizer: re-marshal history: %w", err)
 	}
 	return nil
+}
+
+func (s *Summarizer) summarize(ctx context.Context, messages []message.Message) (string, error) {
+	summary, err := s.Fn(ctx, messages)
+	if err != nil {
+		return "", err
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return "", fmt.Errorf("summarizer: empty summary produced")
+	}
+	if s.SummaryPrompt != "" {
+		summary = s.SummaryPrompt + "\n" + summary
+	}
+	return summary, nil
 }

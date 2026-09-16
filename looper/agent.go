@@ -375,16 +375,19 @@ func (a *Agent) Iterate(ctx context.Context, input string, opts ...RunOption) *l
 
 	inner := a.loops.Iterate(ctx, input, runOptsToLoop(opts)...)
 	return loop.WrapIterator(inner, func(s loop.Step) {
-		// Streaming deltas are intentionally NOT forwarded to the trace
-		// endpoint: a single turn produces dozens-to-hundreds of chunks,
-		// which becomes pure noise in Grafana / third-party sinks and
-		// bloats the JSON store on disk. The accumulated assistant text
-		// is preserved on StepLLMResponse.Content (one event per turn),
-		// so consumers can still render the model's response without
-		// every individual delta. Local live views that want the
-		// streaming effect read directly from the iterator — they never
-		// hit this path.
-		if s.Type == loop.StepStreamingChunk {
+		// Streaming and reasoning deltas are intentionally NOT forwarded
+		// to the trace endpoint: a single turn produces dozens-to-hundreds
+		// of text chunks and, with reasoning surfaced, thousands of thinking
+		// deltas — pure noise in Grafana / third-party sinks, bloat in the
+		// JSON store, and enough volume to fill the writer's queue so the
+		// response and tool_call events right behind them get dropped
+		// under back-pressure. The accumulated assistant text is preserved
+		// on StepLLMResponse.Content and the whole think on the response
+		// step's Reasoning (one event per turn), so consumers can still
+		// render both without every individual delta. Local live views
+		// that want the streaming effect read directly from the iterator —
+		// they never hit this path.
+		if s.Type == loop.StepStreamingChunk || s.Type == loop.StepReasoningChunk {
 			return
 		}
 		tw.send(TraceStep, runID, stepDataFrom(s))

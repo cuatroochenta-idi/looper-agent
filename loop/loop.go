@@ -12,6 +12,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cuatroochenta-idi/looper-agent/memory"
 	"github.com/cuatroochenta-idi/looper-agent/message"
@@ -100,6 +101,64 @@ type Step struct {
 	// FailoverProvider chain mixes keys across one run. Empty for
 	// keyless providers (LM Studio, Ollama) and on non-LLM steps.
 	APIKeySuffix string
+
+	// Reasoning is the model's complete thinking text for the LLM call this
+	// step belongs to, stamped on the turn's usage-bearing steps
+	// (StepLLMResponse / StepToolCall / StepFinalResponse). The per-delta
+	// StepReasoningChunk events stay as they are for live UIs; this is the
+	// copy that survives persistence, which strips chunk steps. Empty
+	// unless the provider was configured to surface reasoning.
+	Reasoning string
+
+	// FirstChunkMs is the milliseconds from issuing the request to the
+	// first chunk of any kind — content, reasoning or tool fragment. On the
+	// non-streaming path it equals LatencyMs, there being no earlier signal
+	// to measure.
+	FirstChunkMs int64
+
+	// LatencyMs is the milliseconds from issuing the request to the final
+	// chunk (or to the response, non-streaming). Zero on non-LLM steps.
+	LatencyMs int64
+}
+
+// turnTelemetry carries the per-LLM-call signals that ride on every
+// usage-bearing step of a turn: the model's think and the call's timings.
+// Collected once when the response completes, then stamped on each step the
+// turn emits, so a consumer reading any of them sees the same figures.
+type turnTelemetry struct {
+	reasoning    string
+	firstChunkMs int64
+	latencyMs    int64
+}
+
+// elapsedMs reports the milliseconds since start, floored at 1: the wire
+// fields are omitempty, so zero has to keep meaning "never measured" rather
+// than "arrived in under a millisecond".
+func elapsedMs(start time.Time) int64 {
+	if ms := time.Since(start).Milliseconds(); ms > 1 {
+		return ms
+	}
+	return 1
+}
+
+// stamp copies the turn's telemetry onto a step about to be emitted.
+func (t turnTelemetry) stamp(s Step) Step {
+	s.Reasoning = t.reasoning
+	s.FirstChunkMs = t.firstChunkMs
+	s.LatencyMs = t.latencyMs
+	return s
+}
+
+// addAssistantTurn appends the turn's assistant message, keeping the model's
+// thinking beside it when the provider surfaced any. Open-weights models hold
+// no server-side thinking state: drop it from the history and the model
+// re-derives its whole plan on the next tool step.
+func addAssistantTurn(h *message.History, content string, toolCalls []message.ToolCall, reasoning string, details json.RawMessage) {
+	if reasoning == "" && len(details) == 0 {
+		h.AddAssistantMessage(content, toolCalls)
+		return
+	}
+	h.AddAssistantMessageWithReasoning(content, toolCalls, reasoning, details)
 }
 
 // RunResult contains the outcome of an agent run.
@@ -548,7 +607,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (r
 		stats.add(llmResp, providerLabel(l.provider), l.model)
 
 		// Add assistant message
-		history.AddAssistantMessage(llmResp.Content, llmResp.ToolCalls)
+		addAssistantTurn(history, llmResp.Content, llmResp.ToolCalls, llmResp.Reasoning, llmResp.ReasoningDetails)
 		lastAttemptedOutput = llmResp.Content
 
 		// Usage / cost limits — evaluated after every LLM call so the
@@ -1530,9 +1589,19 @@ func (it *Iterator) run(ctx context.Context) {
 		}
 
 		// Try streaming first
+		callStart := time.Now()
 		if stream, err := it.loop.provider.ChatStream(ctx, req); err == nil {
 			var fullContent string
+			// Thinking for this call: accumulated from the reasoning deltas,
+			// then superseded by the final chunk's own copy when the provider
+			// hands back the whole think there.
+			var fullReasoning string
+			var reasoningDetails json.RawMessage
+			var tel turnTelemetry
 			for chunk := range stream {
+				if tel.firstChunkMs == 0 {
+					tel.firstChunkMs = elapsedMs(callStart)
+				}
 				if chunk.Error != nil {
 					// Bill the partial usage BEFORE surfacing the error: the
 					// upstream already charged for the tokens it consumed,
@@ -1570,6 +1639,7 @@ func (it *Iterator) run(ctx context.Context) {
 				// UI can render them differently (collapsed / faint /
 				// behind a toggle). They are NOT folded into fullContent.
 				if !chunk.IsFinal && chunk.Reasoning != "" {
+					fullReasoning += chunk.Reasoning
 					it.steps <- Step{
 						Type:         StepReasoningChunk,
 						Content:      chunk.Reasoning,
@@ -1591,11 +1661,21 @@ func (it *Iterator) run(ctx context.Context) {
 					if final == "" {
 						final = fullContent
 					}
+					// Same contract as Content: when the provider assembles
+					// the whole think on the final chunk it supersedes what
+					// the deltas accumulated (a provider that emits no
+					// reasoning deltas at all has only this copy).
+					if chunk.Reasoning != "" {
+						fullReasoning = chunk.Reasoning
+					}
+					reasoningDetails = chunk.ReasoningDetails
+					tel.reasoning = fullReasoning
+					tel.latencyMs = elapsedMs(callStart)
 					// Per-turn provenance signal for trace consumers.
 					// Emitted before the per-tool / per-final steps so
 					// the web UI can stamp the turn's (provider, model,
 					// fallback, key) before rendering any nested children.
-					it.steps <- Step{
+					it.steps <- tel.stamp(Step{
 						Type:         StepLLMResponse,
 						Turn:         turn,
 						Content:      final,
@@ -1604,22 +1684,22 @@ func (it *Iterator) run(ctx context.Context) {
 						ModelID:      chunk.ModelID,
 						Fallback:     chunk.Fallback,
 						APIKeySuffix: chunk.APIKeySuffix,
-					}
+					})
 					if it.tripUsageLimitIfExceeded(final, turn, chunk.Usage) {
 						return
 					}
 					if len(chunk.ToolCalls) > 0 {
-						history.AddAssistantMessage(final, chunk.ToolCalls)
+						addAssistantTurn(history, final, chunk.ToolCalls, fullReasoning, reasoningDetails)
 						for _, tc := range chunk.ToolCalls {
 							argsJSON, _ := json.Marshal(tc.Arguments)
-							it.steps <- Step{
+							it.steps <- tel.stamp(Step{
 								Type:       StepToolCall,
 								ToolName:   tc.Name,
 								ToolArgs:   string(argsJSON),
 								ToolCallID: tc.ID,
 								Turn:       turn,
 								Usage:      chunk.Usage,
-							}
+							})
 						}
 						// Structured-output short-circuit: final_response
 						// is the framework-injected tool whose `output`
@@ -1645,7 +1725,7 @@ func (it *Iterator) run(ctx context.Context) {
 								okOut, abortOut := it.validateStructuredOrAbort(out, history, &outputRetriesUsed)
 								if abortOut {
 									it.recordFinal(out, turn, "output_validation_exhausted")
-									it.steps <- Step{Type: StepFinalResponse, Content: out, Turn: turn, Usage: chunk.Usage}
+									it.steps <- tel.stamp(Step{Type: StepFinalResponse, Content: out, Turn: turn, Usage: chunk.Usage})
 									return
 								}
 								if !okOut {
@@ -1654,7 +1734,7 @@ func (it *Iterator) run(ctx context.Context) {
 									break
 								}
 								it.recordFinal(out, turn, "completed")
-								it.steps <- Step{Type: StepFinalResponse, Content: out, Turn: turn, Usage: chunk.Usage}
+								it.steps <- tel.stamp(Step{Type: StepFinalResponse, Content: out, Turn: turn, Usage: chunk.Usage})
 								return
 							}
 						}
@@ -1673,7 +1753,7 @@ func (it *Iterator) run(ctx context.Context) {
 						if anyHalted(results) {
 							finalText := pickHaltFinalText(final, results)
 							it.recordFinal(finalText, turn, "halted_by_tool")
-							it.steps <- Step{Type: StepFinalResponse, Content: finalText, Turn: turn, Usage: chunk.Usage}
+							it.steps <- tel.stamp(Step{Type: StepFinalResponse, Content: finalText, Turn: turn, Usage: chunk.Usage})
 							return
 						}
 						_, abort, out := it.loop.validateTurn(ctx, TurnSnapshot{
@@ -1714,7 +1794,7 @@ func (it *Iterator) run(ctx context.Context) {
 							okOut, abortOut := it.validateStructuredOrAbort(final, history, &outputRetriesUsed)
 							if abortOut {
 								it.recordFinal(final, turn, "output_validation_exhausted")
-								it.steps <- Step{Type: StepFinalResponse, Content: final, Turn: turn, Usage: chunk.Usage}
+								it.steps <- tel.stamp(Step{Type: StepFinalResponse, Content: final, Turn: turn, Usage: chunk.Usage})
 								return
 							}
 							if !okOut {
@@ -1722,7 +1802,7 @@ func (it *Iterator) run(ctx context.Context) {
 							}
 						}
 						it.recordFinal(final, turn, "completed")
-						it.steps <- Step{Type: StepFinalResponse, Content: final, Turn: turn, Usage: chunk.Usage}
+						it.steps <- tel.stamp(Step{Type: StepFinalResponse, Content: final, Turn: turn, Usage: chunk.Usage})
 						return
 					}
 					break
@@ -1748,17 +1828,25 @@ func (it *Iterator) run(ctx context.Context) {
 
 			it.recordResponse(llmResp)
 			usagePtr := llmResp.Usage
+			// No streaming means no earlier signal than the response itself,
+			// so time-to-first-chunk and total latency are the same figure.
+			elapsed := elapsedMs(callStart)
+			tel := turnTelemetry{
+				reasoning:    llmResp.Reasoning,
+				firstChunkMs: elapsed,
+				latencyMs:    elapsed,
+			}
 			// Per-turn provenance for the non-streaming fallback path.
 			// Same shape as the streaming branch's emission so trace
 			// consumers see a consistent StepLLMResponse for every turn.
-			it.steps <- Step{
+			it.steps <- tel.stamp(Step{
 				Type:       StepLLMResponse,
 				Turn:       turn,
 				Usage:      &usagePtr,
 				ProviderID: llmResp.ProviderID,
 				ModelID:    llmResp.ModelID,
 				Fallback:   llmResp.Fallback,
-			}
+			})
 
 			if it.tripUsageLimitIfExceeded(llmResp.Content, turn, &usagePtr) {
 				return
@@ -1768,19 +1856,19 @@ func (it *Iterator) run(ctx context.Context) {
 				it.steps <- Step{Type: StepStreamingChunk, Content: llmResp.Content, Turn: turn}
 			}
 
-			history.AddAssistantMessage(llmResp.Content, llmResp.ToolCalls)
+			addAssistantTurn(history, llmResp.Content, llmResp.ToolCalls, llmResp.Reasoning, llmResp.ReasoningDetails)
 
 			if len(llmResp.ToolCalls) > 0 {
 				for _, tc := range llmResp.ToolCalls {
 					argsJSON, _ := json.Marshal(tc.Arguments)
-					it.steps <- Step{
+					it.steps <- tel.stamp(Step{
 						Type:       StepToolCall,
 						ToolName:   tc.Name,
 						ToolArgs:   string(argsJSON),
 						ToolCallID: tc.ID,
 						Turn:       turn,
 						Usage:      &usagePtr,
-					}
+					})
 				}
 				// Structured-output short-circuit (non-streaming fallback path).
 				if it.loop.structuredOutput != nil {
@@ -1801,7 +1889,7 @@ func (it *Iterator) run(ctx context.Context) {
 						okOut, abortOut := it.validateStructuredOrAbort(out, history, &outputRetriesUsed)
 						if abortOut {
 							it.recordFinal(out, turn, "output_validation_exhausted")
-							it.steps <- Step{Type: StepFinalResponse, Content: out, Turn: turn, Usage: &usagePtr}
+							it.steps <- tel.stamp(Step{Type: StepFinalResponse, Content: out, Turn: turn, Usage: &usagePtr})
 							return
 						}
 						if !okOut {
@@ -1809,7 +1897,7 @@ func (it *Iterator) run(ctx context.Context) {
 							continue
 						}
 						it.recordFinal(out, turn, "completed")
-						it.steps <- Step{Type: StepFinalResponse, Content: out, Turn: turn, Usage: &usagePtr}
+						it.steps <- tel.stamp(Step{Type: StepFinalResponse, Content: out, Turn: turn, Usage: &usagePtr})
 						return
 					}
 				}
@@ -1818,7 +1906,7 @@ func (it *Iterator) run(ctx context.Context) {
 				if anyHalted(results) {
 					finalText := pickHaltFinalText(llmResp.Content, results)
 					it.recordFinal(finalText, turn, "halted_by_tool")
-					it.steps <- Step{Type: StepFinalResponse, Content: finalText, Turn: turn, Usage: &usagePtr}
+					it.steps <- tel.stamp(Step{Type: StepFinalResponse, Content: finalText, Turn: turn, Usage: &usagePtr})
 					return
 				}
 				_, abort, out := it.loop.validateTurn(ctx, TurnSnapshot{
@@ -1854,7 +1942,7 @@ func (it *Iterator) run(ctx context.Context) {
 					okOut, abortOut := it.validateStructuredOrAbort(llmResp.Content, history, &outputRetriesUsed)
 					if abortOut {
 						it.recordFinal(llmResp.Content, turn, "output_validation_exhausted")
-						it.steps <- Step{Type: StepFinalResponse, Content: llmResp.Content, Turn: turn, Usage: &usagePtr}
+						it.steps <- tel.stamp(Step{Type: StepFinalResponse, Content: llmResp.Content, Turn: turn, Usage: &usagePtr})
 						return
 					}
 					if !okOut {
@@ -1862,7 +1950,7 @@ func (it *Iterator) run(ctx context.Context) {
 					}
 				}
 				it.recordFinal(llmResp.Content, turn, "completed")
-				it.steps <- Step{Type: StepFinalResponse, Content: llmResp.Content, Turn: turn, Usage: &usagePtr}
+				it.steps <- tel.stamp(Step{Type: StepFinalResponse, Content: llmResp.Content, Turn: turn, Usage: &usagePtr})
 				return
 			}
 		}

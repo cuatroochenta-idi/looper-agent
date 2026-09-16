@@ -47,6 +47,9 @@ type stepPayload struct {
 	Model            string `json:"model,omitempty"`
 	Fallback         bool   `json:"fallback,omitempty"`
 	APIKeySuffix     string `json:"api_key_suffix,omitempty"`
+	Reasoning        string `json:"Reasoning,omitempty"`
+	FirstChunkMs     int64  `json:"first_chunk_ms,omitempty"`
+	LatencyMs        int64  `json:"latency_ms,omitempty"`
 }
 
 // providerStatsPayload mirrors looper.ProviderStatsData.
@@ -219,6 +222,9 @@ func (s *Server) IngestEvent(ev TraceEvent) error {
 			Model:            d.Model,
 			Fallback:         d.Fallback,
 			APIKeySuffix:     d.APIKeySuffix,
+			Reasoning:        d.Reasoning,
+			FirstChunkMs:     d.FirstChunkMs,
+			LatencyMs:        d.LatencyMs,
 		}
 		if step.Kind == StepKindReasoning {
 			persistWorthy = false

@@ -99,6 +99,12 @@ type TurnNode struct {
 	// multi-source streaming. Empty when every chunk in the turn shares
 	// the turn-level provenance (the common case).
 	ChunkAttribution []ChunkSource
+
+	// FirstChunkMs / LatencyMs are the turn's LLM call timings, lifted from
+	// whichever usage-bearing step carried them. Zero on traces recorded
+	// before the loop measured them.
+	FirstChunkMs int64
+	LatencyMs    int64
 }
 
 // ChunkSource counts how many streaming_chunk steps in a turn came from
@@ -241,6 +247,19 @@ func BuildTimeline(steps []TimelineStep) RunTimeline {
 		}
 		if s.Fallback {
 			t.Fallback = true
+		}
+		// The turn's thinking and timings ride on the usage-bearing steps,
+		// which is what a reloaded run still has once the chunk steps are
+		// stripped. First non-empty wins — every such step in a turn
+		// carries the same figures.
+		if t.Reasoning == "" && s.Reasoning != "" {
+			t.Reasoning = s.Reasoning
+		}
+		if t.FirstChunkMs == 0 && s.FirstChunkMs > 0 {
+			t.FirstChunkMs = s.FirstChunkMs
+		}
+		if t.LatencyMs == 0 && s.LatencyMs > 0 {
+			t.LatencyMs = s.LatencyMs
 		}
 		switch s.Kind {
 		case StepKindLLMCall:

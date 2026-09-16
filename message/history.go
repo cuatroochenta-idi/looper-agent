@@ -75,6 +75,15 @@ func (h *History) AddAssistantMessage(content string, toolCalls []ToolCall) {
 	h.appendLocked(NewAssistantMessage(content, toolCalls))
 }
 
+// AddAssistantMessageWithReasoning appends an assistant message that also
+// carries the turn's thinking, so a provider configured to echo reasoning
+// can replay it on the next request.
+func (h *History) AddAssistantMessageWithReasoning(content string, toolCalls []ToolCall, reasoning string, details json.RawMessage) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.messages = append(h.messages, NewAssistantMessageWithReasoning(content, toolCalls, reasoning, details))
+}
+
 // AddToolResult appends a tool result message.
 func (h *History) AddToolResult(callID, name, content string, isError bool) {
 	h.mu.Lock()
