@@ -204,12 +204,12 @@ func TestCostModelFamilyPrefixLookup(t *testing.T) {
 			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000},
 		},
 		{
-			// gpt-5.4 has no entry of its own, so it exercises the `.`
-			// family boundary. (gpt-5.5 does have its own entry now — it
-			// prices well above gpt-5, so inheriting would undercharge.)
-			name:      "openai gpt-5.4 inherits gpt-5 pricing across dot boundary",
+			// gpt-5.1 lists gpt-5's rates and has no entry of its own, so it
+			// exercises the `.` family boundary. (gpt-5.2 onward price above
+			// gpt-5 and carry their own entries.)
+			name:      "openai gpt-5.1 inherits gpt-5 pricing across dot boundary",
 			provider:  "openai",
-			model:     "gpt-5.4",
+			model:     "gpt-5.1",
 			familyKey: "gpt-5",
 			usage:     Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
 		},
@@ -314,7 +314,7 @@ func almostEqual(a, b, epsilon float64) bool {
 }
 
 // gpt-5.6 tiers must price at their own rates, not fall back to the gpt-5
-// family entry (4× cheaper for Sol), and dated ids must inherit their tier.
+// family entry (3× cheaper for Sol), and dated ids must inherit their tier.
 func TestCostModelGPT56Tiers(t *testing.T) {
 	cm := NewCostModel()
 
@@ -322,12 +322,13 @@ func TestCostModelGPT56Tiers(t *testing.T) {
 		model     string
 		wantTotal float64
 	}{
-		// 1M in + 1M out at the official July-2026 rates.
-		{"gpt-5.6-sol", 35.00},
-		{"gpt-5.6-terra", 14.00},
-		{"gpt-5.6-luna", 1.40},
+		// 1M in + 1M out. A 1M-token prompt is past the 272K threshold, so
+		// these are the long-context rates (2x input, 1.5x output).
+		{"gpt-5.6-sol", 38.00},
+		{"gpt-5.6-terra", 22.00},
+		{"gpt-5.6-luna", 2.20},
 		// Dated suffix inherits its tier via longest-family-prefix.
-		{"gpt-5.6-sol-2026-07-09", 35.00},
+		{"gpt-5.6-sol-2026-07-09", 38.00},
 	}
 	usage := Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000}
 	for _, tt := range tests {
@@ -340,10 +341,11 @@ func TestCostModelGPT56Tiers(t *testing.T) {
 		}
 	}
 
-	// Cache reads keep the 90% discount; cache writes fall back to 1.25×
-	// input, matching the official $6.25/M for Sol.
-	cw := cm.Calculate("openai", "gpt-5.6-sol", Usage{InputTokens: 1_000_000, CachedTokens: 500_000, CacheWriteTokens: 500_000})
-	want := 0.50*0.5 + 6.25*0.5 // cached half + cache-write half
+	// Cache reads keep the 90% discount and cache writes bill at 1.25×
+	// input: the official $0.40 / $5.00 for Sol. 200K prompt stays below
+	// the long-context threshold.
+	cw := cm.Calculate("openai", "gpt-5.6-sol", Usage{InputTokens: 200_000, CachedTokens: 100_000, CacheWriteTokens: 100_000})
+	want := 0.40*0.1 + 5.00*0.1 // cached half + cache-write half
 	if diff := cw.TotalUSD - want; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("sol cache buckets: TotalUSD = %v, want %v", cw.TotalUSD, want)
 	}
@@ -356,8 +358,9 @@ func TestCostModelGPT56Tiers(t *testing.T) {
 // base flash tiers used to swallow their "-lite" variants.
 func TestCostModelPrefixShadowing(t *testing.T) {
 	cm := NewCostModel()
-	// 1M input, 0 output — isolates the input rate.
-	usage := Usage{InputTokens: 1_000_000}
+	// 100K input, 0 output — isolates the input rate, below every
+	// long-context threshold.
+	usage := Usage{InputTokens: 100_000}
 
 	tests := []struct {
 		provider string
@@ -373,21 +376,32 @@ func TestCostModelPrefixShadowing(t *testing.T) {
 		{"anthropic", "claude-opus-4", 15.00},
 		// Claude 5 family must not fall through to a 4.x key.
 		{"anthropic", "claude-opus-5", 5.00},
-		{"anthropic", "claude-sonnet-5", 3.00},
+		{"anthropic", "claude-sonnet-5", 2.00},
 		{"anthropic", "claude-fable-5", 10.00},
 		{"anthropic", "claude-mythos-5", 10.00},
-		// "gpt-5" is a prefix of "gpt-5.5" and the 5.6 tiers.
+		// "gpt-5" is a prefix of every gpt-5.x minor and of "gpt-5-pro".
 		{"openai", "gpt-5", 1.25},
+		{"openai", "gpt-5-pro", 15.00},
+		{"openai", "gpt-5.2", 1.75},
+		{"openai", "gpt-5.4", 2.50},
+		{"openai", "gpt-5.4-mini", 0.75},
+		{"openai", "gpt-5.4-pro", 30.00},
 		{"openai", "gpt-5.5", 5.00},
-		{"openai", "gpt-5.6-sol", 5.00},
+		{"openai", "gpt-5.5-pro", 30.00},
+		{"openai", "gpt-5.6-sol", 4.00},
 		{"openai", "gpt-5.6-terra", 2.00},
 		{"openai", "gpt-5.6-luna", 0.20},
+		// "o1" / "o3" are prefixes of their 10x dearer "-pro" variants, and
+		// "gpt-4o" of its launch snapshot.
+		{"openai", "o1-pro", 150.00},
+		{"openai", "o3-pro", 20.00},
+		{"openai", "gpt-4o-2024-05-13", 5.00},
 		// Each flash tier is a prefix of its own "-lite" variant.
 		{"google", "gemini-2.5-flash", 0.30},
 		{"google", "gemini-2.5-flash-lite", 0.10},
 		{"google", "gemini-3.5-flash", 1.50},
 		{"google", "gemini-3.5-flash-lite", 0.30},
-		{"google", "gemini-3.6-flash", 1.50},
+		{"google", "gemini-3.6-flash", 0.75},
 		{"google", "gemini-3.1-pro", 2.00},
 		{"google", "gemini-3.1-flash-lite", 0.25},
 	}
@@ -395,9 +409,9 @@ func TestCostModelPrefixShadowing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.provider+"/"+tt.model, func(t *testing.T) {
 			got := cm.Calculate(tt.provider, tt.model, usage)
-			if !almostEqual(got.TotalUSD, tt.wantIn, 0.0001) {
+			if rate := got.TotalUSD * 10; !almostEqual(rate, tt.wantIn, 0.0001) {
 				t.Errorf("input rate for %s = %.6f, want %.6f",
-					tt.model, got.TotalUSD, tt.wantIn)
+					tt.model, rate, tt.wantIn)
 			}
 		})
 	}
@@ -422,7 +436,7 @@ func TestCostModelPlatformModelIDs(t *testing.T) {
 		{"anthropic.claude-opus-4-8", 5.00},      // Bedrock
 		{"us.anthropic.claude-opus-4-8", 5.00},   // Bedrock inference profile
 		{"eu.anthropic.claude-opus-4-8", 5.00},   // ...other geographies
-		{"apac.anthropic.claude-sonnet-5", 3.00}, //
+		{"apac.anthropic.claude-sonnet-5", 2.00}, //
 		{"claude-opus-4-5@20251101", 5.00},       // Vertex — NOT the 15.00 4.0 rate
 		{"claude-opus-4-1@20250805", 15.00},      // Vertex, genuinely the old rate
 		{"us.anthropic.claude-opus-4-1", 15.00},  // prefix must not change the tier
