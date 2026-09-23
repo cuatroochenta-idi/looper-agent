@@ -170,3 +170,74 @@ func TestRunStats_ErrorChunkPartialUsage(t *testing.T) {
 		t.Errorf("entry.Usage = %+v, want partial usage from the errored call", u)
 	}
 }
+
+// TestRunStats_TierPickedPerCall locks the rule that makes tiered pricing
+// usable: the long-context tier is chosen from each call's own prompt, not
+// from the run's summed usage. Two 200K-token calls stay at the base rate
+// even though together they cross the 272K threshold; only the call whose
+// own prompt crosses it pays the tier rate.
+func TestRunStats_TierPickedPerCall(t *testing.T) {
+	cm := telemetry.NewCostModel()
+	cm.UpdateCost("openai", "tiered-x", telemetry.CostConfig{
+		InputCostPer1MTokens:  1.00,
+		OutputCostPer1MTokens: 10.00,
+		Tiers: []telemetry.PriceTier{{
+			AboveInputTokens:      272_000,
+			InputCostPer1MTokens:  2.00,
+			OutputCostPer1MTokens: 15.00,
+		}},
+	})
+	costFn := func(p, m string, u provider.Usage) CostBreakdown {
+		return providerCostFor(cm, p, m, u)
+	}
+	add := func(stats *runStats, in, out int) {
+		stats.add(&provider.LLMResponse{
+			ProviderID: "openai",
+			ModelID:    "tiered-x",
+			Usage:      provider.Usage{InputTokens: in, OutputTokens: out},
+		}, "openai", "tiered-x")
+	}
+
+	stats := newRunStats()
+	add(stats, 200_000, 1_000)
+	add(stats, 200_000, 1_000)
+	got := stats.snapshot(costFn)[0].Cost.TotalUSD
+	// Per call: 0.2M × 1.00 + 0.001M × 10.00 = 0.21. Pricing the 400K sum
+	// in the tier would give 0.4 × 2.00 + 0.002 × 15.00 = 0.83.
+	if want := 0.42; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("two short calls: TotalUSD = %v, want %v (base rate per call)", got, want)
+	}
+
+	add(stats, 300_000, 1_000)
+	got = stats.snapshot(costFn)[0].Cost.TotalUSD
+	// The third call alone crosses 272K: 0.3 × 2.00 + 0.001 × 15.00 = 0.615.
+	// The first two are not re-priced by the second snapshot.
+	if want := 0.42 + 0.615; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("after a long call: TotalUSD = %v, want %v", got, want)
+	}
+}
+
+// The Run loop snapshots after every LLM call to check MaxUSD; repeated
+// snapshots must not price a call twice.
+func TestRunStats_RepeatedSnapshotsDoNotDoubleCount(t *testing.T) {
+	cm := telemetry.NewCostModel()
+	costFn := func(p, m string, u provider.Usage) CostBreakdown {
+		return providerCostFor(cm, p, m, u)
+	}
+	stats := newRunStats()
+	stats.add(&provider.LLMResponse{
+		ProviderID: "openai",
+		ModelID:    "gpt-4o",
+		Usage:      provider.Usage{InputTokens: 1_000_000},
+	}, "openai", "gpt-4o")
+
+	for range 3 {
+		out := stats.snapshot(costFn)
+		if got := out[0].Cost.TotalUSD; math.Abs(got-2.50) > 1e-9 {
+			t.Fatalf("TotalUSD = %v, want 2.50", got)
+		}
+		if got := out[0].Cost.InputTokens; got != 1_000_000 {
+			t.Fatalf("Cost.InputTokens = %d, want 1000000", got)
+		}
+	}
+}

@@ -32,7 +32,7 @@ type Config struct {
 
 	// ModelCosts feeds telemetry.CostModel.WithCustomCosts. Keys are
 	// "provider/model" or a bare model id; values reuse telemetry.CostConfig's
-	// json tags (input, output, cached, cache_write).
+	// json tags (input, output, cached, cache_write, tiers).
 	ModelCosts map[string]telemetry.CostConfig `json:"model_costs,omitempty"`
 }
 

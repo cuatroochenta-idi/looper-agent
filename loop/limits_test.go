@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/cuatroochenta-idi/looper-agent/provider"
+	"github.com/cuatroochenta-idi/looper-agent/telemetry"
 )
 
 // limitProvider drives a long conversation with deterministic per-call
@@ -158,5 +159,43 @@ func TestUsageLimit_ZeroMeansUnlimited(t *testing.T) {
 	}
 	if res.Status != "completed" {
 		t.Errorf("unlimited budget: expected completed, got %q", res.Status)
+	}
+}
+
+// The streaming path's MaxUSD check must price each call at its own tier.
+// Two 200K-token calls cost 0.42 at the base rate; priced as one 400K
+// prompt in the long-context tier they would cost 0.83 and trip a 0.50 cap
+// the run has not reached.
+func TestUsageLimit_MaxUSD_StreamingPricesPerCall(t *testing.T) {
+	cm := telemetry.NewCostModel()
+	cm.UpdateCost("openai", "tiered-x", telemetry.CostConfig{
+		InputCostPer1MTokens:  1.00,
+		OutputCostPer1MTokens: 10.00,
+		Tiers: []telemetry.PriceTier{{
+			AboveInputTokens:      272_000,
+			InputCostPer1MTokens:  2.00,
+			OutputCostPer1MTokens: 15.00,
+		}},
+	})
+	lp := NewAgentLoop(&mockProvider{model: "tiered-x"}, func(_ context.Context) string { return "p" }, nil,
+		WithLoopCostModel(cm),
+		WithLoopUsageLimits(UsageLimits{MaxUSD: 0.50}),
+	)
+	it := &Iterator{steps: make(chan Step, 4), loop: lp, stats: newRunStats()}
+	call := &provider.LLMResponse{
+		ProviderID: "openai",
+		ModelID:    "tiered-x",
+		Usage:      provider.Usage{InputTokens: 200_000, OutputTokens: 1_000},
+	}
+
+	it.recordResponse(call)
+	it.recordResponse(call)
+	if it.tripUsageLimitIfExceeded("partial", 1, &call.Usage) {
+		t.Fatal("0.42 spent against a 0.50 cap: the limit must not trip")
+	}
+
+	it.recordResponse(call)
+	if !it.tripUsageLimitIfExceeded("partial", 2, &call.Usage) {
+		t.Fatal("0.63 spent against a 0.50 cap: the limit must trip")
 	}
 }

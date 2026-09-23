@@ -999,9 +999,10 @@ func (l *AgentLoop) resolveRunConfig(opts []RunOption) *runConfig {
 //
 // This is the legacy single-bucket path: it bills the entire token total
 // against the loop's static (provider, model) and is only correct in the
-// single-provider case. Multi-provider chains must use finalizeRun
-// instead — it iterates the runStats accumulator and bills each
-// (provider, model) entry at its own rate before summing.
+// single-provider case, and only for flat-priced models (a tiered model's
+// rate depends on each call's prompt size, not the run's total).
+// Multi-provider chains must use finalizeRun instead — it iterates the
+// runStats accumulator and bills each call at its own rate before summing.
 func (l *AgentLoop) calculateCost(u provider.Usage, totalInput, totalOutput, totalCached, totalCacheWrite int) CostBreakdown {
 	tokens := CostBreakdown{
 		InputTokens:      totalInput,

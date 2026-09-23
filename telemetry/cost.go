@@ -20,11 +20,73 @@ type CostConfig struct {
 	CachedCostPer1MTokens float64 `json:"cached"`
 
 	// CacheWriteCostPer1MTokens is the USD cost per 1 million cache-write
-	// input tokens (Anthropic bills cache_creation at 1.25× input). When
-	// zero and cache-write tokens are present, Calculate falls back to
-	// 1.25× InputCostPer1MTokens — the only provider that reports the
-	// bucket bills it exactly there.
+	// input tokens (Anthropic and OpenAI gpt-5.6+ bill writes at 1.25×
+	// input). When zero and cache-write tokens are present, Calculate falls
+	// back to 1.25× InputCostPer1MTokens.
+	//
+	// Anthropic prices 1-hour-TTL writes at 2× input, but Usage has a single
+	// write bucket and the anthropic provider only ever marks breakpoints
+	// with the default 5-minute TTL, so this is the 5-minute rate. A caller
+	// sending 1-hour breakpoints through its own provider should register
+	// the 2× rate here.
 	CacheWriteCostPer1MTokens float64 `json:"cache_write"`
+
+	// Tiers raise the rates for calls with a large prompt (OpenAI above
+	// 272K input tokens, Gemini Pro above 200K). Calculate picks the tier
+	// per call from that call's own prompt size; nil means flat pricing.
+	Tiers []PriceTier `json:"tiers,omitempty"`
+}
+
+// PriceTier is the set of rates that bills a call whose prompt is larger
+// than AboveInputTokens. Providers bill the WHOLE call at the tier rates
+// once the prompt crosses the threshold, not just the tokens past it.
+type PriceTier struct {
+	// AboveInputTokens is the threshold: the tier applies when the call's
+	// Usage.InputTokens — the whole prompt, cached reads and cache writes
+	// included — is strictly greater than it.
+	AboveInputTokens int `json:"above_input_tokens"`
+
+	// The rates below replace the base CostConfig rates for the call. A
+	// zero rate keeps the base one, so set every rate the provider raises.
+	InputCostPer1MTokens      float64 `json:"input"`
+	OutputCostPer1MTokens     float64 `json:"output"`
+	CachedCostPer1MTokens     float64 `json:"cached"`
+	CacheWriteCostPer1MTokens float64 `json:"cache_write"`
+}
+
+// ratesFor returns the rates that bill one call whose prompt is
+// inputTokens long: the base rates, overlaid with the highest tier the
+// prompt exceeds.
+func (c CostConfig) ratesFor(inputTokens int) CostConfig {
+	var tier *PriceTier
+	for i := range c.Tiers {
+		t := &c.Tiers[i]
+		if inputTokens <= t.AboveInputTokens {
+			continue
+		}
+		if tier == nil || t.AboveInputTokens > tier.AboveInputTokens {
+			tier = t
+		}
+	}
+	if tier == nil {
+		return c
+	}
+
+	r := c
+	r.Tiers = nil
+	if tier.InputCostPer1MTokens != 0 {
+		r.InputCostPer1MTokens = tier.InputCostPer1MTokens
+	}
+	if tier.OutputCostPer1MTokens != 0 {
+		r.OutputCostPer1MTokens = tier.OutputCostPer1MTokens
+	}
+	if tier.CachedCostPer1MTokens != 0 {
+		r.CachedCostPer1MTokens = tier.CachedCostPer1MTokens
+	}
+	if tier.CacheWriteCostPer1MTokens != 0 {
+		r.CacheWriteCostPer1MTokens = tier.CacheWriteCostPer1MTokens
+	}
+	return r
 }
 
 // CostBreakdown provides a detailed cost report.
@@ -108,10 +170,16 @@ func (cm *CostModel) WithCustomCosts(costs map[string]CostConfig) {
 //     overrides (WithCustomCost / WithCustomCosts) first, then the
 //     built-in matrix — and Estimated is set.
 //  3. Neither available → all-zero breakdown plus a one-time warning.
+//
+// usage must describe ONE call: a tiered model's rates depend on that
+// call's prompt size, so pricing a run's summed usage would put every call
+// of a long run in the long-context tier. Price each call, then add the
+// breakdowns.
 func (cm *CostModel) Calculate(provider, model string, usage Usage) CostBreakdown {
 	cm.mu.RLock()
 	config, matched := cm.lookup(provider, model)
 	cm.mu.RUnlock()
+	config = config.ratesFor(usage.InputTokens)
 
 	// Only warn about a missing pricing entry when there's no API-reported
 	// cost to fall back on — an upstream cost makes the tables irrelevant.

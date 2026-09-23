@@ -55,6 +55,14 @@ type providerStatEntry struct {
 	calls         int
 	fallbackCalls int
 	usage         provider.Usage
+
+	// unpriced holds each call's usage until snapshot prices it. Calls are
+	// priced one by one because a tiered model's rates depend on the
+	// call's own prompt size; pricing the summed usage would bill every
+	// call of a long run at the long-context rate.
+	unpriced []provider.Usage
+	// cost is the sum of the per-call breakdowns priced so far.
+	cost CostBreakdown
 }
 
 func newRunStats() *runStats {
@@ -107,12 +115,16 @@ func (r *runStats) addCall(provID, modelID string, u provider.Usage, fallback bo
 	e.usage.CachedTokens += u.CachedTokens
 	e.usage.CacheWriteTokens += u.CacheWriteTokens
 	e.usage.Cost += u.Cost
+	e.unpriced = append(e.unpriced, u)
 }
 
 // snapshot materialises the accumulator into the public ProviderStats
-// slice. costFn (typically AgentLoop.calculateProviderCost) computes the
-// USD breakdown per entry — passing it in keeps this file free of
-// AgentLoop dependencies and easy to test in isolation.
+// slice. costFn (typically providerCostFor) prices ONE call; each entry's
+// Cost is the sum over its calls. Calls priced by an earlier snapshot are
+// not priced again, so costFn must be the same function on every call —
+// the loop's budget check snapshots after every LLM call. Passing it in
+// keeps this file free of AgentLoop dependencies and easy to test in
+// isolation.
 func (r *runStats) snapshot(costFn func(provider, model string, u provider.Usage) CostBreakdown) []ProviderStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -132,7 +144,11 @@ func (r *runStats) snapshot(costFn func(provider, model string, u provider.Usage
 			},
 		}
 		if costFn != nil {
-			stats.Cost = costFn(k.provider, k.model, e.usage)
+			for _, u := range e.unpriced {
+				e.cost = addCost(e.cost, costFn(k.provider, k.model, u))
+			}
+			e.unpriced = e.unpriced[:0]
+			stats.Cost = e.cost
 		}
 		out = append(out, stats)
 	}
@@ -152,7 +168,25 @@ func (r *runStats) fallbackCount() int {
 	return n
 }
 
-// providerCostFor is the per-entry cost helper used by snapshot. Lives
+// addCost sums two breakdowns field by field; the sum is Estimated when
+// either side is.
+func addCost(a, b CostBreakdown) CostBreakdown {
+	return CostBreakdown{
+		TotalUSD:         a.TotalUSD + b.TotalUSD,
+		InputUSD:         a.InputUSD + b.InputUSD,
+		OutputUSD:        a.OutputUSD + b.OutputUSD,
+		CachedUSD:        a.CachedUSD + b.CachedUSD,
+		CacheWriteUSD:    a.CacheWriteUSD + b.CacheWriteUSD,
+		SavingsUSD:       a.SavingsUSD + b.SavingsUSD,
+		InputTokens:      a.InputTokens + b.InputTokens,
+		OutputTokens:     a.OutputTokens + b.OutputTokens,
+		CachedTokens:     a.CachedTokens + b.CachedTokens,
+		CacheWriteTokens: a.CacheWriteTokens + b.CacheWriteTokens,
+		Estimated:        a.Estimated || b.Estimated,
+	}
+}
+
+// providerCostFor is the per-call cost helper used by snapshot. Lives
 // here (alongside the accumulator) rather than on AgentLoop so the
 // stats package stays self-contained and the loop's calculateCost stays
 // the single point that talks to telemetry.CostModel.

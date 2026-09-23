@@ -66,6 +66,25 @@ func TestLoadFileValues(t *testing.T) {
 	}
 }
 
+// Long-context tiers ride the same model_costs entry; the strict decoder
+// must accept them.
+func TestLoadModelCostTiers(t *testing.T) {
+	dir := t.TempDir()
+	p := writeConfig(t, dir, "looper.json", `{
+		"model_costs": {"openai/gpt-x": {"input": 2, "output": 10,
+			"tiers": [{"above_input_tokens": 272000, "input": 4, "output": 15}]}}
+	}`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	tiers := cfg.ModelCosts["openai/gpt-x"].Tiers
+	if len(tiers) != 1 || tiers[0].AboveInputTokens != 272_000 ||
+		tiers[0].InputCostPer1MTokens != 4 || tiers[0].OutputCostPer1MTokens != 15 {
+		t.Errorf("unexpected tiers: %+v", tiers)
+	}
+}
+
 func TestEnvOverridesFile(t *testing.T) {
 	dir := t.TempDir()
 	p := writeConfig(t, dir, "looper.json", `{"port": 8080, "db": "file-db", "store_dir": "file-dir"}`)
