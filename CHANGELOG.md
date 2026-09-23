@@ -4,6 +4,87 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.9.2] — 2026-09-23
+
+Pricing and model-currency release: gpt-6, Claude Opus 5.5 and Claude
+Fable 5.1, and long-context price tiers. Every rate was re-read from the
+vendors' official pricing pages on 2026-09-23; the URLs sit next to each
+provider's block in `telemetry/modelcosts.go`.
+
+### Added
+
+- **Long-context price tiers.** `telemetry.CostConfig.Tiers`
+  (`[]PriceTier{AboveInputTokens, input, output, cached, cache_write}`)
+  bills a call at higher rates once its prompt — `Usage.InputTokens`,
+  cached reads and writes included — is strictly larger than the
+  threshold, as OpenAI does above 272K tokens and Gemini Pro above 200K.
+  The highest tier the prompt exceeds wins; a zero tier rate keeps the
+  base one. JSON stays backward compatible (`"tiers"` is optional in
+  `looper.json` `model_costs`) and the zero value is flat pricing.
+- **gpt-6 pricing**: `gpt-6-astra` 10.00 / 50.00, `gpt-6-sol` 2.00 /
+  10.00, `gpt-6-luna` 0.10 / 0.50, each with 0.1x cache reads, 1.25x
+  cache writes and its published >272K row. gpt-5.6, gpt-5.5, gpt-5.4
+  and gpt-5.4-pro get their long-context tiers too.
+- **Claude Opus 5.5 / Fable 5.1 / Mythos 5.1**: `claude-opus-5-5` 4.00 /
+  20.00 with 0.20 cache reads (0.05x), `claude-fable-5-1` and
+  `claude-mythos-5-1` 10.00 / 50.00 with 0.25 cache reads (0.025x).
+  Before, the prefix lookup billed them as Opus 5 and Fable 5.
+- `gemini-3.7-flash`, `gemini-3.8-flash`, and the >200K rates of
+  `gemini-2.5-pro` and `gemini-3.1-pro`.
+- **gpt-6 routing.** Behind a base URL (the chat/completions path) gpt-6
+  ids get `max_completion_tokens`, as gpt-5.x does. Against
+  api.openai.com `APIAuto` already sends them to `/v1/responses`.
+- **OpenAI cache writes are reported.** `Usage.CacheWriteTokens` is
+  filled from `cache_write_tokens` on both API surfaces, so gpt-5.6+ cache
+  writes bill at their 1.25x rate instead of as plain input. Pre-5.6
+  models have no write premium and their table rows say so.
+
+### Changed
+
+- **The loop prices every call on its own.** `RunResult.Cost`,
+  `RunResult.Providers[].Cost` and the `MaxUSD` checks (streaming path
+  included) used to hand the cost model each `(provider, model)` bucket's
+  summed usage; with tiers that would have billed every call of a long
+  run at the long-context rate. Flat-priced totals are unchanged.
+- **Opus 5.5 and Fable / Mythos 5.1 fall back to `tool_choice: auto`**
+  when the request forces a tool (`ToolChoiceRequired` /
+  `ToolChoiceSpecific`): those models return 400 for `"any"` / `"tool"`.
+  Other models, unknown ids included, still receive the forced choice.
+- Repriced from the official pages: **`claude-sonnet-5` 2.00 / 10.00**
+  (the launch price is now its standard price), **`gpt-5.6-sol` 4.00 /
+  20.00** (promotional "at least through November 21, 2026"),
+  **`gemini-3.6-flash` 0.75 / 3.75** (through 2026-12-31, then 1.50 /
+  7.50), `gemini-3-flash` 0.50 / 3.00 (listed again as
+  `gemini-3-flash-preview`).
+
+### Fixed
+
+- Siblings the family-prefix lookup was mispricing now have their own
+  rows: `gpt-5.4` (2.50 / 15.00, was billed as gpt-5), `gpt-5.4-mini`,
+  `gpt-5.4-nano`, `gpt-5.4-pro` (30.00 / 180.00, was 1.25 / 10.00),
+  `gpt-5.5-pro`, `gpt-5.2`, `gpt-5.2-pro`, `gpt-5.3-codex`, `gpt-5-pro`,
+  `o1-pro`, `o3-pro` and `gpt-4o-2024-05-13`. `claude-3-5-haiku-*`
+  matched no key at all and reported $0.
+- The README's `model_costs` example used per-token values; rates are per
+  1M tokens.
+
+### Notes — pricing
+
+- Anthropic has no long-context premium on current models (4.6+ bill the
+  1M window flat). `cache_write` is the 5-minute-TTL rate: the provider
+  only sets the default TTL and `Usage` has one write bucket. Register the
+  2x input rate yourself if you send 1-hour breakpoints.
+- The long-context cached-input rate of gpt-5.6 Terra / Luna, gpt-5.5 and
+  gpt-5.4 applies the pages' "2x input" rule to cached input too, as the
+  rows OpenAI does publish (gpt-6, gpt-5.6 Sol) do. `gpt-5.5-pro` stays
+  flat: the page labels it "<272K context length" without a long-context
+  rate.
+- Still UNVERIFIED (not on the vendors' pages, kept so callers keep a
+  non-zero estimate): `o1-mini`, `gemini-3-pro`, `claude-3.5-sonnet`,
+  `claude-3-opus`. `o1` and `o3-mini` are listed again and verified.
+- Not modelled: batch / flex, fast mode, regional or data-residency
+  uplifts, Gemini audio input and cache storage.
+
 ## [v1.9.1] — 2026-09-15
 
 Open-weights models were being made to think the same thought over and over.

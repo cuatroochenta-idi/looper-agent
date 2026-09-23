@@ -906,8 +906,14 @@ to pricing-table estimation per `(provider, model)`. A custom cost dictionary
 (`looper.json` `model_costs`, or `telemetry.CostModel.WithCustomCosts`) overrides
 the built-in matrix during that estimation. Tokens bucket into `input`,
 `output`, `cached` (cache reads) and `cache_write` (cache writes), each priced
-separately. When any contributing call was estimated, `cost_estimated` is true
-and the panel renders the figure with a `~` (Estimated marker).
+separately, in USD per 1M tokens. Models that charge more for long prompts
+carry `tiers` (OpenAI above 272K prompt tokens, Gemini Pro above 200K); the
+tier is picked per call from that call's prompt size, cached tokens
+included, so a long run of short calls never pays the long-context rate.
+When any contributing call was estimated, `cost_estimated` is true
+and the panel renders the figure with a `~` (Estimated marker). The built-in
+rates were last read from the vendors' pricing pages on 2026-09-23
+(`telemetry/modelcosts.go` cites each source).
 
 For step-level traces and OTel:
 
@@ -1162,8 +1168,10 @@ via `--config` / `$LOOPER_CONFIG`):
     "session_secret": "…",          // set to persist sessions across restarts
     "ingest_token": "…"             // bearer token external agents must send
   },
-  "model_costs": {                  // override the built-in price matrix
-    "anthropic/claude-sonnet-4": { "input": 3e-6, "output": 15e-6, "cached": 0.3e-6, "cache_write": 3.75e-6 }
+  "model_costs": {                  // override the built-in price matrix (USD per 1M tokens)
+    "anthropic/claude-sonnet-4": { "input": 3, "output": 15, "cached": 0.3, "cache_write": 3.75 },
+    "openai/my-finetune": { "input": 2, "output": 10, "cached": 0.2,
+      "tiers": [{ "above_input_tokens": 272000, "input": 4, "output": 15, "cached": 0.4 }] }
   }
 }
 ```
@@ -1173,9 +1181,9 @@ Every field has a `LOOPER_*` env override (`LOOPER_PORT`, `LOOPER_DB`,
 `LOOPER_SESSION_SECRET`, `LOOPER_INGEST_TOKEN`, `LOOPER_CONFIG`). Precedence is
 highest-wins: **flags > env > file > defaults** (port `9090`, store_dir
 `.looper`). Unknown fields in `looper.json` are a hard error. `model_costs` keys
-are `"provider/model"` or a bare model id; values are per-token USD config
-(`input`, `output`, `cached`, `cache_write`) — the same thing
-`telemetry.CostModel.WithCustomCosts` does programmatically.
+are `"provider/model"` or a bare model id; values are USD per 1M tokens
+(`input`, `output`, `cached`, `cache_write`, plus optional `tiers`) — the same
+thing `telemetry.CostModel.WithCustomCosts` does programmatically.
 
 #### Auth for production
 

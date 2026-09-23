@@ -141,13 +141,28 @@ SSE / htmx dashboard at `http://localhost:9090`.
 ## 5. Cost model
 
 Default pricing for the three first-party providers lives in
-`telemetry/modelcosts.go`. Override for a custom model:
+`telemetry/modelcosts.go`, in USD per 1M tokens, with the source page and
+the date each rate was read. Override for a custom model:
 
 ```go
 looper.WithCustomModelCost("ollama/llama3", telemetry.CostConfig{
-    InputPerMTokens:  0,    // self-hosted
-    OutputPerMTokens: 0,
+    InputCostPer1MTokens:  0, // self-hosted
+    OutputCostPer1MTokens: 0,
 })
+```
+
+A model that bills long prompts at a higher rate takes `Tiers`. The tier is
+chosen per call from that call's prompt (`Usage.InputTokens`, cached tokens
+included) and bills the whole call:
+
+```go
+telemetry.CostConfig{
+    InputCostPer1MTokens: 2, OutputCostPer1MTokens: 10, CachedCostPer1MTokens: 0.2,
+    Tiers: []telemetry.PriceTier{{
+        AboveInputTokens:     272_000,
+        InputCostPer1MTokens: 4, OutputCostPer1MTokens: 15, CachedCostPer1MTokens: 0.4,
+    }},
+}
 ```
 
 For pure-token tracking without USD figures, just don't set
