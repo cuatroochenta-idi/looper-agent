@@ -29,6 +29,8 @@ const (
 //     Specific(name) → {"type":"function","function":{"name":name}}.
 //   - Anthropic: Auto → {"type":"auto"}, Required → {"type":"any"},
 //     None → {"type":"none"}, Specific(name) → {"type":"tool","name":name}.
+//     Claude Opus 5.5 and Fable / Mythos 5.1 reject forced tool use, so on
+//     those models Required and Specific fall back to auto.
 //   - Gemini: Auto → FunctionCallingConfig{Mode:"AUTO"},
 //     Required → Mode:"ANY", None → Mode:"NONE",
 //     Specific(name) → Mode:"ANY" + AllowedFunctionNames:[name].

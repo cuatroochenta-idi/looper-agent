@@ -12,6 +12,9 @@ import "strings"
 //     by output_config.effort.
 //   - Fable 5 / Mythos always think and reject any explicit thinking config,
 //     including {"type":"disabled"} — the parameter must be omitted entirely.
+//   - Opus 5.5 also always thinks: {"type":"disabled"} and budget_tokens are
+//     a 400, but {"type":"adaptive"} is accepted as equivalent to omitting it,
+//     so the adaptive path (which never sends "disabled") serves it.
 type thinkingMode int
 
 const (
@@ -35,6 +38,11 @@ type modelCaps struct {
 
 	// effort reports whether output_config.effort is accepted.
 	effort bool
+
+	// rejectsForcedTools reports that tool_choice "any" / "tool" is a 400.
+	// Opus 5.5 and Fable / Mythos 5.1 always think, and a forced tool call
+	// would skip the thinking.
+	rejectsForcedTools bool
 }
 
 // capsTable maps a model-id prefix to its capabilities. Lookup takes the
@@ -42,11 +50,15 @@ type modelCaps struct {
 // for "claude-opus-4-7-20260301" — the same resolution rule the cost
 // registry uses, and for the same reason: the 4.x line is not uniform.
 var capsTable = map[string]modelCaps{
-	// Thinking always on, no sampling params.
-	"claude-fable-5": {thinking: thinkingAlwaysOn, sampling: false, effort: true},
-	"claude-mythos":  {thinking: thinkingAlwaysOn, sampling: false, effort: true},
+	// Thinking always on, no sampling params. The 5.1 releases also refuse
+	// forced tool use.
+	"claude-fable-5-1":  {thinking: thinkingAlwaysOn, sampling: false, effort: true, rejectsForcedTools: true},
+	"claude-mythos-5-1": {thinking: thinkingAlwaysOn, sampling: false, effort: true, rejectsForcedTools: true},
+	"claude-fable-5":    {thinking: thinkingAlwaysOn, sampling: false, effort: true},
+	"claude-mythos":     {thinking: thinkingAlwaysOn, sampling: false, effort: true},
 
 	// Adaptive-only, no sampling params.
+	"claude-opus-5-5": {thinking: thinkingAdaptive, sampling: false, effort: true, rejectsForcedTools: true},
 	"claude-opus-5":   {thinking: thinkingAdaptive, sampling: false, effort: true},
 	"claude-sonnet-5": {thinking: thinkingAdaptive, sampling: false, effort: true},
 	"claude-opus-4-8": {thinking: thinkingAdaptive, sampling: false, effort: true},

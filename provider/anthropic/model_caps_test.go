@@ -16,11 +16,15 @@ func TestLookupCaps(t *testing.T) {
 		wantEffort   bool
 	}{
 		// Thinking always on, no sampling.
+		{"claude-fable-5-1", thinkingAlwaysOn, false, true},
+		{"claude-mythos-5-1", thinkingAlwaysOn, false, true},
 		{"claude-fable-5", thinkingAlwaysOn, false, true},
 		{"claude-mythos-5", thinkingAlwaysOn, false, true},
 		{"claude-mythos-preview", thinkingAlwaysOn, false, true},
 
-		// Adaptive-only, no sampling.
+		// Adaptive-only, no sampling. Opus 5.5 always thinks but accepts
+		// {"type":"adaptive"}, which the adaptive path is the only one to send.
+		{"claude-opus-5-5", thinkingAdaptive, false, true},
 		{"claude-opus-5", thinkingAdaptive, false, true},
 		{"claude-sonnet-5", thinkingAdaptive, false, true},
 		{"claude-opus-4-8", thinkingAdaptive, false, true},
@@ -41,6 +45,8 @@ func TestLookupCaps(t *testing.T) {
 
 		// Bedrock and Vertex id shapes normalise to the same caps.
 		{"anthropic.claude-opus-5", thinkingAdaptive, false, true},
+		{"anthropic.claude-opus-5-5", thinkingAdaptive, false, true},
+		{"us.anthropic.claude-fable-5-1", thinkingAlwaysOn, false, true},
 		{"claude-opus-4-5@20251101", thinkingLegacyBudget, true, true},
 
 		// Unknown ids follow the current contract, not the legacy one.
@@ -292,5 +298,75 @@ func TestLookupCapsInferenceProfileIDs(t *testing.T) {
 				t.Errorf("sampling = %v, want %v", got.sampling, tt.wantSampling)
 			}
 		})
+	}
+}
+
+// Opus 5.5 and Fable / Mythos 5.1 return 400 for tool_choice "any" and
+// "tool" ("tool_choice: type "tool" and "any" are not supported for this
+// model"). The provider falls back to auto on exactly those models; every
+// other model keeps the forced choice the caller asked for.
+func TestApplyModelParamsForcedToolChoice(t *testing.T) {
+	forced := map[string]func() anthropic.ToolChoiceUnionParam{
+		"any": func() anthropic.ToolChoiceUnionParam { return *buildToolChoiceParams(provider.ToolChoiceRequired()) },
+		"tool": func() anthropic.ToolChoiceUnionParam {
+			return *buildToolChoiceParams(provider.ToolChoiceSpecific("get_weather"))
+		},
+	}
+	p := NewProvider("k")
+
+	for _, model := range []string{"claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1", "us.anthropic.claude-opus-5-5"} {
+		for kind, choice := range forced {
+			t.Run(model+"/"+kind+"_falls_back_to_auto", func(t *testing.T) {
+				params := anthropic.MessageNewParams{Model: anthropic.Model(model), ToolChoice: choice()}
+				p.applyModelParams(&params, nil)
+
+				if params.ToolChoice.OfAuto == nil || params.ToolChoice.OfAny != nil || params.ToolChoice.OfTool != nil {
+					t.Errorf("ToolChoice = %+v, want auto", params.ToolChoice)
+				}
+			})
+		}
+		t.Run(model+"/none_is_kept", func(t *testing.T) {
+			params := anthropic.MessageNewParams{Model: anthropic.Model(model), ToolChoice: *buildToolChoiceParams(provider.ToolChoiceNone())}
+			p.applyModelParams(&params, nil)
+
+			if params.ToolChoice.OfNone == nil {
+				t.Errorf("ToolChoice = %+v, want none (supported on %s)", params.ToolChoice, model)
+			}
+		})
+	}
+
+	for _, model := range []string{"claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-haiku-4-5"} {
+		for kind, choice := range forced {
+			t.Run(model+"/"+kind+"_is_kept", func(t *testing.T) {
+				params := anthropic.MessageNewParams{Model: anthropic.Model(model), ToolChoice: choice()}
+				p.applyModelParams(&params, nil)
+
+				if params.ToolChoice.OfAuto != nil {
+					t.Errorf("forced tool_choice %q must reach %s unchanged", kind, model)
+				}
+			})
+		}
+	}
+}
+
+// Opus 5.5 rejects {"type":"disabled"} and budget_tokens; the provider must
+// send adaptive (with effort) when reasoning is requested and nothing at all
+// otherwise.
+func TestApplyModelParamsOpus55Thinking(t *testing.T) {
+	p := NewProvider("k")
+
+	params := anthropic.MessageNewParams{Model: "claude-opus-5-5"}
+	p.applyModelParams(&params, &provider.ReasoningConfig{Effort: provider.ReasoningEffortHigh})
+	if params.Thinking.OfAdaptive == nil || params.Thinking.OfEnabled != nil || params.Thinking.OfDisabled != nil {
+		t.Errorf("Thinking = %+v, want adaptive only", params.Thinking)
+	}
+	if params.OutputConfig.Effort != anthropic.OutputConfigEffortHigh {
+		t.Errorf("effort = %q, want high", params.OutputConfig.Effort)
+	}
+
+	params = anthropic.MessageNewParams{Model: "claude-opus-5-5"}
+	p.applyModelParams(&params, &provider.ReasoningConfig{Effort: provider.ReasoningEffortNone})
+	if params.Thinking.OfAdaptive != nil || params.Thinking.OfEnabled != nil || params.Thinking.OfDisabled != nil {
+		t.Errorf("Thinking = %+v, want the field omitted", params.Thinking)
 	}
 }

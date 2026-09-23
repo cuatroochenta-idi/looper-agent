@@ -388,6 +388,13 @@ func (p *Provider) applyModelParams(params *anthropic.MessageNewParams, rc *prov
 		}
 	}
 
+	// Forced tool use ("any" / "tool") is a 400 on Opus 5.5 and Fable /
+	// Mythos 5.1. Fall back to auto: the model still sees every tool and
+	// picks one when the prompt calls for it.
+	if caps.rejectsForcedTools && (params.ToolChoice.OfAny != nil || params.ToolChoice.OfTool != nil) {
+		params.ToolChoice = anthropic.ToolChoiceUnionParam{OfAuto: &anthropic.ToolChoiceAutoParam{}}
+	}
+
 	switch caps.thinking {
 	case thinkingAlwaysOn:
 		// Thinking is always on and not configurable; any explicit
