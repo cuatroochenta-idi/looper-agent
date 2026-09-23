@@ -9,7 +9,7 @@ import (
 
 // applyMaxTokens writes the per-request output cap to either MaxTokens
 // (legacy chat models) or MaxCompletionTokens (o-series reasoning
-// models + gpt-5 family) on params, based on the model name. OpenAI
+// models + gpt-5 and gpt-6 families) on params, based on the model name. OpenAI
 // deprecated max_tokens for the newer families: requests that still
 // carry it are rejected with a 400.
 //
@@ -28,7 +28,8 @@ func applyMaxTokens(params *openai.ChatCompletionNewParams, model string, n int)
 // usesCompletionTokensParam reports whether model belongs to a family
 // that rejects max_tokens and requires max_completion_tokens. Match is
 // prefix-based and case-insensitive so versioned ids — o1-preview-2024-09-12,
-// gpt-5.4-mini, gpt-5-nano-2025-08-07, etc. — all resolve correctly.
+// gpt-5.4-mini, gpt-5-nano-2025-08-07, gpt-6-luna, etc. — all resolve
+// correctly.
 //
 // Anything not matched falls back to the legacy max_tokens path; if a
 // future model gets added to the "completion tokens" family before this
@@ -40,7 +41,8 @@ func usesCompletionTokensParam(model string) bool {
 	case strings.HasPrefix(m, "o1"),
 		strings.HasPrefix(m, "o3"),
 		strings.HasPrefix(m, "o4"),
-		strings.HasPrefix(m, "gpt-5"):
+		strings.HasPrefix(m, "gpt-5"),
+		strings.HasPrefix(m, "gpt-6"):
 		return true
 	}
 	return false

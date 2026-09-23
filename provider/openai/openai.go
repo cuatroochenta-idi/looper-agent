@@ -627,7 +627,8 @@ func buildFinalChunk(content string, tcm map[int]*toolCallAccumulator, chunk *op
 			// when stream_options.include_usage is set. Omitting it here
 			// was the silent cost-tracking bug: cache hits read as zero,
 			// so InputUSD was billed at full rate and SavingsUSD stayed 0.
-			CachedTokens: int(chunk.Usage.PromptTokensDetails.CachedTokens),
+			CachedTokens:     int(chunk.Usage.PromptTokensDetails.CachedTokens),
+			CacheWriteTokens: int(chunk.Usage.PromptTokensDetails.CacheWriteTokens),
 			// OpenRouter-style gateways report the actual USD in usage.cost,
 			// which the SDK schema doesn't model — read it from the raw JSON.
 			Cost: extractCostField(chunk.Usage.RawJSON()),
@@ -835,9 +836,10 @@ func (t *Translator) FromNative(response any) (*provider.LLMResponse, error) {
 
 	result := &provider.LLMResponse{
 		Usage: provider.Usage{
-			InputTokens:  int(chat.Usage.PromptTokens),
-			OutputTokens: int(chat.Usage.CompletionTokens),
-			CachedTokens: int(chat.Usage.PromptTokensDetails.CachedTokens),
+			InputTokens:      int(chat.Usage.PromptTokens),
+			OutputTokens:     int(chat.Usage.CompletionTokens),
+			CachedTokens:     int(chat.Usage.PromptTokensDetails.CachedTokens),
+			CacheWriteTokens: int(chat.Usage.PromptTokensDetails.CacheWriteTokens),
 			// OpenRouter-style gateways report the actual USD in usage.cost,
 			// which the SDK schema doesn't model — read it from the raw JSON.
 			Cost: extractCostField(chat.Usage.RawJSON()),

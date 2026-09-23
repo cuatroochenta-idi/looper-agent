@@ -450,6 +450,10 @@ func TestAPIFor(t *testing.T) {
 		{"auto_effort_with_baseurl_stays_chat", []Option{WithBaseURL("http://localhost:1"), WithReasoningEffort(provider.ReasoningEffortMedium)}, APIChatCompletions},
 		{"explicit_responses_wins", []Option{WithAPI(APIResponses)}, APIResponses},
 		{"explicit_chat_wins", []Option{WithAPI(APIChatCompletions), WithReasoningEffort(provider.ReasoningEffortHigh)}, APIChatCompletions},
+		// gpt-6 refuses function tools on chat/completions unless effort is
+		// "none" (Astra always), so it must take the same Responses route.
+		{"gpt6_luna_no_baseurl_goes_responses", []Option{WithModel("gpt-6-luna")}, APIResponses},
+		{"gpt6_astra_no_baseurl_goes_responses", []Option{WithModel("gpt-6-astra"), WithReasoningEffort(provider.ReasoningEffortHigh)}, APIResponses},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

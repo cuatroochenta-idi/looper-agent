@@ -8,7 +8,7 @@ import (
 
 // TestUsesCompletionTokensParam pins the routing table that decides
 // whether a model takes max_tokens (legacy) or max_completion_tokens
-// (o-series reasoning models + gpt-5 family). Matching is prefix-based
+// (o-series reasoning models + gpt-5 / gpt-6 families). Matching is prefix-based
 // and case-insensitive so versioned ids (gpt-5.4-mini,
 // o1-preview-2024-09-12) all fall on the right side.
 func TestUsesCompletionTokensParam(t *testing.T) {
@@ -24,6 +24,11 @@ func TestUsesCompletionTokensParam(t *testing.T) {
 		{"gpt-5", true},
 		{"gpt-5.4-mini", true},
 		{"GPT-5-NANO", true},
+		// gpt-6 reasons like gpt-5.x and must never be sent max_tokens.
+		{"gpt-6-luna", true},
+		{"gpt-6-sol", true},
+		{"gpt-6-astra", true},
+		{"GPT-6-LUNA", true},
 
 		// Legacy max_tokens family.
 		{"gpt-4o", false},
@@ -51,6 +56,7 @@ func TestApplyMaxTokens_RoutesByModel(t *testing.T) {
 	}{
 		{"gpt-4o-mini", `"max_tokens":120`},
 		{"gpt-5.4-mini", `"max_completion_tokens":120`},
+		{"gpt-6-luna", `"max_completion_tokens":120`},
 		{"o1-mini", `"max_completion_tokens":120`},
 		{"o4-mini", `"max_completion_tokens":120`},
 	} {

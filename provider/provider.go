@@ -226,8 +226,9 @@ type LLMResponse struct {
 //     them; OpenAI and Gemini already report inclusive totals.
 //   - CachedTokens is the cache-READ subset of InputTokens.
 //   - CacheWriteTokens is the cache-WRITE subset of InputTokens (Anthropic
-//     cache_creation_input_tokens, billed at a premium). Zero on providers
-//     whose cache writes are free/implicit (OpenAI, Gemini implicit cache).
+//     cache_creation_input_tokens, OpenAI cache_write_tokens — both billed
+//     at a premium, OpenAI from gpt-5.6 on). Zero on providers that don't
+//     report writes (Gemini).
 //   - OutputTokens includes reasoning/thinking tokens when the provider
 //     bills them as output but reports them separately (Gemini's
 //     thoughts_token_count).

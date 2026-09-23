@@ -501,13 +501,15 @@ func walkResponsesOutput(resp *responses.Response, includeReasoning bool) respon
 }
 
 // usageFromResponses maps responses usage to the universal, inclusive
-// normalization: input_tokens already includes cached reads; cost comes
-// from the raw JSON for OpenRouter-style gateways (absent on OpenAI).
+// normalization: input_tokens already includes cached reads and cache
+// writes (gpt-5.6 and later bill writes at 1.25x input); cost comes from
+// the raw JSON for OpenRouter-style gateways (absent on OpenAI).
 func usageFromResponses(u responses.ResponseUsage) provider.Usage {
 	return provider.Usage{
-		InputTokens:  int(u.InputTokens),
-		OutputTokens: int(u.OutputTokens),
-		CachedTokens: int(u.InputTokensDetails.CachedTokens),
-		Cost:         extractCostField(u.RawJSON()),
+		InputTokens:      int(u.InputTokens),
+		OutputTokens:     int(u.OutputTokens),
+		CachedTokens:     int(u.InputTokensDetails.CachedTokens),
+		CacheWriteTokens: int(u.InputTokensDetails.CacheWriteTokens),
+		Cost:             extractCostField(u.RawJSON()),
 	}
 }
