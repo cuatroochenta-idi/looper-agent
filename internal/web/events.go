@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -81,15 +82,19 @@ func (s *Server) publishChatsChanged() {
 }
 
 // publishRunUpdated emits a run_updated delta to the given topics. The self /
-// subtree costs are recomputed from the full store so the row reflects any
+// subtree costs are recomputed from the run's subtree so the row reflects any
 // subagent that contributed since the last event.
 func (s *Server) publishRunUpdated(id string, topics ...Topic) {
-	run := s.store.Find(id)
+	tree, err := s.reader.Subtree(context.Background(), id)
+	if err != nil {
+		log.Printf("warn: run_updated %s: %v", id, err)
+		return
+	}
+	run := byIDIndex(tree)[id]
 	if run == nil {
 		return
 	}
-	all := s.store.All()
-	rollup := buildRollups(all, childrenByParent(all))[id]
+	rollup := buildRollups(tree, childrenByParent(tree))[id]
 	s.hub.Publish(Event{Name: "run_updated", Data: runUpdatedPayload{
 		ID:          run.ID,
 		ParentRunID: run.ParentRunID,

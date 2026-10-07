@@ -3,9 +3,11 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,12 +16,16 @@ import (
 
 // api.go implements the JSON REST surface documented in
 // docs/tasks/2026-07-10_api_contract.md. Every shape here is snake_case and
-// USD fields are rounded to 8 decimals. The in-memory Store is the single
-// source of truth; rollups (self vs subtree cost) are recomputed per request
-// from the full store so a subagent outside a time window still contributes to
-// its parent's subtree total.
+// USD fields are rounded to 8 decimals. Reads go through the server's
+// RunReader; rollups (self vs subtree cost) are recomputed per request from the
+// matched runs plus their descendants, so a subagent outside a time window
+// still contributes to its parent's subtree total.
 
 const previewLen = 200
+
+// maxListRuns caps the run and chat lists to the newest runs so a wide time
+// window never loads the whole history.
+const maxListRuns = 2000
 
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
@@ -181,57 +187,31 @@ type ChatMessageView struct {
 // subagents never double-count. total_usd == sum of every run's self cost
 // (equivalently, sum of top-level subtree costs); counts cover top-level runs.
 func (s *Server) apiSummary(w http.ResponseWriter, r *http.Request) {
-	all := s.filterSince(s.store.All(), r)
-	inStore := idSet(all)
-
-	var resp SummaryResponse
-	var turnSum int
-	for _, run := range all {
-		resp.TotalUSD += run.TotalUSD
-		resp.TotalTokens += run.Tokens
-		if run.CostEstimated {
-			resp.CostEstimated = true
-		}
-		if !isTopLevel(run, inStore) {
-			continue
-		}
-		resp.TotalRuns++
-		turnSum += run.Turns
-		switch run.Status {
-		case RunRunning:
-			resp.Running++
-		case RunCompleted:
-			resp.Completed++
-		case RunError:
-			resp.Errored++
-		case RunUnknown:
-			resp.Unknown++
-		}
+	resp, err := s.reader.Summary(r.Context(), sinceOf(r))
+	if err != nil {
+		writeReadError(w, err)
+		return
 	}
-	if resp.TotalRuns > 0 {
-		resp.AvgTurns = float64(turnSum) / float64(resp.TotalRuns)
-	}
-	resp.TotalUSD = round8(resp.TotalUSD)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// apiRuns returns the FLAT run list (subagents included). since/status/q filter.
+// apiRuns returns the FLAT run list (subagents included). since/status/q filter;
+// limit caps it to the newest runs.
 func (s *Server) apiRuns(w http.ResponseWriter, r *http.Request) {
-	all := s.store.All()
-	rollups := buildRollups(all, childrenByParent(all))
+	set, err := s.reader.Runs(r.Context(), RunFilter{
+		Since:  sinceOf(r),
+		Status: r.URL.Query().Get("status"),
+		Query:  r.URL.Query().Get("q"),
+		Limit:  listLimitOf(r),
+	})
+	if err != nil {
+		writeReadError(w, err)
+		return
+	}
+	rollups := buildRollups(set.All, childrenByParent(set.All))
 
-	status := r.URL.Query().Get("status")
-	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-
-	items := make([]RunListItem, 0, len(all))
-	for _, run := range s.filterSince(all, r) {
-		if status != "" && string(run.Status) != status {
-			continue
-		}
-		if q != "" && !strings.Contains(strings.ToLower(run.Input), q) &&
-			!strings.Contains(strings.ToLower(run.ID), q) {
-			continue
-		}
+	items := make([]RunListItem, 0, len(set.Matched))
+	for _, run := range set.Matched {
 		items = append(items, runListItem(run, rollups[run.ID]))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": items})
@@ -240,88 +220,50 @@ func (s *Server) apiRuns(w http.ResponseWriter, r *http.Request) {
 // apiRunDetail returns a single run's expanded timeline.
 func (s *Server) apiRunDetail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	all := s.store.All()
-	var run *RunRecord
-	for _, x := range all {
-		if x.ID == id {
-			run = x
-			break
-		}
+	run, err := s.reader.Run(r.Context(), id)
+	if err != nil {
+		writeReadError(w, err)
+		return
 	}
 	if run == nil {
 		writeJSONError(w, http.StatusNotFound, "run not found")
 		return
 	}
-	childIndex := childrenByParent(all)
-	rollups := buildRollups(all, childIndex)
+	tree, err := s.reader.Subtree(r.Context(), id)
+	if err != nil {
+		writeReadError(w, err)
+		return
+	}
+	childIndex := childrenByParent(tree)
+	rollups := buildRollups(tree, childIndex)
 	writeJSON(w, http.StatusOK, s.runDetail(run, childIndex, rollups))
 }
 
-// apiCosts aggregates SELF costs by (provider, model) over the whole store.
+// apiCosts aggregates SELF costs by (provider, model).
 func (s *Server) apiCosts(w http.ResponseWriter, r *http.Request) {
-	all := s.filterSince(s.store.All(), r)
-
-	type key struct{ p, m string }
-	idx := map[key]int{}
-	var rows []ModelCost
-	var total float64
-	var estimated bool
-	for _, run := range all {
-		total += run.TotalUSD
-		if run.CostEstimated {
-			estimated = true
-		}
-		for _, p := range run.Providers {
-			k := key{p.Provider, p.Model}
-			i, ok := idx[k]
-			if !ok {
-				i = len(rows)
-				idx[k] = i
-				rows = append(rows, ModelCost{Provider: p.Provider, Model: p.Model})
-			}
-			row := &rows[i]
-			row.Calls += p.Calls
-			row.InputTokens += p.InputTokens
-			row.OutputTokens += p.OutputTokens
-			row.CachedTokens += p.CachedTokens
-			row.CacheWriteTokens += p.CacheWriteTokens
-			row.USD += p.TotalUSD
-			if p.Estimated {
-				row.Estimated = true
-			}
-		}
+	resp, err := s.reader.Costs(r.Context(), sinceOf(r))
+	if err != nil {
+		writeReadError(w, err)
+		return
 	}
-	for i := range rows {
-		rows[i].USD = round8(rows[i].USD)
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].USD != rows[j].USD {
-			return rows[i].USD > rows[j].USD
-		}
-		if rows[i].Provider != rows[j].Provider {
-			return rows[i].Provider < rows[j].Provider
-		}
-		return rows[i].Model < rows[j].Model
-	})
-	if rows == nil {
-		rows = []ModelCost{}
-	}
-	writeJSON(w, http.StatusOK, CostsResponse{
-		TotalUSD: round8(total), CostEstimated: estimated, ByModel: rows,
-	})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // apiChats returns the conversation list.
 func (s *Server) apiChats(w http.ResponseWriter, r *http.Request) {
-	all := s.store.All()
-	byID := byIDIndex(all)
-	inStore := idSet(all)
-	rollups := buildRollups(all, childrenByParent(all))
+	set, err := s.reader.Runs(r.Context(), RunFilter{Since: sinceOf(r), Limit: listLimitOf(r)})
+	if err != nil {
+		writeReadError(w, err)
+		return
+	}
+	byID := byIDIndex(set.All)
+	inStore := idSet(set.All)
+	rollups := buildRollups(set.All, childrenByParent(set.All))
 
 	groups := map[string]*ChatSummary{}
 	roots := map[string]*RunRecord{} // key -> earliest run, for title
 	var order []string
-	for _, run := range s.filterSince(all, r) {
+	for _, run := range set.Matched {
 		k := convKeyOf(run, byID)
 		c, ok := groups[k]
 		if !ok {
@@ -371,15 +313,19 @@ func (s *Server) apiChats(w http.ResponseWriter, r *http.Request) {
 // apiChatDetail returns one conversation's summary + message thread.
 func (s *Server) apiChatDetail(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	all := s.store.All()
+	all, err := s.reader.Conversation(r.Context(), key)
+	if err != nil {
+		writeReadError(w, err)
+		return
+	}
 	byID := byIDIndex(all)
 	inStore := idSet(all)
 	rollups := buildRollups(all, childrenByParent(all))
 
 	summary := ChatSummary{Key: key}
 	var root *RunRecord
-	var msgs []ChatMessageView
-	for _, run := range s.filterSince(all, r) {
+	var emitting []string
+	for _, run := range runsSince(all, sinceOf(r)) {
 		if convKeyOf(run, byID) != key {
 			continue
 		}
@@ -399,7 +345,7 @@ func (s *Server) apiChatDetail(w http.ResponseWriter, r *http.Request) {
 			root = run
 		}
 		if emitsMessages(run, inStore) {
-			msgs = append(msgs, messagesForRun(run, rollups[run.ID])...)
+			emitting = append(emitting, run.ID)
 			summary.TotalUSD += rollups[run.ID].TotalUSD()
 			if rollups[run.ID].Estimated {
 				summary.CostEstimated = true
@@ -409,6 +355,15 @@ func (s *Server) apiChatDetail(w http.ResponseWriter, r *http.Request) {
 	if root == nil {
 		writeJSONError(w, http.StatusNotFound, "chat not found")
 		return
+	}
+	full, err := s.reader.Messages(r.Context(), emitting)
+	if err != nil {
+		writeReadError(w, err)
+		return
+	}
+	var msgs []ChatMessageView
+	for _, run := range full {
+		msgs = append(msgs, messagesForRun(run, rollups[run.ID])...)
 	}
 	summary.Title = preview(root.Input)
 	summary.MessageCount = len(msgs)
@@ -445,6 +400,7 @@ func (s *Server) apiRun(w http.ResponseWriter, r *http.Request) {
 		LastSeenAt: now,
 		Steps:      []TimelineStep{{Kind: StepKindUserInput, Content: input, At: now}},
 	})
+	s.writeThrough(id)
 	s.publishRunsChanged()
 	s.publishChatsChanged()
 	s.publishRunUpdated(id, TopicRun(id), TopicSummary)
@@ -454,6 +410,7 @@ func (s *Server) apiRun(w http.ResponseWriter, r *http.Request) {
 			r.Status = RunError
 			r.EndedAt = time.Now()
 		})
+		s.finishRun(id)
 		s.publishRunUpdated(id, TopicRun(id), TopicRuns, TopicSummary)
 		writeJSONError(w, http.StatusInternalServerError, "no runner configured")
 		return
@@ -479,10 +436,10 @@ func (s *Server) executeRun(runID, input string) {
 			r.EndedAt = time.Now()
 			r.Steps = append(r.Steps, TimelineStep{Kind: StepKindError, Err: err.Error(), At: time.Now()})
 		})
+		s.finishRun(runID)
 		s.publishRunUpdated(runID, TopicRun(runID), TopicRuns, TopicSummary)
 		s.publishRunsChanged()
 		s.publishChatsChanged()
-		s.saveRun(runID)
 		return
 	}
 
@@ -505,6 +462,7 @@ func (s *Server) executeRun(runID, input string) {
 		}
 		ts := timelineStepFrom(step)
 		s.store.AppendStep(runID, ts)
+		s.writeThrough(runID)
 		s.publishStepAppended(runID, ts)
 		s.publishRunUpdated(runID, TopicRun(runID), TopicRuns, TopicSummary)
 		s.publishChatsChanged()
@@ -538,18 +496,57 @@ func (s *Server) executeRun(runID, input string) {
 		// long-lived unviewed run doesn't retain streaming deltas in RAM.
 		r.Steps = stripChunkSteps(r.Steps)
 	})
+	s.finishRun(runID)
 	s.publishRunUpdated(runID, TopicRun(runID), TopicRuns, TopicSummary)
 	s.publishRunsChanged()
 	s.publishChatsChanged()
-	s.saveRun(runID)
 }
 
-func (s *Server) saveRun(runID string) {
+// saveRun persists the in-memory run; it reports whether it is now durable.
+func (s *Server) saveRun(runID string) bool {
 	if s.persist == nil {
+		return false
+	}
+	run := s.store.Find(runID)
+	if run == nil {
+		return false
+	}
+	if err := s.persist.SaveRun(run); err != nil {
+		log.Printf("warn: save run %s: %v", runID, err)
+		return false
+	}
+	return true
+}
+
+// writeThrough persists an in-flight run when reads come from the repository,
+// so the panel sees it before it finishes.
+func (s *Server) writeThrough(runID string) {
+	if s.repo != nil {
+		s.saveRun(runID)
+	}
+}
+
+// finishRun persists a finalized run and, when reads come from the
+// repository, drops it from memory.
+func (s *Server) finishRun(runID string) {
+	if s.saveRun(runID) && s.repo != nil {
+		s.store.Remove(runID)
+	}
+}
+
+// liveRun makes sure an in-flight run another replica or a previous process
+// started is in memory before an event mutates it.
+func (s *Server) liveRun(runID string) {
+	if s.repo == nil || s.store.Find(runID) != nil {
 		return
 	}
-	if run := s.store.Find(runID); run != nil {
-		_ = s.persist.SaveRun(run)
+	run, err := s.repo.Run(context.Background(), runID)
+	if err != nil {
+		log.Printf("warn: load run %s: %v", runID, err)
+		return
+	}
+	if run != nil {
+		s.store.Add(run)
 	}
 }
 
@@ -813,21 +810,25 @@ func byIDIndex(all []*RunRecord) map[string]*RunRecord {
 	return m
 }
 
-// filterSince applies the ?since= query param (RFC3339 timestamp or a
-// duration-style window like "15m"/"1h"/"24h") to a run slice, keeping runs
-// started at or after the cutoff. An empty/invalid value keeps everything.
-func (s *Server) filterSince(runs []*RunRecord, r *http.Request) []*RunRecord {
-	cutoff, ok := parseSince(r.URL.Query().Get("since"))
-	if !ok {
-		return runs
+// sinceOf parses the ?since= query param (RFC3339 timestamp or a
+// duration-style window like "15m"/"1h"/"24h"); zero keeps everything.
+func sinceOf(r *http.Request) time.Time {
+	cutoff, _ := parseSince(r.URL.Query().Get("since"))
+	return cutoff
+}
+
+// listLimitOf reads ?limit=, defaulting to and capped at maxListRuns.
+func listLimitOf(r *http.Request) int {
+	n, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || n <= 0 || n > maxListRuns {
+		return maxListRuns
 	}
-	out := make([]*RunRecord, 0, len(runs))
-	for _, run := range runs {
-		if !run.StartedAt.Before(cutoff) {
-			out = append(out, run)
-		}
-	}
-	return out
+	return n
+}
+
+func writeReadError(w http.ResponseWriter, err error) {
+	log.Printf("warn: read runs: %v", err)
+	writeJSONError(w, http.StatusInternalServerError, "failed to read runs")
 }
 
 // parseSince interprets a since value. It accepts a Go duration ("15m", "1h",

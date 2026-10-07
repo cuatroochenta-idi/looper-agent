@@ -5,10 +5,11 @@ import (
 	"time"
 )
 
-// Persistence is the durable backing store for run snapshots. The in-memory
-// Store stays the hot cache serving every read; Persistence is the shared
-// source of truth that lets other panel replicas hydrate runs (including ones
-// still running) and lets a restart recover history. A nil Persistence means
+// Persistence is the durable backing store for run snapshots. Unless it is
+// also a RunRepository, the in-memory Store is hydrated from it and serves
+// every read; it is the shared source of truth that lets other panel replicas
+// hydrate runs (including ones still running) and lets a restart recover
+// history. A nil Persistence means
 // the panel runs in-memory only — runs vanish on exit.
 //
 // Backends live outside this package (e.g. internal/store/postgres) and import

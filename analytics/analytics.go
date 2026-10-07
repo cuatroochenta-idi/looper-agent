@@ -83,8 +83,9 @@ type Panel struct {
 // Panel receives agent trace events in-process.
 var _ looper.TraceSink = (*Panel)(nil)
 
-// New builds a Panel from cfg: opens the selected store connector, hydrates
-// previously persisted runs, and prepares the HTTP surface. Call Close on
+// New builds a Panel from cfg: opens the selected store connector and prepares
+// the HTTP surface. With PostgresDSN every read is served from Postgres on
+// demand; the folder store is hydrated into memory at boot. Call Close on
 // shutdown to release the store.
 func New(ctx context.Context, cfg Config) (*Panel, error) {
 	var persist web.Persistence

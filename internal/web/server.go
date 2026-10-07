@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -43,8 +44,10 @@ type Server struct {
 	store    *Store
 	hub      *Hub
 	runner   RunFunc
-	persist  Persistence // durable backend; nil = in-memory only
-	basePath string      // public mount path of the SPA; "" or "/" = root
+	persist  Persistence   // durable backend; nil = in-memory only
+	repo     RunRepository // set when persist serves reads; store then holds only in-flight runs
+	reader   RunReader
+	basePath string // public mount path of the SPA; "" or "/" = root
 }
 
 // Hub exposes the pub/sub bus so callers can publish or subscribe explicitly.
@@ -88,18 +91,26 @@ func WithBasePath(base string) ServerOption {
 	return func(s *Server) { s.basePath = base }
 }
 
-// NewServer returns a server ready to serve HTTP. If a store directory is
-// configured, it is created (if missing), gitignored, and any pre-existing
-// runs are hydrated into the in-memory store. A background sweeper is also
-// started that finalizes runs stuck in "running" past stuckRunMaxIdle so the
-// panel never displays a permanently "thinking…" bubble when an agent
-// process dies before emitting run_end.
+// NewServer returns a server ready to serve HTTP. With a RunRepository the
+// panel reads straight from it and keeps only in-flight runs in memory; any
+// other Persistence is hydrated into the in-memory store at boot. A background
+// sweeper finalizes runs stuck in "running" past stuckRunMaxIdle so the panel
+// never displays a permanently "thinking…" bubble when an agent process dies
+// before emitting run_end.
 func NewServer(opts ...ServerOption) (*Server, error) {
 	s := &Server{store: NewStore(), hub: NewHub()}
 	for _, opt := range opts {
 		opt(s)
 	}
-	if s.persist != nil {
+	s.reader = memoryReader{store: s.store}
+	if repo, ok := s.persist.(RunRepository); ok {
+		s.repo = repo
+		s.reader = repo
+		// Same boot purge as the hydrated path below, run in the repository.
+		if _, err := repo.SweepStuckRuns(context.Background(), bootSweepMaxIdle, time.Now()); err != nil {
+			log.Printf("warn: boot sweep: %v", err)
+		}
+	} else if s.persist != nil {
 		runs, err := s.persist.LoadRuns()
 		if err != nil {
 			log.Printf("warn: failed to hydrate runs: %v", err)
@@ -178,28 +189,45 @@ func (s *Server) hydrateOnce(since time.Time) {
 	s.publishChatsChanged()
 }
 
-// runStuckRunSweeper periodically calls SweepStuckRuns and publishes typed
-// events for any run that was finalized so the SPA updates in real time.
+// runStuckRunSweeper periodically finalizes stuck runs and publishes typed
+// events for each so the SPA updates in real time.
 func (s *Server) runStuckRunSweeper() {
 	ticker := time.NewTicker(stuckRunSweepInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		finalized := s.store.SweepStuckRuns(stuckRunMaxIdle, time.Now())
-		if len(finalized) == 0 {
-			continue
+		s.sweepOnce(time.Now())
+	}
+}
+
+// sweepOnce runs one stuck-run sweep: in the repository when there is one
+// (dropping any local in-flight copy it finalized), else in the memory store.
+func (s *Server) sweepOnce(now time.Time) {
+	var finalized []string
+	if s.repo != nil {
+		ids, err := s.repo.SweepStuckRuns(context.Background(), stuckRunMaxIdle, now)
+		if err != nil {
+			log.Printf("warn: sweep stuck runs: %v", err)
+			return
 		}
-		// Publish first — waking the UI must not wait on disk I/O.
+		for _, id := range ids {
+			s.store.Remove(id)
+		}
+		finalized = ids
+	} else {
+		finalized = s.store.SweepStuckRuns(stuckRunMaxIdle, now)
+	}
+	if len(finalized) == 0 {
+		return
+	}
+	// Publish first — waking the UI must not wait on disk I/O.
+	for _, id := range finalized {
+		s.publishRunUpdated(id, TopicRun(id), TopicRuns, TopicSummary)
+	}
+	s.publishRunsChanged()
+	s.publishChatsChanged()
+	if s.persist != nil && s.repo == nil {
 		for _, id := range finalized {
-			s.publishRunUpdated(id, TopicRun(id), TopicRuns, TopicSummary)
-		}
-		s.publishRunsChanged()
-		s.publishChatsChanged()
-		if s.persist != nil {
-			for _, id := range finalized {
-				if r := s.store.Find(id); r != nil {
-					_ = s.persist.SaveRun(r)
-				}
-			}
+			s.saveRun(id)
 		}
 	}
 }

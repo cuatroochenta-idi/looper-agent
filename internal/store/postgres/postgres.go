@@ -1,15 +1,17 @@
-// Package postgres is a PostgreSQL-backed web.Persistence: it durably stores
-// agent run snapshots so the panel survives restarts. The full RunRecord lives
-// in a jsonb column (source of truth); scalar columns are query projections.
+// Package postgres is a PostgreSQL-backed web.RunRepository: it durably stores
+// agent run snapshots and serves the panel's reads on demand. The full
+// RunRecord lives in a jsonb column (source of truth); scalar columns are the
+// projections lists and aggregates read without loading it.
 //
 // Import direction: this package imports internal/web for RunRecord and
-// implements web.Persistence. web never imports here, so there is no cycle.
+// implements web.RunRepository. web never imports here, so there is no cycle.
 package postgres
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,8 +24,8 @@ type Postgres struct {
 	pool *pgxpool.Pool
 }
 
-// Postgres implements the persistence seam.
-var _ web.Persistence = (*Postgres)(nil)
+// Postgres serves the panel's reads directly.
+var _ web.RunRepository = (*Postgres)(nil)
 
 // NewPostgres connects to dsn, verifies the connection, and applies any pending
 // embedded migrations before returning. The returned store owns the pool; call
@@ -50,8 +52,9 @@ const upsertSQL = `
 INSERT INTO looper_runs (
 	id, session_id, parent_run_id, parent_tool_call_id, project, status,
 	started_at, ended_at, last_seen_at, total_usd, cost_estimated,
-	tokens, input_tokens, output_tokens, cached_tokens, cache_write_tokens, record
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+	tokens, input_tokens, output_tokens, cached_tokens, cache_write_tokens, record,
+	input, output_preview, turns, fallback_calls, providers
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
 ON CONFLICT (id) DO UPDATE SET
 	session_id          = EXCLUDED.session_id,
 	parent_run_id       = EXCLUDED.parent_run_id,
@@ -68,7 +71,12 @@ ON CONFLICT (id) DO UPDATE SET
 	output_tokens       = EXCLUDED.output_tokens,
 	cached_tokens       = EXCLUDED.cached_tokens,
 	cache_write_tokens  = EXCLUDED.cache_write_tokens,
-	record              = EXCLUDED.record`
+	record              = EXCLUDED.record,
+	input               = EXCLUDED.input,
+	output_preview      = EXCLUDED.output_preview,
+	turns               = EXCLUDED.turns,
+	fallback_calls      = EXCLUDED.fallback_calls,
+	providers           = EXCLUDED.providers`
 
 // SaveRun upserts a finalized run. The persisted record is denoised
 // (streaming/reasoning chunks stripped) via web.PersistableSnapshot so it
@@ -78,6 +86,14 @@ func (p *Postgres) SaveRun(r *web.RunRecord) error {
 	record, err := json.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("postgres: marshal run %s: %w", r.ID, err)
+	}
+	providers := snap.Providers
+	if providers == nil {
+		providers = []web.ProviderStat{}
+	}
+	providersJSON, err := json.Marshal(providers)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal providers %s: %w", r.ID, err)
 	}
 	// timestamptz NULL for a run that has not ended, instead of the zero time.
 	var endedAt *time.Time
@@ -89,6 +105,7 @@ func (p *Postgres) SaveRun(r *web.RunRecord) error {
 		snap.ID, snap.SessionID, snap.ParentRunID, snap.ParentToolCallID, snap.Project, string(snap.Status),
 		snap.StartedAt, endedAt, snap.LastSeenAt, snap.TotalUSD, snap.CostEstimated,
 		snap.Tokens, snap.InputTokens, snap.OutputTokens, snap.CachedTokens, snap.CacheWriteTokens, record,
+		strings.TrimSpace(snap.Input), web.Preview(snap.Output), snap.Turns, snap.FallbackCalls, string(providersJSON),
 	); err != nil {
 		return fmt.Errorf("postgres: save run %s: %w", r.ID, err)
 	}

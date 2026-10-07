@@ -60,6 +60,18 @@ func (s *Store) Update(id string, fn func(*RunRecord)) {
 	}
 }
 
+// Remove drops the run with the given ID, if present.
+func (s *Store) Remove(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, r := range s.runs {
+		if r.ID == id {
+			s.runs = append(s.runs[:i], s.runs[i+1:]...)
+			return
+		}
+	}
+}
+
 // AppendStep adds a step to a run's timeline, under lock.
 func (s *Store) AppendStep(id string, step TimelineStep) {
 	s.mu.Lock()
