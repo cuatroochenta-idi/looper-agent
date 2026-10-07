@@ -1224,7 +1224,9 @@ The embedded panel deliberately ships **without** its own login gate: `GET
 and authorization. External agent processes can still POST traces to the
 mounted `/ingest` route (bearer-guarded when `IngestToken` is set). Store
 connectors are the same as the CLI's: PostgreSQL (embedded migrations applied
-on boot) or a JSON folder store; see example `21_embedded_analytics`.
+on boot) or a JSON folder store; see example `21_embedded_analytics`. With
+PostgreSQL the panel reads runs on demand and keeps only in-flight runs in
+memory; the folder store loads every run into memory at boot.
 
 ### `looper mcp` — MCP debug server over stdio
 

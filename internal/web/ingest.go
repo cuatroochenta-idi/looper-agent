@@ -112,6 +112,7 @@ func (s *Server) IngestEvent(ev TraceEvent) error {
 	if ev.RunID == "" {
 		return fmt.Errorf("run_id required")
 	}
+	s.liveRun(ev.RunID)
 
 	// appended, when non-nil, is the step persisted by a "step" event — emitted
 	// to run:<id> subscribers via step_appended after liveness propagation.
@@ -325,13 +326,13 @@ func (s *Server) IngestEvent(ev TraceEvent) error {
 	// store see live runs with fresh liveness — without this, a sibling pod's
 	// sweeper would finalize a parent as stuck while its sub-agent works.
 	if s.persist != nil && persistWorthy {
-		if r := s.store.Find(ev.RunID); r != nil {
-			_ = s.persist.SaveRun(r)
-		}
+		saved := s.saveRun(ev.RunID)
 		for _, id := range ancestors {
-			if r := s.store.Find(id); r != nil {
-				_ = s.persist.SaveRun(r)
-			}
+			s.saveRun(id)
+		}
+		// With a repository, memory holds only in-flight runs.
+		if r := s.store.Find(ev.RunID); saved && s.repo != nil && r != nil && r.Status != RunRunning {
+			s.store.Remove(ev.RunID)
 		}
 	}
 

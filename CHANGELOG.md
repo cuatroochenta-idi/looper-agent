@@ -4,6 +4,27 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Changed
+
+- **The panel reads runs from Postgres on demand.** With `PostgresDSN`
+  the panel no longer loads every run into memory at boot nor polls the
+  store to sync replicas: summary and costs are SQL aggregates, run and
+  chat lists read projection columns (never the `record` jsonb), and a
+  run's full record loads only for its detail. Memory holds only
+  in-flight runs, dropped once their final snapshot is written; an event
+  for a run another replica started loads it from Postgres. The
+  stuck-run sweep runs in SQL. On a 6,300-run store (1.7 GB of records)
+  the panel goes from 1.9 GB of heap and 9 s to boot to 2 MB and
+  instant boot. The folder store and in-memory mode keep the old path.
+- `/api/state/runs` and `/api/state/chats` take `?limit=` and cap at the
+  newest 2,000 runs.
+- Migration `20261007000001_read_projections` adds the `input`,
+  `output_preview`, `turns`, `fallback_calls` and `providers` columns
+  and backfills them from `record` — a one-off pass over the table on
+  the first boot (12 s on the store above).
+
 ## [v1.9.2] — 2026-09-23
 
 Pricing and model-currency release: gpt-6, Claude Opus 5.5 and Claude
