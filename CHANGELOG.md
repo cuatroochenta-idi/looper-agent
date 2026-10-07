@@ -4,7 +4,7 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [v1.10.0] — 2026-10-07
 
 ### Changed
 
