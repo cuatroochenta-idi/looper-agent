@@ -201,3 +201,35 @@ func TestBeforeToolHook_HooksComposeSequentially(t *testing.T) {
 		t.Errorf("logger should observe the guard's cancellation reason, got %q", seenByLogger)
 	}
 }
+
+func TestTruncatedToolCallIsRejectedWithoutRunning(t *testing.T) {
+	var aCount atomic.Int32
+	a := fastTool("a", &aCount)
+
+	prov := toolThenFinal(
+		[]message.ToolCall{{ID: "1", Name: "a", Arguments: json.RawMessage(`{}`), Truncated: true}},
+		"done",
+	)
+	lp := NewAgentLoop(prov, func(_ context.Context) string { return "p" }, []*tool.Tool{a})
+
+	res, err := lp.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if aCount.Load() != 0 {
+		t.Errorf("a truncated call must not run, got %d executions", aCount.Load())
+	}
+
+	found := false
+	for _, m := range res.History.Messages() {
+		if m.Type == message.MessageTool && m.ToolID == "1" {
+			found = true
+			if !strings.Contains(m.Content, "max_tokens") {
+				t.Errorf("the error must name the output limit, got %q", m.Content)
+			}
+		}
+	}
+	if !found {
+		t.Error("no tool result recorded for the truncated call")
+	}
+}

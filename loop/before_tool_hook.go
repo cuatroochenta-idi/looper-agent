@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/cuatroochenta-idi/looper-agent/message"
@@ -128,6 +129,43 @@ func (hm *HookManager) hasBeforeToolExecutionHooks() bool {
 // hookErr is returned separately so callers can surface it as a step or a
 // run error without losing the partial mutations applied by earlier hooks.
 func (l *AgentLoop) applyBeforeToolExecutionHooks(
+	ctx context.Context,
+	history *message.History,
+	calls []message.ToolCall,
+	nameByID map[string]string,
+) (mutated []message.ToolCall, cancelled []message.ToolResult, hookErr error) {
+	approved, cutOff := rejectTruncatedCalls(history, calls)
+	mutated, cancelled, hookErr = l.runBeforeToolExecutionHooks(ctx, history, approved, nameByID)
+
+	return mutated, append(cutOff, cancelled...), hookErr
+}
+
+// truncatedCallMessage is the result of a call the provider cut off.
+const truncatedCallMessage = "The call to %q was cut off: the response hit the output limit (max_tokens) " +
+	"while writing its arguments, so nothing ran. Send it again with shorter arguments, " +
+	"splitting the work into several smaller calls."
+
+// rejectTruncatedCalls answers every truncated call with an error result in
+// history and returns the calls that can still run.
+func rejectTruncatedCalls(history *message.History, calls []message.ToolCall) ([]message.ToolCall, []message.ToolResult) {
+	var rejected []message.ToolResult
+	kept := make([]message.ToolCall, 0, len(calls))
+	for _, c := range calls {
+		if !c.Truncated {
+			kept = append(kept, c)
+
+			continue
+		}
+
+		content := fmt.Sprintf(truncatedCallMessage, c.Name)
+		history.AddToolResult(c.ID, c.Name, content, true)
+		rejected = append(rejected, message.ToolResult{ToolCallID: c.ID, Content: content, IsError: true})
+	}
+
+	return kept, rejected
+}
+
+func (l *AgentLoop) runBeforeToolExecutionHooks(
 	ctx context.Context,
 	history *message.History,
 	approved []message.ToolCall,

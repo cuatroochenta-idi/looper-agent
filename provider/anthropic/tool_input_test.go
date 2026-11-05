@@ -87,3 +87,80 @@ func TestToNative_TruncatedToolArgumentsSerialise(t *testing.T) {
 		t.Errorf("truncated Arguments does not serialise: %v", err)
 	}
 }
+
+func TestChatStream_ToolCallCutOffByMaxTokensIsMarkedTruncated(t *testing.T) {
+	body := strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-5-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}`,
+		"",
+		"event: content_block_start",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"build_data_model","input":{}}}`,
+		"",
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"tables\":[{\"name\":\"obras"}}`,
+		"",
+		"event: message_delta",
+		`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":16384}}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+		"",
+	}, "\n")
+
+	srv := sseServer(t, body)
+	defer srv.Close()
+
+	p := NewProvider("test-key", WithBaseURL(srv.URL))
+	ch, err := p.ChatStream(context.Background(), provider.LLMRequest{
+		Messages: []message.Message{{Type: message.MessageUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	final := drain(t, ch)
+	if len(final.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %d, want 1", len(final.ToolCalls))
+	}
+	if !final.ToolCalls[0].Truncated {
+		t.Error("a tool call cut off by max_tokens must be marked Truncated")
+	}
+	if got := string(final.ToolCalls[0].Arguments); got != "{}" {
+		t.Errorf("Arguments = %q, want %q so the history still serialises", got, "{}")
+	}
+}
+
+func TestChatStream_CompleteToolCallIsNotTruncated(t *testing.T) {
+	body := strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-5-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}`,
+		"",
+		"event: content_block_start",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"list_pages","input":{}}}`,
+		"",
+		"event: message_delta",
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":5}}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+		"",
+	}, "\n")
+
+	srv := sseServer(t, body)
+	defer srv.Close()
+
+	p := NewProvider("test-key", WithBaseURL(srv.URL))
+	ch, err := p.ChatStream(context.Background(), provider.LLMRequest{
+		Messages: []message.Message{{Type: message.MessageUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	final := drain(t, ch)
+	if len(final.ToolCalls) != 1 || final.ToolCalls[0].Truncated {
+		t.Errorf("a no-argument call that ended normally must not be Truncated: %+v", final.ToolCalls)
+	}
+}

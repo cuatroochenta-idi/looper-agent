@@ -562,6 +562,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 		var (
 			contentBuilder string
 			toolUseMap     = make(map[int64]*toolUseAccumulator)
+			stopReason     string
 			// usage accumulates across the stream: message_start carries the
 			// prompt-side buckets, each message_delta the cumulative output
 			// count. Kept as a value so a mid-stream failure still bills
@@ -592,6 +593,9 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 				usage.CacheWriteTokens = int(e.Message.Usage.CacheCreationInputTokens)
 				usage.OutputTokens = int(e.Message.Usage.OutputTokens)
 			case anthropic.MessageDeltaEvent:
+				if e.Delta.StopReason != "" {
+					stopReason = string(e.Delta.StopReason)
+				}
 				// Cumulative totals — overwrite, never add.
 				sawUsage = true
 				usage.OutputTokens = int(e.Usage.OutputTokens)
@@ -629,10 +633,12 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 				var tcs []message.ToolCall
 				for _, acc := range toolUseMap {
 					if acc.name != "" {
+						raw := json.RawMessage(acc.inputJSON)
 						tcs = append(tcs, message.ToolCall{
 							ID:        acc.id,
 							Name:      acc.name,
-							Arguments: toolInput(json.RawMessage(acc.inputJSON)),
+							Arguments: toolInput(raw),
+							Truncated: cutOffByOutputLimit(stopReason, raw),
 						})
 					}
 				}
@@ -687,6 +693,12 @@ func toolInput(raw json.RawMessage) json.RawMessage {
 	}
 
 	return raw
+}
+
+// cutOffByOutputLimit reports whether a tool call's arguments are incomplete
+// because the response ran out of output tokens.
+func cutOffByOutputLimit(stopReason string, raw json.RawMessage) bool {
+	return stopReason == string(anthropic.StopReasonMaxTokens) && !json.Valid(raw)
 }
 
 type toolUseAccumulator struct {

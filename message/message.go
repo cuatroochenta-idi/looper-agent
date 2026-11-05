@@ -178,6 +178,12 @@ type ToolCall struct {
 	// Arguments is the JSON-encoded input to the tool.
 	Arguments json.RawMessage `json:"arguments"`
 
+	// Truncated marks a call the provider cut off before its arguments were
+	// complete (the response hit the output limit). Arguments then holds an
+	// empty object so the history still serialises, and the loop answers the
+	// call with an error instead of running the tool.
+	Truncated bool `json:"truncated,omitempty"`
+
 	// Signature carries an opaque, provider-issued blob that must be
 	// echoed back when the conversation history is replayed. Currently
 	// populated by Google's Gemini 3.x family: the API returns a
