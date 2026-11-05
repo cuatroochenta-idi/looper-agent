@@ -246,13 +246,13 @@ func TestAgentLoopRun_StoresReasoningOnAssistantMessage(t *testing.T) {
 // made, so nothing new appears in existing traces or stored histories.
 func TestAddAssistantTurn_KeepsPlainMessagesPlain(t *testing.T) {
 	h := message.NewHistory()
-	addAssistantTurn(h, "answer", nil, "", nil)
+	addAssistantTurn(h, "answer", nil, "", nil, nil)
 
 	msgs := h.Messages()
 	if len(msgs) != 1 {
 		t.Fatalf("history has %d messages, want 1", len(msgs))
 	}
-	if msgs[0].Reasoning != "" || msgs[0].ReasoningDetails != nil {
+	if msgs[0].Reasoning != "" || msgs[0].ReasoningDetails != nil || msgs[0].ThinkingBlocks != nil {
 		t.Errorf("plain turn grew reasoning fields: %q / %s", msgs[0].Reasoning, msgs[0].ReasoningDetails)
 	}
 }

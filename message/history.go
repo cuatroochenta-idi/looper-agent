@@ -81,7 +81,7 @@ func (h *History) AddAssistantMessage(content string, toolCalls []ToolCall) {
 func (h *History) AddAssistantMessageWithReasoning(content string, toolCalls []ToolCall, reasoning string, details json.RawMessage) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.messages = append(h.messages, NewAssistantMessageWithReasoning(content, toolCalls, reasoning, details))
+	h.appendLocked(NewAssistantMessageWithReasoning(content, toolCalls, reasoning, details))
 }
 
 // AddToolResult appends a tool result message.

@@ -38,10 +38,11 @@ func (m *mockProvider) ChatStream(ctx context.Context, req provider.LLMRequest) 
 		defer close(ch)
 		resp, _ := m.Chat(ctx, req)
 		ch <- provider.StreamChunk{
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
-			IsFinal:   resp.IsFinal,
-			Usage:     &resp.Usage,
+			Content:        resp.Content,
+			ToolCalls:      resp.ToolCalls,
+			ThinkingBlocks: resp.ThinkingBlocks,
+			IsFinal:        resp.IsFinal,
+			Usage:          &resp.Usage,
 		}
 	}()
 	return ch, nil

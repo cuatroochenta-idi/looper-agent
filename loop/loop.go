@@ -150,15 +150,14 @@ func (t turnTelemetry) stamp(s Step) Step {
 }
 
 // addAssistantTurn appends the turn's assistant message, keeping the model's
-// thinking beside it when the provider surfaced any. Open-weights models hold
+// thinking beside it when the provider returned any. Open-weights models hold
 // no server-side thinking state: drop it from the history and the model
-// re-derives its whole plan on the next tool step.
-func addAssistantTurn(h *message.History, content string, toolCalls []message.ToolCall, reasoning string, details json.RawMessage) {
-	if reasoning == "" && len(details) == 0 {
-		h.AddAssistantMessage(content, toolCalls)
-		return
-	}
-	h.AddAssistantMessageWithReasoning(content, toolCalls, reasoning, details)
+// re-derives its whole plan on the next tool step. Signed thinking blocks
+// (Anthropic) must go back unchanged within a tool-use turn.
+func addAssistantTurn(h *message.History, content string, toolCalls []message.ToolCall, reasoning string, details json.RawMessage, blocks []message.ThinkingBlock) {
+	m := message.NewAssistantMessageWithReasoning(content, toolCalls, reasoning, details)
+	m.ThinkingBlocks = blocks
+	h.AddMessage(m)
 }
 
 // RunResult contains the outcome of an agent run.
@@ -607,7 +606,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (r
 		stats.add(llmResp, providerLabel(l.provider), l.model)
 
 		// Add assistant message
-		addAssistantTurn(history, llmResp.Content, llmResp.ToolCalls, llmResp.Reasoning, llmResp.ReasoningDetails)
+		addAssistantTurn(history, llmResp.Content, llmResp.ToolCalls, llmResp.Reasoning, llmResp.ReasoningDetails, llmResp.ThinkingBlocks)
 		lastAttemptedOutput = llmResp.Content
 
 		// Usage / cost limits — evaluated after every LLM call so the
@@ -1754,7 +1753,7 @@ func (it *Iterator) run(ctx context.Context) {
 						return
 					}
 					if len(chunk.ToolCalls) > 0 {
-						addAssistantTurn(history, final, chunk.ToolCalls, fullReasoning, reasoningDetails)
+						addAssistantTurn(history, final, chunk.ToolCalls, fullReasoning, reasoningDetails, chunk.ThinkingBlocks)
 						for _, tc := range chunk.ToolCalls {
 							argsJSON, _ := json.Marshal(tc.Arguments)
 							it.steps <- tel.stamp(Step{
@@ -1923,7 +1922,7 @@ func (it *Iterator) run(ctx context.Context) {
 				it.steps <- Step{Type: StepStreamingChunk, Content: llmResp.Content, Turn: turn}
 			}
 
-			addAssistantTurn(history, llmResp.Content, llmResp.ToolCalls, llmResp.Reasoning, llmResp.ReasoningDetails)
+			addAssistantTurn(history, llmResp.Content, llmResp.ToolCalls, llmResp.Reasoning, llmResp.ReasoningDetails, llmResp.ThinkingBlocks)
 
 			if len(llmResp.ToolCalls) > 0 {
 				for _, tc := range llmResp.ToolCalls {

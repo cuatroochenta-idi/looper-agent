@@ -56,3 +56,13 @@ func TestRecordingPartsSurviveHistoryReplacement(t *testing.T) {
 		t.Fatalf("recording corrupted by compaction: %+v", got)
 	}
 }
+
+func TestRecordAppendsKeepsAssistantTurnsWithReasoning(t *testing.T) {
+	h := NewHistory()
+	finish := h.RecordAppends()
+	h.AddAssistantMessageWithReasoning("answer", nil, "think", nil)
+	got := finish()
+	if len(got) != 1 || got[0].Reasoning != "think" {
+		t.Fatalf("recorded=%+v, want the assistant turn with its reasoning", got)
+	}
+}

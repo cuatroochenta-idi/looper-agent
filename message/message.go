@@ -69,6 +69,34 @@ type Message struct {
 	// entries can carry signatures or encrypted payloads that the upstream
 	// only accepts back byte-for-byte, so consumers must not re-encode it.
 	ReasoningDetails json.RawMessage `json:"reasoning_details,omitempty"`
+
+	// ThinkingBlocks are the signed reasoning blocks of this assistant turn,
+	// in the order the model produced them. Only the provider that issued a
+	// block sends it back (see ThinkingBlock.Provider); the others ignore it.
+	ThinkingBlocks []ThinkingBlock `json:"thinking_blocks,omitempty"`
+}
+
+// ThinkingBlock is one provider-signed reasoning block of an assistant turn,
+// kept verbatim so it can be sent back unchanged on the next request.
+type ThinkingBlock struct {
+	// Provider names the wire format that issued the block. A translator
+	// replays only the blocks of its own format, so a history stays valid
+	// when a failover hands the conversation to another provider.
+	Provider string `json:"provider"`
+
+	// Type is the provider's block type (Anthropic: "thinking" or
+	// "redacted_thinking").
+	Type string `json:"type"`
+
+	// Thinking is the reasoning text. It may be empty even when the block
+	// is valid: the signature then carries the reasoning.
+	Thinking string `json:"thinking,omitempty"`
+
+	// Signature authenticates the block and must be echoed byte for byte.
+	Signature string `json:"signature,omitempty"`
+
+	// Data is the opaque payload of a redacted block.
+	Data string `json:"data,omitempty"`
 }
 
 // NewMessage creates a new text-only message with a unique ID and current

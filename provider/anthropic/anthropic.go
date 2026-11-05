@@ -7,9 +7,16 @@ package anthropic
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
+	"net/http"
+	"slices"
+	"strings"
+	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -215,10 +222,11 @@ func WithRequestOptions(opts ...option.RequestOption) Option {
 	return func(p *Provider) { p.requestOptions = append(p.requestOptions, opts...) }
 }
 
-// WithIncludeReasoning controls whether thinking blocks are surfaced on
+// WithIncludeReasoning controls whether the thinking text is surfaced on
 // StreamChunk.Reasoning / LLMResponse.Reasoning. When false the deltas
 // are still consumed (Anthropic always sends them when thinking is on)
-// but discarded before they reach the loop.
+// but not surfaced. Either way the signed thinking blocks travel on
+// ThinkingBlocks so the next request can send them back.
 func WithIncludeReasoning(b bool) Option {
 	return func(p *Provider) { p.includeReasoning = b }
 }
@@ -478,8 +486,9 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 // Model returns the configured model name.
 func (p *Provider) Model() string { return p.model }
 
-// Chat sends a non-streaming request.
-func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider.LLMResponse, error) {
+// newParams translates a request into the API's parameters, reconciled with
+// what the target model accepts.
+func (p *Provider) newParams(req provider.LLMRequest) anthropic.MessageNewParams {
 	params := p.translator.ToNative(req.SystemPrompt, req.Messages, req.Tools).(anthropic.MessageNewParams)
 
 	if req.Model != "" {
@@ -500,7 +509,38 @@ func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider
 	// resolved model id and strips params that model would reject.
 	p.applyModelParams(&params, req.Reasoning)
 
+	return params
+}
+
+// retryWithoutRejectedThinking reports whether err is the API refusing a
+// replayed thinking block, and if so marks every thinking block of the
+// request as rejected so the retry, and every later request of the same
+// conversation, leaves them out.
+//
+// Claude 5 models bind a thinking block to the conversation that produced
+// it: once the system prompt, the tool set or an earlier turn changes, the
+// block fails the check and, on enforced accounts, the whole request is
+// rejected with a 400 before any output. Dropping the blocks is the
+// documented recovery; the model answers that turn without them.
+func (p *Provider) retryWithoutRejectedThinking(err error, req provider.LLMRequest) bool {
+	var apiErr *anthropic.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest ||
+		!strings.Contains(apiErr.RawJSON(), rejectedThinkingError) {
+		return false
+	}
+
+	return p.translator.rejected.addAll(req.Messages) > 0
+}
+
+// Chat sends a non-streaming request.
+func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider.LLMResponse, error) {
+	params := p.newParams(req)
+
 	resp, err := p.client.Messages.New(ctx, params)
+	if p.retryWithoutRejectedThinking(err, req) {
+		params = p.newParams(req)
+		resp, err = p.client.Messages.New(ctx, params)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: %w", err)
 	}
@@ -533,35 +573,24 @@ func extractThinking(msg *anthropic.Message) string {
 
 // ChatStream sends a streaming request.
 func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-chan provider.StreamChunk, error) {
-	params := p.translator.ToNative(req.SystemPrompt, req.Messages, req.Tools).(anthropic.MessageNewParams)
-
-	if req.Model != "" {
-		params.Model = anthropic.Model(req.Model)
-	} else {
-		params.Model = anthropic.Model(p.model)
-	}
-	if req.MaxTokens > 0 {
-		params.MaxTokens = int64(req.MaxTokens)
-	}
-	if req.Temperature != 0 {
-		params.Temperature = anthropic.Float(req.Temperature)
-	}
-	if tc := buildToolChoiceParams(req.ToolChoice); tc != nil && len(req.Tools) > 0 {
-		params.ToolChoice = *tc
-	}
-	// Must run after Model / Temperature are final — it keys off the
-	// resolved model id and strips params that model would reject.
-	p.applyModelParams(&params, req.Reasoning)
+	params := p.newParams(req)
 
 	includeReasoning := p.shouldIncludeReasoning(req.Reasoning)
+	// NewStreaming sends the request before returning, so a 400 is already
+	// on stream.Err() and nothing has been streamed yet.
 	stream := p.client.Messages.NewStreaming(ctx, params)
+	if p.retryWithoutRejectedThinking(stream.Err(), req) {
+		_ = stream.Close()
+		params = p.newParams(req)
+		stream = p.client.Messages.NewStreaming(ctx, params)
+	}
 	ch := make(chan provider.StreamChunk, 64)
 
 	go func() {
 		defer close(ch)
 		var (
 			contentBuilder string
-			toolUseMap     = make(map[int64]*toolUseAccumulator)
+			blocks         = streamBlocks{}
 			stopReason     string
 			// usage accumulates across the stream: message_start carries the
 			// prompt-side buckets, each message_delta the cumulative output
@@ -609,47 +638,39 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 					usage.CacheWriteTokens = int(e.Usage.CacheCreationInputTokens)
 				}
 			case anthropic.ContentBlockStartEvent:
-				if e.ContentBlock.Type == "tool_use" {
-					toolUseMap[e.Index] = &toolUseAccumulator{
-						id:   e.ContentBlock.ID,
-						name: e.ContentBlock.Name,
-					}
-				}
+				blocks.start(e.Index, e.ContentBlock)
 			case anthropic.ContentBlockDeltaEvent:
 				switch d := e.Delta.AsAny().(type) {
 				case anthropic.TextDelta:
 					contentBuilder += d.Text
 					ch <- provider.StreamChunk{Content: d.Text, ProviderID: p.providerID, ModelID: string(params.Model), APIKeySuffix: p.keySuffix}
 				case anthropic.ThinkingDelta:
+					if b := blocks[e.Index]; b != nil {
+						b.thinking += d.Thinking
+					}
 					if includeReasoning {
 						ch <- provider.StreamChunk{Reasoning: d.Thinking, ProviderID: p.providerID, ModelID: string(params.Model), APIKeySuffix: p.keySuffix}
 					}
+				case anthropic.SignatureDelta:
+					if b := blocks[e.Index]; b != nil {
+						b.signature += d.Signature
+					}
 				case anthropic.InputJSONDelta:
-					if acc, ok := toolUseMap[e.Index]; ok {
-						acc.inputJSON += d.PartialJSON
+					if b := blocks[e.Index]; b != nil {
+						b.inputJSON += d.PartialJSON
 					}
 				}
 			case anthropic.MessageStopEvent:
-				var tcs []message.ToolCall
-				for _, acc := range toolUseMap {
-					if acc.name != "" {
-						raw := json.RawMessage(acc.inputJSON)
-						tcs = append(tcs, message.ToolCall{
-							ID:        acc.id,
-							Name:      acc.name,
-							Arguments: toolInput(raw),
-							Truncated: cutOffByOutputLimit(stopReason, raw),
-						})
-					}
-				}
+				thinking, tcs := blocks.finish(stopReason)
 				ch <- provider.StreamChunk{
-					Content:      contentBuilder,
-					ToolCalls:    tcs,
-					IsFinal:      true,
-					Usage:        finalUsage(),
-					ProviderID:   p.providerID,
-					ModelID:      string(params.Model),
-					APIKeySuffix: p.keySuffix,
+					Content:        contentBuilder,
+					ToolCalls:      tcs,
+					ThinkingBlocks: thinking,
+					IsFinal:        true,
+					Usage:          finalUsage(),
+					ProviderID:     p.providerID,
+					ModelID:        string(params.Model),
+					APIKeySuffix:   p.keySuffix,
 				}
 				return
 			}
@@ -701,10 +722,133 @@ func cutOffByOutputLimit(stopReason string, raw json.RawMessage) bool {
 	return stopReason == string(anthropic.StopReasonMaxTokens) && !json.Valid(raw)
 }
 
-type toolUseAccumulator struct {
+// Content block types this provider reads and writes.
+const (
+	blockText             = "text"
+	blockThinking         = "thinking"
+	blockRedactedThinking = "redacted_thinking"
+	blockToolUse          = "tool_use"
+)
+
+// thinkingFormat tags the thinking blocks this provider stores on assistant
+// messages. Every adapter built on this translator (the Bedrock one too)
+// replays them; any other adapter ignores them.
+const thinkingFormat = "anthropic"
+
+// rejectedThinkingError is the part of a 400 that says a replayed thinking
+// block failed its signature check.
+const rejectedThinkingError = "`signature` in `thinking` block"
+
+// maxRejectedThinking bounds the memory of rejected blocks. Past it the set
+// starts over: at worst one more request fails and is retried.
+const maxRejectedThinking = 4096
+
+// streamBlocks assembles the thinking and tool_use blocks of a streamed
+// response by content index, so they come out in the order the model wrote
+// them.
+type streamBlocks map[int64]*streamBlock
+
+type streamBlock struct {
+	kind      string
 	id        string
 	name      string
 	inputJSON string
+	thinking  string
+	signature string
+	data      string
+}
+
+func (s streamBlocks) start(index int64, cb anthropic.ContentBlockStartEventContentBlockUnion) {
+	switch cb.Type {
+	case blockThinking, blockRedactedThinking, blockToolUse:
+		s[index] = &streamBlock{
+			kind:      cb.Type,
+			id:        cb.ID,
+			name:      cb.Name,
+			thinking:  cb.Thinking,
+			signature: cb.Signature,
+			data:      cb.Data,
+		}
+	}
+}
+
+// finish returns the response's thinking blocks and tool calls, each in
+// content order.
+func (s streamBlocks) finish(stopReason string) ([]message.ThinkingBlock, []message.ToolCall) {
+	var (
+		thinking []message.ThinkingBlock
+		calls    []message.ToolCall
+	)
+	for _, i := range slices.Sorted(maps.Keys(s)) {
+		b := s[i]
+		if b.kind != blockToolUse {
+			thinking = append(thinking, message.ThinkingBlock{
+				Provider:  thinkingFormat,
+				Type:      b.kind,
+				Thinking:  b.thinking,
+				Signature: b.signature,
+				Data:      b.data,
+			})
+			continue
+		}
+		if b.name == "" {
+			continue
+		}
+		raw := json.RawMessage(b.inputJSON)
+		calls = append(calls, message.ToolCall{
+			ID:        b.id,
+			Name:      b.name,
+			Arguments: toolInput(raw),
+			Truncated: cutOffByOutputLimit(stopReason, raw),
+		})
+	}
+	return thinking, calls
+}
+
+// rejectedThinking remembers the thinking blocks the API refused to take
+// back, so later requests of the same conversation leave them out instead
+// of failing on them again. Every block of the rejected request is marked,
+// and blocks produced later all come after them, so what is left out is
+// always a leading run of the conversation's blocks, which keeps the rest
+// valid.
+type rejectedThinking struct {
+	mu   sync.Mutex
+	keys map[[sha256.Size]byte]struct{}
+}
+
+func rejectedKey(b message.ThinkingBlock) [sha256.Size]byte {
+	return sha256.Sum256([]byte(b.Type + "\x00" + b.Signature + "\x00" + b.Data))
+}
+
+// addAll marks every thinking block of this provider in msgs and returns
+// how many were not marked yet.
+func (r *rejectedThinking) addAll(msgs []message.Message) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.keys == nil || len(r.keys) > maxRejectedThinking {
+		r.keys = make(map[[sha256.Size]byte]struct{})
+	}
+	added := 0
+	for _, m := range msgs {
+		for _, b := range m.ThinkingBlocks {
+			if b.Provider != thinkingFormat {
+				continue
+			}
+			k := rejectedKey(b)
+			if _, ok := r.keys[k]; !ok {
+				r.keys[k] = struct{}{}
+				added++
+			}
+		}
+	}
+	return added
+}
+
+func (r *rejectedThinking) has(b message.ThinkingBlock) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.keys[rejectedKey(b)]
+	return ok
 }
 
 // Translator converts between universal messages and Anthropic format.
@@ -713,6 +857,7 @@ type Translator struct {
 	maxTokens        int
 	temperature      float64
 	cacheBreakpoints map[string]bool
+	rejected         rejectedThinking
 }
 
 // ToNative converts universal messages to Anthropic format.
@@ -736,20 +881,7 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 				buildUserBlocks(msg)...,
 			))
 		case message.MessageAssistant:
-			if len(msg.ToolCalls) > 0 {
-				var blocks []anthropic.ContentBlockParamUnion
-				if msg.Content != "" {
-					blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
-				}
-				for _, tc := range msg.ToolCalls {
-					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, toolInput(tc.Arguments), tc.Name))
-				}
-				antMessages = append(antMessages, anthropic.NewAssistantMessage(blocks...))
-			} else {
-				antMessages = append(antMessages, anthropic.NewAssistantMessage(
-					anthropic.NewTextBlock(msg.Content),
-				))
-			}
+			antMessages = append(antMessages, anthropic.NewAssistantMessage(t.assistantBlocks(msg)...))
 		case message.MessageTool:
 			antMessages = append(antMessages, anthropic.NewUserMessage(
 				anthropic.NewToolResultBlock(msg.ToolID, msg.Content, false),
@@ -802,6 +934,46 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 	return params
 }
 
+// assistantBlocks rebuilds an assistant turn the way the API returned it:
+// its thinking blocks first, in the order received, then the text, then the
+// tool calls. The API requires thinking blocks back within a tool-use turn
+// and recommends them on every turn, unchanged, empty thinking text
+// included.
+func (t *Translator) assistantBlocks(msg message.Message) []anthropic.ContentBlockParamUnion {
+	var blocks []anthropic.ContentBlockParamUnion
+	for _, b := range msg.ThinkingBlocks {
+		if block, ok := t.thinkingBlock(b); ok {
+			blocks = append(blocks, block)
+		}
+	}
+	if msg.Content != "" {
+		blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
+	}
+	for _, tc := range msg.ToolCalls {
+		blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, toolInput(tc.Arguments), tc.Name))
+	}
+	if len(blocks) == 0 {
+		blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
+	}
+	return blocks
+}
+
+// thinkingBlock returns the request form of a stored thinking block, or
+// false when it must not be sent: another provider's block, one the API
+// already rejected, or one without the signature the API requires.
+func (t *Translator) thinkingBlock(b message.ThinkingBlock) (anthropic.ContentBlockParamUnion, bool) {
+	if b.Provider != thinkingFormat || t.rejected.has(b) {
+		return anthropic.ContentBlockParamUnion{}, false
+	}
+	switch {
+	case b.Type == blockThinking && b.Signature != "":
+		return anthropic.NewThinkingBlock(b.Signature, b.Thinking), true
+	case b.Type == blockRedactedThinking && b.Data != "":
+		return anthropic.NewRedactedThinkingBlock(b.Data), true
+	}
+	return anthropic.ContentBlockParamUnion{}, false
+}
+
 // buildUserBlocks maps a universal user message to Anthropic content blocks.
 // Pure-text messages produce a single text block; multi-modal messages emit
 // text + image blocks in order. Inline images use the Base64 source variant
@@ -826,8 +998,8 @@ func buildUserBlocks(msg message.Message) []anthropic.ContentBlockParamUnion {
 			blocks = append(blocks, anthropic.NewImageBlockBase64(
 				p.MimeType, base64.StdEncoding.EncodeToString(p.Data),
 			))
-		// PartFile / PartAudio: not supported by Anthropic content blocks
-		// today; skip silently rather than reject the whole message.
+			// PartFile / PartAudio: not supported by Anthropic content blocks
+			// today; skip silently rather than reject the whole message.
 		}
 	}
 	if len(blocks) == 0 {
@@ -862,13 +1034,21 @@ func (t *Translator) FromNative(response any) (*provider.LLMResponse, error) {
 	var content string
 	for _, block := range msg.Content {
 		switch block.Type {
-		case "text":
+		case blockText:
 			content += block.Text
-		case "tool_use":
+		case blockToolUse:
 			result.ToolCalls = append(result.ToolCalls, message.ToolCall{
 				ID:        block.ID,
 				Name:      block.Name,
 				Arguments: toolInput(block.Input),
+			})
+		case blockThinking, blockRedactedThinking:
+			result.ThinkingBlocks = append(result.ThinkingBlocks, message.ThinkingBlock{
+				Provider:  thinkingFormat,
+				Type:      block.Type,
+				Thinking:  block.Thinking,
+				Signature: block.Signature,
+				Data:      block.Data,
 			})
 		}
 	}

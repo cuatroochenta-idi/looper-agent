@@ -88,3 +88,30 @@ func TestHistoryAddAssistantMessageWithReasoning(t *testing.T) {
 		t.Errorf("stored message lost its reasoning: %q / %s", msgs[0].Reasoning, msgs[0].ReasoningDetails)
 	}
 }
+
+func TestThinkingBlocksRoundTrip(t *testing.T) {
+	m := NewAssistantMessage("", nil)
+	m.ThinkingBlocks = []ThinkingBlock{
+		{Provider: "anthropic", Type: "thinking", Signature: "sig"},
+		{Provider: "anthropic", Type: "redacted_thinking", Data: "opaque"},
+	}
+
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back Message
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(back.ThinkingBlocks) != 2 || back.ThinkingBlocks[0] != m.ThinkingBlocks[0] || back.ThinkingBlocks[1] != m.ThinkingBlocks[1] {
+		t.Errorf("ThinkingBlocks = %+v, want %+v", back.ThinkingBlocks, m.ThinkingBlocks)
+	}
+
+	var plain map[string]json.RawMessage
+	raw, _ = json.Marshal(NewAssistantMessage("answer", nil))
+	_ = json.Unmarshal(raw, &plain)
+	if _, present := plain["thinking_blocks"]; present {
+		t.Errorf("a message without thinking blocks serialized the field: %s", raw)
+	}
+}

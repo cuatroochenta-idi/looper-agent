@@ -174,6 +174,12 @@ type LLMResponse struct {
 	// at all.
 	ReasoningDetails json.RawMessage
 
+	// ThinkingBlocks are the provider-signed reasoning blocks of the
+	// response, in order. The loop stores them on the assistant message so
+	// the issuing provider can send them back unchanged; they are kept
+	// whether or not the reasoning text is surfaced.
+	ThinkingBlocks []message.ThinkingBlock
+
 	// ToolCalls are tool invocations requested by the LLM.
 	ToolCalls []message.ToolCall
 
@@ -265,6 +271,10 @@ type StreamChunk struct {
 	// because a half-assembled array is not something the upstream would
 	// accept back. Nil when the endpoint streamed thinking as text only.
 	ReasoningDetails json.RawMessage
+
+	// ThinkingBlocks are the provider-signed reasoning blocks of the whole
+	// call, in order. Set only on the final chunk, like ReasoningDetails.
+	ThinkingBlocks []message.ThinkingBlock
 
 	// ToolCalls are partial tool call data (accumulated across chunks).
 	ToolCalls []message.ToolCall
