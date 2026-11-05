@@ -94,23 +94,42 @@ func WithModel(model string) Option {
 
 const (
 	// CacheSystemPrompt marks the last system text block with
-	// cache_control:{type:"ephemeral"}. The prefix up to and including the
-	// system prompt becomes cacheable on subsequent identical calls.
+	// cache_control:{type:"ephemeral"}. Tools render before the system
+	// prompt, so the cached prefix covers tools + system.
 	CacheSystemPrompt = "system"
 
 	// CacheTools marks the LAST tool definition. The prefix up to and
-	// including the tool list becomes cacheable — combine with
-	// CacheSystemPrompt to make both reusable.
+	// including the tool list becomes cacheable.
 	CacheTools = "tools"
+
+	// CacheMessages caches the conversation: it marks the last block of
+	// the last message on every request (a moving breakpoint), so the next
+	// request reads the whole history from cache and pays full price only
+	// for what was appended. When a single turn appends more blocks than
+	// the API's 20-position lookback, it also marks the block the previous
+	// request ended with, which that request cached. At most two markers,
+	// so with CacheSystemPrompt and CacheTools the request stays within
+	// the API's limit of four.
+	CacheMessages = "messages"
 )
 
+// lookbackPositions is how many content positions the API walks back from
+// a breakpoint to find an earlier cache entry. A run of consecutive tool_use
+// blocks, or of tool_result blocks, counts as one position.
+const lookbackPositions = 20
+
+// maxCacheBreakpoints is the API's limit of cache_control markers per
+// request.
+const maxCacheBreakpoints = 4
+
 // WithCacheBreakpoints enables cache_control markers at the named
-// breakpoints. Pass CacheSystemPrompt and / or CacheTools.
+// breakpoints. Pass CacheSystemPrompt, CacheTools and / or CacheMessages.
 //
-// Anthropic caches the prefix UP TO each marker, so the order is:
-// system → tools → messages. Marking "system" alone caches just the
-// system prompt; marking "tools" alone caches system + tools; marking
-// both produces two markers and lets the API report the larger cache hit.
+// Anthropic caches the prefix UP TO each marker, and the prefix renders in
+// the order tools → system → messages. Marking "tools" caches the tool
+// list; marking "system" caches tools + system; marking "messages" caches
+// everything up to the end of the conversation. Combining them leaves an
+// earlier read point that survives when a later part changes.
 //
 // The framework reads CachedTokens off every response so cost / hit-rate
 // telemetry works automatically.
@@ -728,6 +747,7 @@ const (
 	blockThinking         = "thinking"
 	blockRedactedThinking = "redacted_thinking"
 	blockToolUse          = "tool_use"
+	blockToolResult       = "tool_result"
 )
 
 // thinkingFormat tags the thinking blocks this provider stores on assistant
@@ -883,9 +903,14 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 		case message.MessageAssistant:
 			antMessages = append(antMessages, anthropic.NewAssistantMessage(t.assistantBlocks(msg)...))
 		case message.MessageTool:
-			antMessages = append(antMessages, anthropic.NewUserMessage(
-				anthropic.NewToolResultBlock(msg.ToolID, msg.Content, false),
-			))
+			result := anthropic.NewToolResultBlock(msg.ToolID, msg.Content, false)
+			// The results of one turn's calls go back in a single user
+			// message, as the API asks for parallel tool use.
+			if n := len(antMessages); n > 0 && onlyToolResults(antMessages[n-1]) {
+				antMessages[n-1].Content = append(antMessages[n-1].Content, result)
+			} else {
+				antMessages = append(antMessages, anthropic.NewUserMessage(result))
+			}
 		}
 	}
 
@@ -905,9 +930,9 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 	}
 
 	// Apply cache_control breakpoints if configured. Anthropic caches the
-	// prefix up to each marker, so the order is system → tools → messages.
-	// We attach the marker to the LAST element in each section so the
-	// cache covers the largest stable prefix. NewCacheControlEphemeralParam
+	// prefix up to each marker, and the prefix renders tools → system →
+	// messages. We attach the marker to the LAST element in each section so
+	// the cache covers the largest stable prefix. NewCacheControlEphemeralParam
 	// sets Type="ephemeral" explicitly — a zero-value CacheControl gets
 	// stripped by the SDK's omitzero serializer.
 	if t.cacheBreakpoints[CacheSystemPrompt] && len(systemBlocks) > 0 {
@@ -918,6 +943,9 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 		if last != nil {
 			last.CacheControl = anthropic.NewCacheControlEphemeralParam()
 		}
+	}
+	if t.cacheBreakpoints[CacheMessages] {
+		markConversationBreakpoints(antMessages)
 	}
 
 	params := anthropic.MessageNewParams{
@@ -972,6 +1000,91 @@ func (t *Translator) thinkingBlock(b message.ThinkingBlock) (anthropic.ContentBl
 		return anthropic.NewRedactedThinkingBlock(b.Data), true
 	}
 	return anthropic.ContentBlockParamUnion{}, false
+}
+
+// onlyToolResults reports whether m is a user message made of tool results.
+func onlyToolResults(m anthropic.MessageParam) bool {
+	if m.Role != anthropic.MessageParamRoleUser || len(m.Content) == 0 {
+		return false
+	}
+	for _, b := range m.Content {
+		if b.OfToolResult == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// blockRef locates one content block of the request and the cache position
+// it falls in.
+type blockRef struct {
+	msg, block int
+	position   int
+}
+
+// markConversationBreakpoints puts the moving cache breakpoint on the last
+// cacheable block of the conversation. When the content since the end of
+// the previous request — everything from the last assistant turn on — spans
+// more positions than the API looks back, the new breakpoint cannot find the
+// previous request's cache entry, so the block that request ended with is
+// marked too and read from cache.
+func markConversationBreakpoints(msgs []anthropic.MessageParam) {
+	var (
+		refs          []blockRef
+		position      int
+		prevKind      string
+		lastAssistant = -1
+	)
+	for i, m := range msgs {
+		if m.Role == anthropic.MessageParamRoleAssistant {
+			lastAssistant = len(refs)
+		}
+		for j, b := range m.Content {
+			kind := ""
+			switch {
+			case b.OfToolUse != nil:
+				kind = blockToolUse
+			case b.OfToolResult != nil:
+				kind = blockToolResult
+			}
+			if kind == "" || kind != prevKind {
+				position++
+			}
+			prevKind = kind
+			refs = append(refs, blockRef{msg: i, block: j, position: position})
+		}
+	}
+
+	last := lastCacheable(msgs, refs, len(refs))
+	if last < 0 {
+		return
+	}
+	markCache(msgs, refs[last])
+	if lastAssistant < 0 {
+		return
+	}
+	if prev := lastCacheable(msgs, refs, lastAssistant); prev >= 0 &&
+		refs[last].position-refs[prev].position >= lookbackPositions {
+		markCache(msgs, refs[prev])
+	}
+}
+
+// lastCacheable returns the index in refs of the last block before end that
+// can carry cache_control, or -1. Thinking blocks cannot, and the API
+// rejects a marker on an empty text block.
+func lastCacheable(msgs []anthropic.MessageParam, refs []blockRef, end int) int {
+	for i := end - 1; i >= 0; i-- {
+		b := msgs[refs[i].msg].Content[refs[i].block]
+		if b.GetCacheControl() == nil || (b.OfText != nil && b.OfText.Text == "") {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+func markCache(msgs []anthropic.MessageParam, ref blockRef) {
+	*msgs[ref.msg].Content[ref.block].GetCacheControl() = anthropic.NewCacheControlEphemeralParam()
 }
 
 // buildUserBlocks maps a universal user message to Anthropic content blocks.
