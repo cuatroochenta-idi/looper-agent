@@ -508,13 +508,11 @@ func (p *Provider) Model() string { return p.model }
 // newParams translates a request into the API's parameters, reconciled with
 // what the target model accepts.
 func (p *Provider) newParams(req provider.LLMRequest) anthropic.MessageNewParams {
-	params := p.translator.ToNative(req.SystemPrompt, req.Messages, req.Tools).(anthropic.MessageNewParams)
-
+	model := p.model
 	if req.Model != "" {
-		params.Model = anthropic.Model(req.Model)
-	} else {
-		params.Model = anthropic.Model(p.model)
+		model = req.Model
 	}
+	params := p.translator.build(model, req.SystemPrompt, req.Messages, req.Tools)
 	if req.MaxTokens > 0 {
 		params.MaxTokens = int64(req.MaxTokens)
 	}
@@ -880,21 +878,47 @@ type Translator struct {
 	rejected         rejectedThinking
 }
 
-// ToNative converts universal messages to Anthropic format.
-// The system prompt is injected into the top-level System field, NOT
-// into the messages array. System messages from hooks also go into System.
+// ToNative converts universal messages to Anthropic format for the
+// translator's model. See build.
 func (t *Translator) ToNative(systemPrompt string, messages []message.Message, tools []*tool.Tool) any {
+	return t.build(t.model, systemPrompt, messages, tools)
+}
+
+// build converts universal messages to Anthropic format for model.
+//
+// The system prompt goes into the top-level System field, NOT into the
+// messages array, and so do system messages that precede the first turn.
+// Later system messages (harness notices added mid-run) stay where they
+// are, as {"role":"system"} messages, on models that accept them: rewriting
+// the top-level system would invalidate the cache from the system prompt on
+// and every thinking block already in the conversation. On other models
+// they go to the top-level System field as before.
+func (t *Translator) build(model, systemPrompt string, messages []message.Message, tools []*tool.Tool) anthropic.MessageNewParams {
 	// Build system prompt blocks (TextBlockParam for the System field)
 	var systemBlocks []anthropic.TextBlockParam
 	if systemPrompt != "" {
 		systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: systemPrompt, Type: "text"})
 	}
+	inPlace := lookupCaps(model).midConversationSystem
 
 	// Build messages
-	var antMessages []anthropic.MessageParam
+	var (
+		antMessages []anthropic.MessageParam
+		notices     []string // mid-conversation system messages not placed yet
+	)
 	for _, msg := range messages {
+		if len(notices) > 0 && msg.Type != message.MessageSystem && msg.Type != message.MessageTool {
+			antMessages = appendNotices(antMessages, notices, msg.Type == message.MessageAssistant)
+			notices = nil
+		}
 		switch msg.Type {
 		case message.MessageSystem:
+			if inPlace && len(antMessages) > 0 {
+				if msg.Content != "" {
+					notices = append(notices, msg.Content)
+				}
+				continue
+			}
 			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: msg.Content, Type: "text"})
 		case message.MessageUser:
 			antMessages = append(antMessages, anthropic.NewUserMessage(
@@ -912,6 +936,9 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 				antMessages = append(antMessages, anthropic.NewUserMessage(result))
 			}
 		}
+	}
+	if len(notices) > 0 {
+		antMessages = appendNotices(antMessages, notices, true)
 	}
 
 	// Build tools
@@ -949,7 +976,7 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 	}
 
 	params := anthropic.MessageNewParams{
-		Model:       anthropic.Model(t.model),
+		Model:       anthropic.Model(model),
 		MaxTokens:   int64(t.maxTokens),
 		Temperature: anthropic.Float(t.temperature),
 		System:      systemBlocks,
@@ -1000,6 +1027,32 @@ func (t *Translator) thinkingBlock(b message.ThinkingBlock) (anthropic.ContentBl
 		return anthropic.NewRedactedThinkingBlock(b.Data), true
 	}
 	return anthropic.ContentBlockParamUnion{}, false
+}
+
+// systemReminder wraps a notice that has to travel as a user turn, so the
+// model can tell it from the user's own words.
+const systemReminder = "<system-reminder>\n%s\n</system-reminder>"
+
+// appendNotices adds the mid-conversation system messages collected since
+// the last turn. The API takes a {"role":"system"} message only right after
+// a user turn (tool results included) and right before an assistant turn or
+// at the end of the array. Anywhere else, such as after an assistant turn,
+// the notices go as a user turn instead, so the request stays valid without
+// moving or rewriting anything sent before. The caller holds notices back
+// while tool results are still due: none may sit between a tool call and
+// its result.
+func appendNotices(msgs []anthropic.MessageParam, notices []string, beforeAssistant bool) []anthropic.MessageParam {
+	blocks := make([]anthropic.ContentBlockParamUnion, len(notices))
+	if beforeAssistant && msgs[len(msgs)-1].Role == anthropic.MessageParamRoleUser {
+		for i, n := range notices {
+			blocks[i] = anthropic.NewTextBlock(n)
+		}
+		return append(msgs, anthropic.MessageParam{Role: anthropic.MessageParamRoleSystem, Content: blocks})
+	}
+	for i, n := range notices {
+		blocks[i] = anthropic.NewTextBlock(fmt.Sprintf(systemReminder, n))
+	}
+	return append(msgs, anthropic.NewUserMessage(blocks...))
 }
 
 // onlyToolResults reports whether m is a user message made of tool results.
@@ -1071,11 +1124,14 @@ func markConversationBreakpoints(msgs []anthropic.MessageParam) {
 
 // lastCacheable returns the index in refs of the last block before end that
 // can carry cache_control, or -1. Thinking blocks cannot, and the API
-// rejects a marker on an empty text block.
+// rejects a marker on an empty text block. System messages are skipped too:
+// the docs do not cover markers on them, and the block before one is as good.
 func lastCacheable(msgs []anthropic.MessageParam, refs []blockRef, end int) int {
 	for i := end - 1; i >= 0; i-- {
-		b := msgs[refs[i].msg].Content[refs[i].block]
-		if b.GetCacheControl() == nil || (b.OfText != nil && b.OfText.Text == "") {
+		m := msgs[refs[i].msg]
+		b := m.Content[refs[i].block]
+		if m.Role == anthropic.MessageParamRoleSystem || b.GetCacheControl() == nil ||
+			(b.OfText != nil && b.OfText.Text == "") {
 			continue
 		}
 		return i

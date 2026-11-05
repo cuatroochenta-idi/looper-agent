@@ -40,9 +40,16 @@ type modelCaps struct {
 	effort bool
 
 	// rejectsForcedTools reports that tool_choice "any" / "tool" is a 400.
-	// Opus 5.5 and Fable / Mythos 5.1 always think, and a forced tool call
-	// would skip the thinking.
+	// Opus 5.5, Sonnet 5.5 and Fable / Mythos 5.1 always think, and a
+	// forced tool call would skip the thinking.
 	rejectsForcedTools bool
+
+	// midConversationSystem reports that {"role":"system"} messages are
+	// accepted inside messages, with no beta header. Per the docs page
+	// "Mid-conversation system messages": Fable 5 / 5.1, Mythos 5 / 5.1 /
+	// Preview, Opus 5 / 5.5, Sonnet 5.5, Haiku 5.5 and Opus 4.8 — not
+	// Sonnet 5.
+	midConversationSystem bool
 }
 
 // capsTable maps a model-id prefix to its capabilities. Lookup takes the
@@ -52,17 +59,19 @@ type modelCaps struct {
 var capsTable = map[string]modelCaps{
 	// Thinking always on, no sampling params. The 5.1 releases also refuse
 	// forced tool use.
-	"claude-fable-5-1":  {thinking: thinkingAlwaysOn, sampling: false, effort: true, rejectsForcedTools: true},
-	"claude-mythos-5-1": {thinking: thinkingAlwaysOn, sampling: false, effort: true, rejectsForcedTools: true},
-	"claude-fable-5":    {thinking: thinkingAlwaysOn, sampling: false, effort: true},
-	"claude-mythos":     {thinking: thinkingAlwaysOn, sampling: false, effort: true},
+	"claude-fable-5-1":  {thinking: thinkingAlwaysOn, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true},
+	"claude-mythos-5-1": {thinking: thinkingAlwaysOn, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true},
+	"claude-fable-5":    {thinking: thinkingAlwaysOn, sampling: false, effort: true, midConversationSystem: true},
+	"claude-mythos":     {thinking: thinkingAlwaysOn, sampling: false, effort: true, midConversationSystem: true},
 
 	// Adaptive-only, no sampling params.
-	"claude-opus-5-5": {thinking: thinkingAdaptive, sampling: false, effort: true, rejectsForcedTools: true},
-	"claude-opus-5":   {thinking: thinkingAdaptive, sampling: false, effort: true},
-	"claude-sonnet-5": {thinking: thinkingAdaptive, sampling: false, effort: true},
-	"claude-opus-4-8": {thinking: thinkingAdaptive, sampling: false, effort: true},
-	"claude-opus-4-7": {thinking: thinkingAdaptive, sampling: false, effort: true},
+	"claude-opus-5-5":   {thinking: thinkingAdaptive, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true},
+	"claude-opus-5":     {thinking: thinkingAdaptive, sampling: false, effort: true, midConversationSystem: true},
+	"claude-sonnet-5-5": {thinking: thinkingAdaptive, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true},
+	"claude-sonnet-5":   {thinking: thinkingAdaptive, sampling: false, effort: true},
+	"claude-haiku-5-5":  {thinking: thinkingAdaptive, sampling: false, effort: true, midConversationSystem: true},
+	"claude-opus-4-8":   {thinking: thinkingAdaptive, sampling: false, effort: true, midConversationSystem: true},
+	"claude-opus-4-7":   {thinking: thinkingAdaptive, sampling: false, effort: true},
 
 	// 4.6: adaptive is recommended and effort is GA, but sampling params
 	// still work and budget_tokens is merely deprecated.
@@ -88,6 +97,9 @@ var capsTable = map[string]modelCaps{
 //
 // Gateways that proxy a non-Claude model behind the Anthropic wire format
 // can override the whole decision with WithThinkingCompat.
+//
+// Mid-conversation system messages stay off: a model without them rejects
+// the request, while leaving them off only costs cache hits.
 var defaultCaps = modelCaps{thinking: thinkingAdaptive, sampling: false, effort: true}
 
 // idPrefixes are the routing prefixes cloud platforms prepend to an
