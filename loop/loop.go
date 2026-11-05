@@ -627,6 +627,10 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (r
 			}, nil
 		}
 
+		// A final_response sent beside other calls is not a close: the other
+		// calls run as a normal tool turn and the close is refused below.
+		mixedCloses, toolCalls := l.splitMixedClose(llmResp.ToolCalls)
+
 		// Structured-output short-circuit: if the model called the
 		// implicit final_response tool, its `output` argument IS the
 		// run's final answer. We extract it instead of looping on the
@@ -634,7 +638,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (r
 		// configured we validate the candidate against the compiled
 		// schema (and any custom validator) and re-prompt on failure
 		// up to outputMaxRetries.
-		if l.structuredOutput != nil {
+		if l.structuredOutput != nil && mixedCloses == nil {
 			if out, ok := extractFinalResponseOutput(llmResp.ToolCalls); ok {
 				// Gate the close through the turn validator first (parity
 				// with the streaming Iterator path): a premature
@@ -698,9 +702,9 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (r
 		// tool function runs — cancelled ones produce synthetic error
 		// results that already live in history when applyHooks returns.
 		var toolResults []message.ToolResult
-		if len(llmResp.ToolCalls) > 0 {
+		if len(toolCalls) > 0 {
 			approved, cancelled, hookErr := l.applyBeforeToolExecutionHooks(
-				ctx, history, llmResp.ToolCalls, nil)
+				ctx, history, toolCalls, nil)
 			if hookErr != nil {
 				log.Printf("loop: BeforeToolExecution hook error: %v", hookErr)
 			}
@@ -714,6 +718,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (r
 				history.AddToolResult(r.ToolCallID, nameByID[r.ToolCallID], r.Content, r.IsError)
 			}
 			toolResults = append(toolResults, executed...)
+			refuseMixedClose(history, mixedCloses)
 
 			// Halt detection: if any tool result signals Halt, stop the run
 			// cleanly after recording all results. All tool results are
@@ -755,7 +760,7 @@ func (l *AgentLoop) Run(ctx context.Context, input string, opts ...RunOption) (r
 		proceed, abort, _ := l.validateTurn(ctx, TurnSnapshot{
 			Turn:                 turn,
 			LastAssistantContent: llmResp.Content,
-			ToolCalls:            llmResp.ToolCalls,
+			ToolCalls:            toolCalls,
 			ToolResults:          toolResults,
 			History:              history,
 		}, &consecutiveValidatorFail)
@@ -1192,6 +1197,65 @@ type finalResponseInput struct {
 	Output json.RawMessage `json:"output" jsonschema:"description=The final response object"`
 }
 
+// finalResponseToolName is the name of the framework-injected
+// structured-output tool.
+const finalResponseToolName = "final_response"
+
+// mixedCloseRefusal answers a final_response the model sent in the same
+// response as other tool calls.
+const mixedCloseRefusal = "Not closed: you called other tools in the same response. " +
+	"Read their results, then call final_response on its own."
+
+// splitMixedClose separates the final_response calls of a structured-output
+// turn that also called other tools. Such a turn is not a close: the other
+// calls must run, and closing would leave them unexecuted and unanswered.
+// closes is nil when final_response came alone, not at all, or structured
+// output is off; others is then calls unchanged.
+func (l *AgentLoop) splitMixedClose(calls []message.ToolCall) (closes, others []message.ToolCall) {
+	if l.structuredOutput == nil {
+		return nil, calls
+	}
+	for _, tc := range calls {
+		if tc.Name == finalResponseToolName {
+			closes = append(closes, tc)
+		} else {
+			others = append(others, tc)
+		}
+	}
+	if len(closes) == 0 || len(others) == 0 {
+		return nil, calls
+	}
+	return closes, others
+}
+
+// refuseMixedClose answers every final_response call of a mixed turn with an
+// error result, so the history stays valid and the model closes again on its
+// own once it has read the other results. It counts against no retry budget:
+// the close was never evaluated.
+func refuseMixedClose(history *message.History, closes []message.ToolCall) []message.ToolResult {
+	results := make([]message.ToolResult, 0, len(closes))
+	for _, tc := range closes {
+		history.AddToolResult(tc.ID, tc.Name, mixedCloseRefusal, true)
+		results = append(results, message.ToolResult{ToolCallID: tc.ID, Content: mixedCloseRefusal, IsError: true})
+	}
+	return results
+}
+
+// refuseMixedClose is the streaming form of refuseMixedClose: it also emits
+// each refusal as a tool_result step.
+func (it *Iterator) refuseMixedClose(history *message.History, closes []message.ToolCall, turn int) {
+	for _, r := range refuseMixedClose(history, closes) {
+		it.steps <- Step{
+			Type:       StepToolResult,
+			Content:    r.Content,
+			ToolName:   finalResponseToolName,
+			ToolCallID: r.ToolCallID,
+			IsError:    true,
+			Turn:       turn,
+		}
+	}
+}
+
 // extractFinalResponseOutput scans a tool-call slice for the implicit
 // final_response call and returns its `output` argument as a JSON string.
 // Used by the loop to short-circuit structured-output turns: the LLM
@@ -1200,7 +1264,7 @@ type finalResponseInput struct {
 // running the tool and feeding the pass-through back to the model.
 func extractFinalResponseOutput(calls []message.ToolCall) (string, bool) {
 	for _, tc := range calls {
-		if tc.Name != "final_response" {
+		if tc.Name != finalResponseToolName {
 			continue
 		}
 		var args struct {
@@ -1252,7 +1316,7 @@ func (l *AgentLoop) createFinalResponseTool() *tool.Tool {
 			return string(input.Output), nil
 		},
 		tool.ToolConfig{
-			Name:        "final_response",
+			Name:        finalResponseToolName,
 			Description: "Call this tool with your final answer. You MUST use this tool instead of plain text.",
 			Parallel:    false,
 		},
@@ -1702,12 +1766,13 @@ func (it *Iterator) run(ctx context.Context) {
 								Usage:      chunk.Usage,
 							})
 						}
+						mixedCloses, toolCalls := it.loop.splitMixedClose(chunk.ToolCalls)
 						// Structured-output short-circuit: final_response
 						// is the framework-injected tool whose `output`
 						// argument is THE run's answer. Emit it as a
 						// StepFinalResponse and stop the loop instead of
 						// executing the tool and looping again.
-						if it.loop.structuredOutput != nil {
+						if it.loop.structuredOutput != nil && mixedCloses == nil {
 							if out, ok := extractFinalResponseOutput(chunk.ToolCalls); ok {
 								// Gate the close through the turn validator first:
 								// a premature final_response is refused in-band and
@@ -1741,7 +1806,8 @@ func (it *Iterator) run(ctx context.Context) {
 						}
 						// Execute tools and validate the turn so the model gets
 						// corrective feedback when it called the wrong tools.
-						results := it.loop.executeToolCallsStreaming(ctx, history, chunk.ToolCalls, it.steps, turn)
+						results := it.loop.executeToolCallsStreaming(ctx, history, toolCalls, it.steps, turn)
+						it.refuseMixedClose(history, mixedCloses, turn)
 						// Halt detection: if any tool called tool.SetHalt(ctx),
 						// stop the run cleanly. All results are already in
 						// history; no further LLM call is issued.
@@ -1760,7 +1826,7 @@ func (it *Iterator) run(ctx context.Context) {
 						_, abort, out := it.loop.validateTurn(ctx, TurnSnapshot{
 							Turn:                 turn,
 							LastAssistantContent: final,
-							ToolCalls:            chunk.ToolCalls,
+							ToolCalls:            toolCalls,
 							ToolResults:          results,
 							History:              history,
 						}, &validatorFails)
@@ -1871,8 +1937,9 @@ func (it *Iterator) run(ctx context.Context) {
 						Usage:      &usagePtr,
 					})
 				}
+				mixedCloses, toolCalls := it.loop.splitMixedClose(llmResp.ToolCalls)
 				// Structured-output short-circuit (non-streaming fallback path).
-				if it.loop.structuredOutput != nil {
+				if it.loop.structuredOutput != nil && mixedCloses == nil {
 					if out, ok := extractFinalResponseOutput(llmResp.ToolCalls); ok {
 						// Gate the close through the turn validator first (see
 						// the streaming path); refuse a premature final_response
@@ -1902,7 +1969,8 @@ func (it *Iterator) run(ctx context.Context) {
 						return
 					}
 				}
-				results := it.loop.executeToolCallsStreaming(ctx, history, llmResp.ToolCalls, it.steps, turn)
+				results := it.loop.executeToolCallsStreaming(ctx, history, toolCalls, it.steps, turn)
+				it.refuseMixedClose(history, mixedCloses, turn)
 				// Halt detection (non-streaming fallback path).
 				if anyHalted(results) {
 					finalText := pickHaltFinalText(llmResp.Content, results)
@@ -1913,7 +1981,7 @@ func (it *Iterator) run(ctx context.Context) {
 				_, abort, out := it.loop.validateTurn(ctx, TurnSnapshot{
 					Turn:                 turn,
 					LastAssistantContent: llmResp.Content,
-					ToolCalls:            llmResp.ToolCalls,
+					ToolCalls:            toolCalls,
 					ToolResults:          results,
 					History:              history,
 				}, &validatorFails)
