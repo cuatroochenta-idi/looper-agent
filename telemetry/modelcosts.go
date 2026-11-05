@@ -12,6 +12,10 @@ const (
 	// Gemini pricing page: "$1.25, prompts <= 200k tokens / $2.50, prompts
 	// > 200k tokens".
 	geminiLongContextAbove = 200_000
+
+	// Anthropic pricing page: "Claude Haiku 5.5 (for prompts up to 100,000
+	// tokens)" / "(for prompts over 100,000 tokens)".
+	haiku55LongContextAbove = 100_000
 )
 
 // defaultCosts returns the base pricing registry with official model costs.
@@ -85,6 +89,34 @@ func defaultCosts() map[string]map[string]CostConfig {
 					OutputCostPer1MTokens:     0.75,
 					CachedCostPer1MTokens:     0.02,
 					CacheWriteCostPer1MTokens: 0.25,
+				}},
+			},
+			// gpt-6.1 family. Same long-context rule as gpt-6: 2x input, cache
+			// and cache-write rates, 1.5x output above 272K.
+			"gpt-6.1-sol": {
+				InputCostPer1MTokens:      2.00,
+				OutputCostPer1MTokens:     10.00,
+				CachedCostPer1MTokens:     0.10,
+				CacheWriteCostPer1MTokens: 2.50,
+				Tiers: []PriceTier{{
+					AboveInputTokens:          openAILongContextAbove,
+					InputCostPer1MTokens:      4.00,
+					OutputCostPer1MTokens:     15.00,
+					CachedCostPer1MTokens:     0.20,
+					CacheWriteCostPer1MTokens: 5.00,
+				}},
+			},
+			"gpt-6.1-terra": {
+				InputCostPer1MTokens:      1.00,
+				OutputCostPer1MTokens:     5.00,
+				CachedCostPer1MTokens:     0.05,
+				CacheWriteCostPer1MTokens: 1.25,
+				Tiers: []PriceTier{{
+					AboveInputTokens:          openAILongContextAbove,
+					InputCostPer1MTokens:      2.00,
+					OutputCostPer1MTokens:     7.50,
+					CachedCostPer1MTokens:     0.10,
+					CacheWriteCostPer1MTokens: 2.50,
 				}},
 			},
 			// gpt-5.6 family. Sol is on promotional pricing "at least through
@@ -384,6 +416,28 @@ func defaultCosts() map[string]map[string]CostConfig {
 				OutputCostPer1MTokens:     10.00,
 				CachedCostPer1MTokens:     0.20,
 				CacheWriteCostPer1MTokens: 2.50,
+			},
+			// Sonnet 5.5 halves Sonnet 5's cache-read price (0.10 vs 0.20).
+			"claude-sonnet-5-5": {
+				InputCostPer1MTokens:      2.00,
+				OutputCostPer1MTokens:     10.00,
+				CachedCostPer1MTokens:     0.10,
+				CacheWriteCostPer1MTokens: 2.50,
+			},
+			// Haiku 5.5 is the one Claude 5 model with a context tier: prompts
+			// over 100K tokens bill at 5x on every rate.
+			"claude-haiku-5-5": {
+				InputCostPer1MTokens:      0.10,
+				OutputCostPer1MTokens:     0.50,
+				CachedCostPer1MTokens:     0.01,
+				CacheWriteCostPer1MTokens: 0.125,
+				Tiers: []PriceTier{{
+					AboveInputTokens:          haiku55LongContextAbove,
+					InputCostPer1MTokens:      0.50,
+					OutputCostPer1MTokens:     2.50,
+					CachedCostPer1MTokens:     0.05,
+					CacheWriteCostPer1MTokens: 0.625,
+				}},
 			},
 			// Claude 4 family. Opus pricing is NOT flat across the line: 4.0
 			// and 4.1 bill at 15.00/75.00, while 4.5 onward dropped to

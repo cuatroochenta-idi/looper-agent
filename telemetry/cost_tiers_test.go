@@ -137,3 +137,17 @@ func TestCostTiers_JSONBackwardCompatible(t *testing.T) {
 		t.Errorf("Tiers = %+v, want [%+v]", tiered.Tiers, want)
 	}
 }
+
+func TestCostTiers_Haiku55BillsFiveTimesAboveHundredThousand(t *testing.T) {
+	cm := NewCostModel()
+
+	below := cm.Calculate("anthropic", "claude-haiku-5-5", Usage{InputTokens: 100_000, OutputTokens: 1_000_000})
+	if want := 0.1*0.10 + 0.50; !almostEqual(below.TotalUSD, want, 1e-9) {
+		t.Errorf("at 100K TotalUSD = %.9f, want %.9f", below.TotalUSD, want)
+	}
+
+	above := cm.Calculate("anthropic", "claude-haiku-5-5", Usage{InputTokens: 100_001, OutputTokens: 1_000_000})
+	if want := 0.100001*0.50 + 2.50; !almostEqual(above.TotalUSD, want, 1e-9) {
+		t.Errorf("above 100K TotalUSD = %.9f, want %.9f", above.TotalUSD, want)
+	}
+}

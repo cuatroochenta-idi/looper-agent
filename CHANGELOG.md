@@ -4,6 +4,22 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.10.1] — 2026-11-05
+
+### Fixed
+
+- **Anthropic: a tool call without arguments no longer kills the run.**
+  A tool with no parameters streams no `input_json_delta`, so its input was
+  an empty `json.RawMessage`; the next request could not serialise the
+  history (`unexpected end of JSON input`) and every call after it failed.
+  Empty or non-JSON input (a call cut off mid-stream) is now sent as `{}`,
+  in the stream, the non-stream path and the history translation.
+
+### Added
+
+- Pricing for Claude Haiku 5.5 (with its above-100K-tokens tier), Claude
+  Sonnet 5.5, GPT-6.1 Sol and GPT-6.1 Terra.
+
 ## [v1.10.0] — 2026-10-07
 
 ### Changed

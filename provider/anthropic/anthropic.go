@@ -632,7 +632,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 						tcs = append(tcs, message.ToolCall{
 							ID:        acc.id,
 							Name:      acc.name,
-							Arguments: json.RawMessage(acc.inputJSON),
+							Arguments: toolInput(json.RawMessage(acc.inputJSON)),
 						})
 					}
 				}
@@ -671,6 +671,23 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 
 // Translator returns the Anthropic message translator.
 func (p *Provider) Translator() provider.Translator { return p.translator }
+
+// emptyToolInput is the input of a tool call that takes no arguments.
+const emptyToolInput = "{}"
+
+// toolInput returns the call's arguments, or an empty object when they are
+// missing or not valid JSON. Anthropic streams no input_json_delta for a tool
+// without parameters, and a stream cut off mid-call leaves a fragment; either
+// one cannot be serialised back into the next request and would fail every
+// call after it. A cut-off call then reaches the tool as an empty one, which
+// the tool's own validation rejects.
+func toolInput(raw json.RawMessage) json.RawMessage {
+	if !json.Valid(raw) {
+		return json.RawMessage(emptyToolInput)
+	}
+
+	return raw
+}
 
 type toolUseAccumulator struct {
 	id        string
@@ -713,7 +730,7 @@ func (t *Translator) ToNative(systemPrompt string, messages []message.Message, t
 					blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
 				}
 				for _, tc := range msg.ToolCalls {
-					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, tc.Arguments, tc.Name))
+					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, toolInput(tc.Arguments), tc.Name))
 				}
 				antMessages = append(antMessages, anthropic.NewAssistantMessage(blocks...))
 			} else {
@@ -839,7 +856,7 @@ func (t *Translator) FromNative(response any) (*provider.LLMResponse, error) {
 			result.ToolCalls = append(result.ToolCalls, message.ToolCall{
 				ID:        block.ID,
 				Name:      block.Name,
-				Arguments: block.Input,
+				Arguments: toolInput(block.Input),
 			})
 		}
 	}

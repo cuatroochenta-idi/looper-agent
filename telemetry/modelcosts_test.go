@@ -31,6 +31,8 @@ func TestDefaultCosts_ReleasesResolveToOwnRow(t *testing.T) {
 		{"openai", "gpt-6-astra", 10.00, 50.00, 1.00, 12.50},
 		{"openai", "gpt-6-sol", 2.00, 10.00, 0.20, 2.50},
 		{"openai", "gpt-6-luna", 0.10, 0.50, 0.01, 0.125},
+		{"openai", "gpt-6.1-sol", 2.00, 10.00, 0.10, 2.50},
+		{"openai", "gpt-6.1-terra", 1.00, 5.00, 0.05, 1.25},
 		// gpt-5.x siblings the "gpt-5" key used to swallow.
 		{"openai", "gpt-5.6-sol", 4.00, 20.00, 0.40, 5.00},
 		{"openai", "gpt-5.4", 2.50, 15.00, 0.25, 2.50},
@@ -48,6 +50,8 @@ func TestDefaultCosts_ReleasesResolveToOwnRow(t *testing.T) {
 		{"anthropic", "anthropic.claude-opus-5-5", 4.00, 20.00, 0.20, 5.00},
 		{"anthropic", "us.anthropic.claude-opus-5-5", 4.00, 20.00, 0.20, 5.00},
 		{"anthropic", "claude-opus-5", 5.00, 25.00, 0.50, 6.25},
+		{"anthropic", "claude-sonnet-5-5", 2.00, 10.00, 0.10, 2.50},
+		{"anthropic", "claude-haiku-5-5", 0.10, 0.50, 0.01, 0.125},
 		{"anthropic", "claude-fable-5-1", 10.00, 50.00, 0.25, 12.50},
 		{"anthropic", "anthropic.claude-fable-5-1", 10.00, 50.00, 0.25, 12.50},
 		{"anthropic", "claude-mythos-5-1", 10.00, 50.00, 0.25, 12.50},
