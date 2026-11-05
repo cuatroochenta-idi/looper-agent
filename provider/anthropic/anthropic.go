@@ -36,6 +36,10 @@ type Provider struct {
 	maxTokens   int
 	temperature float64
 
+	// maxTokensSet records an explicit WithMaxTokens, which per-model
+	// defaults never override.
+	maxTokensSet bool
+
 	// providerID is the label stamped on every LLMResponse / StreamChunk.
 	// Defaults to "anthropic"; override with WithProviderID to distinguish
 	// e.g. a Bedrock-fronted Claude or an AWS-proxied endpoint from the
@@ -144,9 +148,13 @@ func WithCacheBreakpoints(breakpoints ...string) Option {
 	}
 }
 
-// WithMaxTokens sets the default max tokens.
+// WithMaxTokens sets the default max tokens. Without it, streaming requests
+// to Claude 5 models get 64000 and every other request gets 16384.
 func WithMaxTokens(n int) Option {
-	return func(p *Provider) { p.maxTokens = n }
+	return func(p *Provider) {
+		p.maxTokens = n
+		p.maxTokensSet = n > 0
+	}
 }
 
 // WithTemperature sets the default temperature.
@@ -467,11 +475,11 @@ func NewProvider(apiKey string, opts ...Option) *Provider {
 		// Anthropic REQUIRES max_tokens on every request — omitting it
 		// returns a 400 from the API — so we cannot default to 0 like
 		// the OpenAI provider does. 16384 is the historical Anthropic
-		// default and fits the standard 8k assistant turn plus a margin
-		// for tool-call arguments. Callers with large structured tool
-		// payloads (e.g. lanbu's generate_prd) should override via
-		// WithMaxTokens up to the model's actual ceiling — 64k for
-		// Claude Sonnet 4, 128k for Sonnet 4.5 with the beta header.
+		// default. Streaming requests to Claude 5 models get a larger
+		// one from the capability table (modelCaps.streamMaxTokens);
+		// non-streaming requests keep 16384 because the SDK refuses a
+		// non-streaming call whose max_tokens could run past ten minutes
+		// (about 21K tokens). WithMaxTokens overrides both.
 		maxTokens:   16384,
 		temperature: 1.0,
 	}
@@ -507,7 +515,7 @@ func (p *Provider) Model() string { return p.model }
 
 // newParams translates a request into the API's parameters, reconciled with
 // what the target model accepts.
-func (p *Provider) newParams(req provider.LLMRequest) anthropic.MessageNewParams {
+func (p *Provider) newParams(req provider.LLMRequest, streaming bool) anthropic.MessageNewParams {
 	model := p.model
 	if req.Model != "" {
 		model = req.Model
@@ -515,6 +523,8 @@ func (p *Provider) newParams(req provider.LLMRequest) anthropic.MessageNewParams
 	params := p.translator.build(model, req.SystemPrompt, req.Messages, req.Tools)
 	if req.MaxTokens > 0 {
 		params.MaxTokens = int64(req.MaxTokens)
+	} else if n := p.resolveCaps(model).streamMaxTokens; streaming && !p.maxTokensSet && n > 0 {
+		params.MaxTokens = int64(n)
 	}
 	if req.Temperature != 0 {
 		params.Temperature = anthropic.Float(req.Temperature)
@@ -551,11 +561,11 @@ func (p *Provider) retryWithoutRejectedThinking(err error, req provider.LLMReque
 
 // Chat sends a non-streaming request.
 func (p *Provider) Chat(ctx context.Context, req provider.LLMRequest) (*provider.LLMResponse, error) {
-	params := p.newParams(req)
+	params := p.newParams(req, false)
 
 	resp, err := p.client.Messages.New(ctx, params)
 	if p.retryWithoutRejectedThinking(err, req) {
-		params = p.newParams(req)
+		params = p.newParams(req, false)
 		resp, err = p.client.Messages.New(ctx, params)
 	}
 	if err != nil {
@@ -590,7 +600,7 @@ func extractThinking(msg *anthropic.Message) string {
 
 // ChatStream sends a streaming request.
 func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-chan provider.StreamChunk, error) {
-	params := p.newParams(req)
+	params := p.newParams(req, true)
 
 	includeReasoning := p.shouldIncludeReasoning(req.Reasoning)
 	// NewStreaming sends the request before returning, so a 400 is already
@@ -598,7 +608,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.LLMRequest) (<-c
 	stream := p.client.Messages.NewStreaming(ctx, params)
 	if p.retryWithoutRejectedThinking(stream.Err(), req) {
 		_ = stream.Close()
-		params = p.newParams(req)
+		params = p.newParams(req, true)
 		stream = p.client.Messages.NewStreaming(ctx, params)
 	}
 	ch := make(chan provider.StreamChunk, 64)

@@ -114,7 +114,7 @@ func TestToNative_SystemMessageWhereTheAPIRejectsTheRole(t *testing.T) {
 
 func TestNewParams_GatesSystemMessagesOnTheRequestModel(t *testing.T) {
 	p := NewProvider("test-key", WithModel("claude-sonnet-5"))
-	params := p.newParams(provider.LLMRequest{Model: "claude-haiku-5-5", SystemPrompt: "prompt", Messages: agentHistory()})
+	params := p.newParams(provider.LLMRequest{Model: "claude-haiku-5-5", SystemPrompt: "prompt", Messages: agentHistory()}, true)
 
 	if got := strings.Join(systemTexts(params), "|"); got != "prompt|memory summary" {
 		t.Errorf("top-level system = %q, want the request model's (mid-conversation) placement", got)

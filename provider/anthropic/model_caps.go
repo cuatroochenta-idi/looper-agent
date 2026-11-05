@@ -50,7 +50,17 @@ type modelCaps struct {
 	// Preview, Opus 5 / 5.5, Sonnet 5.5, Haiku 5.5 and Opus 4.8 — not
 	// Sonnet 5.
 	midConversationSystem bool
+
+	// streamMaxTokens is the max_tokens a streaming request gets when the
+	// caller set none. Zero keeps the provider default. Thinking counts
+	// against max_tokens, so the 16K default starves models that think by
+	// default and can write 128K.
+	streamMaxTokens int
 }
+
+// claude5StreamMaxTokens is the streaming max_tokens default for the Claude 5
+// family, half of its 128K output ceiling.
+const claude5StreamMaxTokens = 64000
 
 // capsTable maps a model-id prefix to its capabilities. Lookup takes the
 // LONGEST matching prefix, so "claude-opus-4-7" wins over "claude-opus-4"
@@ -59,17 +69,18 @@ type modelCaps struct {
 var capsTable = map[string]modelCaps{
 	// Thinking always on, no sampling params. The 5.1 releases also refuse
 	// forced tool use.
-	"claude-fable-5-1":  {thinking: thinkingAlwaysOn, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true},
-	"claude-mythos-5-1": {thinking: thinkingAlwaysOn, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true},
-	"claude-fable-5":    {thinking: thinkingAlwaysOn, sampling: false, effort: true, midConversationSystem: true},
+	"claude-fable-5-1":  {thinking: thinkingAlwaysOn, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true, streamMaxTokens: claude5StreamMaxTokens},
+	"claude-mythos-5-1": {thinking: thinkingAlwaysOn, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true, streamMaxTokens: claude5StreamMaxTokens},
+	"claude-fable-5":    {thinking: thinkingAlwaysOn, sampling: false, effort: true, midConversationSystem: true, streamMaxTokens: claude5StreamMaxTokens},
+	"claude-mythos-5":   {thinking: thinkingAlwaysOn, sampling: false, effort: true, midConversationSystem: true, streamMaxTokens: claude5StreamMaxTokens},
 	"claude-mythos":     {thinking: thinkingAlwaysOn, sampling: false, effort: true, midConversationSystem: true},
 
 	// Adaptive-only, no sampling params.
-	"claude-opus-5-5":   {thinking: thinkingAdaptive, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true},
-	"claude-opus-5":     {thinking: thinkingAdaptive, sampling: false, effort: true, midConversationSystem: true},
-	"claude-sonnet-5-5": {thinking: thinkingAdaptive, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true},
-	"claude-sonnet-5":   {thinking: thinkingAdaptive, sampling: false, effort: true},
-	"claude-haiku-5-5":  {thinking: thinkingAdaptive, sampling: false, effort: true, midConversationSystem: true},
+	"claude-opus-5-5":   {thinking: thinkingAdaptive, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true, streamMaxTokens: claude5StreamMaxTokens},
+	"claude-opus-5":     {thinking: thinkingAdaptive, sampling: false, effort: true, midConversationSystem: true, streamMaxTokens: claude5StreamMaxTokens},
+	"claude-sonnet-5-5": {thinking: thinkingAdaptive, sampling: false, effort: true, rejectsForcedTools: true, midConversationSystem: true, streamMaxTokens: claude5StreamMaxTokens},
+	"claude-sonnet-5":   {thinking: thinkingAdaptive, sampling: false, effort: true, streamMaxTokens: claude5StreamMaxTokens},
+	"claude-haiku-5-5":  {thinking: thinkingAdaptive, sampling: false, effort: true, midConversationSystem: true, streamMaxTokens: claude5StreamMaxTokens},
 	"claude-opus-4-8":   {thinking: thinkingAdaptive, sampling: false, effort: true, midConversationSystem: true},
 	"claude-opus-4-7":   {thinking: thinkingAdaptive, sampling: false, effort: true},
 
