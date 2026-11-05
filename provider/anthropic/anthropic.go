@@ -927,7 +927,7 @@ func (t *Translator) build(model, systemPrompt string, messages []message.Messag
 		case message.MessageAssistant:
 			antMessages = append(antMessages, anthropic.NewAssistantMessage(t.assistantBlocks(msg)...))
 		case message.MessageTool:
-			result := anthropic.NewToolResultBlock(msg.ToolID, msg.Content, false)
+			result := anthropic.NewToolResultBlock(msg.ToolID, msg.Content, msg.IsError)
 			// The results of one turn's calls go back in a single user
 			// message, as the API asks for parallel tool use.
 			if n := len(antMessages); n > 0 && onlyToolResults(antMessages[n-1]) {

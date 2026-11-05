@@ -164,3 +164,20 @@ func TestChatStream_CompleteToolCallIsNotTruncated(t *testing.T) {
 		t.Errorf("a no-argument call that ended normally must not be Truncated: %+v", final.ToolCalls)
 	}
 }
+
+func TestToNative_ToolResultCarriesIsError(t *testing.T) {
+	history := []message.Message{
+		message.NewUserMessage("go"),
+		message.NewAssistantMessage("", []message.ToolCall{
+			{ID: "a", Name: "read", Arguments: json.RawMessage(`{}`)},
+			{ID: "b", Name: "read", Arguments: json.RawMessage(`{}`)},
+		}),
+		message.NewToolResult("a", "read", "boom", true),
+		message.NewToolResult("b", "read", "ok", false),
+	}
+
+	content := assistantContent(t, NewProvider("test-key").Translator().ToNative("", history, nil), 2)
+	if len(content) != 2 || content[0]["is_error"] != true || content[1]["is_error"] != false {
+		t.Errorf("tool results = %v, want is_error true then false", content)
+	}
+}

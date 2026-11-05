@@ -57,6 +57,11 @@ type Message struct {
 	Metadata  map[string]any `json:"metadata,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
 
+	// IsError marks a tool result that reports a failure rather than an
+	// output, so providers with an error flag (Anthropic's is_error) can
+	// tell the model the call failed.
+	IsError bool `json:"is_error,omitempty"`
+
 	// Reasoning is the human-readable thinking text the model emitted
 	// before this assistant turn. Open-weights models reached through an
 	// OpenAI-compatible endpoint keep no server-side thinking state, so
@@ -168,6 +173,7 @@ func NewToolResult(callID, name, content string, isError bool) Message {
 	m := NewMessage(MessageTool, content)
 	m.ToolID = callID
 	m.Name = name
+	m.IsError = isError
 	return m
 }
 

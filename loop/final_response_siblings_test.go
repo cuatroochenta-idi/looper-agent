@@ -122,7 +122,10 @@ func (f *siblingCloseFixture) assertHistory(t *testing.T, history *message.Histo
 		t.Errorf("ask_user_form result = %+v, want the tool's output", formResult)
 	}
 	if closeResult == nil || !strings.Contains(closeResult.Content, "Not closed") {
-		t.Errorf("final_response result = %+v, want the refusal", closeResult)
+		t.Fatalf("final_response result = %+v, want the refusal", closeResult)
+	}
+	if !closeResult.IsError {
+		t.Error("the refusal must be an error result")
 	}
 }
 

@@ -2,6 +2,7 @@ package message
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -329,5 +330,24 @@ func TestMessageMetadata(t *testing.T) {
 
 	if restored.Metadata["user_id"] != "abc123" {
 		t.Error("metadata not preserved")
+	}
+}
+
+func TestNewToolResultKeepsTheErrorFlag(t *testing.T) {
+	failed := NewToolResult("c1", "read", "boom", true)
+	if !failed.IsError {
+		t.Error("IsError = false, want true")
+	}
+	raw, err := json.Marshal(failed)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"is_error":true`) {
+		t.Errorf("serialized error result lacks is_error: %s", raw)
+	}
+
+	raw, _ = json.Marshal(NewToolResult("c1", "read", "ok", false))
+	if strings.Contains(string(raw), "is_error") {
+		t.Errorf("a successful result serialized is_error: %s", raw)
 	}
 }
