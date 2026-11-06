@@ -4,6 +4,37 @@ All notable changes to Looper Agent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org).
 
+## [v1.10.2] — 2026-11-06
+
+### Fixed
+
+- **A tool call cut off by `max_tokens` is answered with an error instead of
+  running with `{}`.** The Anthropic provider marks it `Truncated` and the
+  loop tells the model the call was cut and should be split.
+- **`final_response` no longer swallows sibling tool calls.** When the model
+  closes and calls other tools in the same response, those tools run, the
+  close is refused with "read their results, then close", and the loop goes
+  on without spending a retry.
+- **Anthropic: thinking blocks are passed back unchanged** (with their
+  signature, including empty `display: "omitted"` blocks), as the API
+  requires inside a tool-use turn. If an enforced account rejects them after
+  the tool set or prefix changed, the provider retries once without them.
+- **Anthropic: mid-run system messages stay in place** as mid-conversation
+  `system` messages on models that accept them, instead of rewriting the
+  top-level system prompt.
+- **Anthropic: `is_error` is sent on failed tool results.**
+- **Anthropic: non-streaming requests cap `max_tokens` at 16384**, so the
+  fallback after a failed stream is not refused by the SDK.
+
+### Added
+
+- **Anthropic: `CacheMessages` breakpoint option** — a moving cache
+  breakpoint on the last message (plus a lookback marker when needed), so
+  the conversation history is read from cache. Prefix order is tools →
+  system → messages.
+- **Anthropic: streaming requests to Claude 5 models default to
+  `max_tokens` 64000** when the caller did not set one.
+
 ## [v1.10.1] — 2026-11-05
 
 ### Fixed
