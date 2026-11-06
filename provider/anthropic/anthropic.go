@@ -526,6 +526,9 @@ func (p *Provider) newParams(req provider.LLMRequest, streaming bool) anthropic.
 	} else if n := p.resolveCaps(model).streamMaxTokens; streaming && !p.maxTokensSet && n > 0 {
 		params.MaxTokens = int64(n)
 	}
+	if !streaming && params.MaxTokens > nonStreamingMaxTokens {
+		params.MaxTokens = nonStreamingMaxTokens
+	}
 	if req.Temperature != 0 {
 		params.Temperature = anthropic.Float(req.Temperature)
 	}
@@ -728,6 +731,10 @@ func (p *Provider) Translator() provider.Translator { return p.translator }
 
 // emptyToolInput is the input of a tool call that takes no arguments.
 const emptyToolInput = "{}"
+
+// nonStreamingMaxTokens is the largest max_tokens the SDK accepts on a
+// non-streaming request without refusing it as one that may exceed ten minutes.
+const nonStreamingMaxTokens = 16384
 
 // toolInput returns the call's arguments, or an empty object when they are
 // missing or not valid JSON. Anthropic streams no input_json_delta for a tool

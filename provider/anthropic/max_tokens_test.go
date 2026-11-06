@@ -92,3 +92,19 @@ func TestMaxTokens_DefaultsByModel(t *testing.T) {
 		})
 	}
 }
+
+func TestNonStreamingRequestCapsALargeMaxTokens(t *testing.T) {
+	model := "claude-haiku-5-5"
+
+	if got := sentMaxTokens(t, false, provider.LLMRequest{Model: model}, WithMaxTokens(64000)); got != nonStreamingMaxTokens {
+		t.Errorf("non-streaming max_tokens = %d, want %d: the SDK refuses a non-streaming call that could run past ten minutes", got, nonStreamingMaxTokens)
+	}
+
+	if got := sentMaxTokens(t, true, provider.LLMRequest{Model: model}, WithMaxTokens(64000)); got != 64000 {
+		t.Errorf("streaming max_tokens = %d, want 64000", got)
+	}
+
+	if got := sentMaxTokens(t, false, provider.LLMRequest{Model: model, MaxTokens: 8000}, WithMaxTokens(64000)); got != 8000 {
+		t.Errorf("non-streaming max_tokens = %d, want the smaller explicit 8000", got)
+	}
+}
